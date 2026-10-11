@@ -31,7 +31,7 @@ import {
   type CacheEntry,
 } from "./cache.ts";
 import {
-  loadConfig,
+  loadConfigForReload,
   loadRules,
   configHasNoPools,
   DEFAULT_CLASSIFIER_CRITERIA,
@@ -626,7 +626,8 @@ export default function bifrostExtension(pi: ExtensionAPI) {
   const extensionDir = fileURLToPath(new URL(".", import.meta.url));
 
   // Setup debug logging first — so startup errors are captured.
-  const bootConfig = loadConfig(process.cwd(), extensionDir);
+  const bootLoad = loadConfigForReload(process.cwd(), extensionDir);
+  const bootConfig = bootLoad.config;
   setupDebug(bootConfig.debug ?? { enabled: false }, process.cwd());
   if (bootConfig.debug?.enabled) {
     debugLifecycle("bifrost", "startup", undefined, undefined, {
@@ -643,7 +644,10 @@ export default function bifrostExtension(pi: ExtensionAPI) {
 
   // Validate config on startup. Errors are logged; the extension
   // continues with best-effort routing for warnings.
-  const configIssues = validateConfig(config);
+  const configIssues = [
+    ...validateConfig(config),
+    ...bootLoad.diagnostics.map(({ message }) => ({ severity: "error" as const, code: "config.source_invalid", message })),
+  ];
   if (config.classifier?.backend === CLASSIFIER_BACKEND_IDS.typesafe && resolveTypeSafeApiKey().source === "missing") {
     console.warn(`[bifrost/config] warning: TypeSafe classifier unavailable; configure typesafe in ~/.pi/agent/auth.json or set ${TYPE_SAFE_API_KEY_ENV}`);
   }
@@ -928,7 +932,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     : { snapshot: emptyEconomicSnapshot(), diagnostics: [], policy: undefined, historyPolicy: undefined, quarantinedSourceRevisions: new Map() };
   const state: BifrostState = {
     config,
-    tierPolicyValid: validateTierPolicyConfig(config).every((issue) => issue.severity !== "error"),
+    tierPolicyValid: bootLoad.diagnostics.length === 0 && validateTierPolicyConfig(config).every((issue) => issue.severity !== "error"),
     affinityConfigValid: validateConfig(config).every((issue) => issue.severity !== "error" || !issue.code?.startsWith("config.affinity_")),
     reliabilityV2ConfigValid: validateConfig(config).every((issue) => !issue.code?.startsWith("config.reliability_")),
     reliabilityV2Store: config.reliability?.stateVersion === 2 && config.reliability.enabled !== false
@@ -1169,6 +1173,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     const userFiles = hasUserBootstrapFiles(process.cwd(), getAgentDir(), CONFIG_DIR_NAME, join(extensionDir, "bifrost.json"));
     const runtimePreferencesChanged = hasBlockingRuntimePreferences(runtimeStateFile);
     return state.enabled && !state.pinned
+      && state.tierPolicyValid !== false
       && !validateConfig(state.config).some((issue) => issue.severity === "error")
       && canBootstrapModels({
         ...userFiles,
@@ -1478,7 +1483,9 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           log(ctx, "No catalog models passed the background health check; starter config was not saved. Check provider access, then run /bifrost init when ready.", "warning");
           return;
         }
-        const defaultTier = verifiedModels[pools.default]?.length ? pools.default : Object.keys(verifiedModels)[0];
+        const defaultTier = verifiedModels[pools.default]?.length
+          ? pools.default
+          : Object.keys(verifiedModels).find((tier) => verifiedModels[tier]?.length)!;
         const verifiedConfig: BifrostConfig = { ...nextConfig, default: defaultTier, models: verifiedModels };
         const autoClassifier = classifierModel && !verified.has(modelKey(classifierModel))
           && config.classifier?.model === undefined;

@@ -13,6 +13,7 @@ import { createProviderCooldownStore } from "../runtime-reliability-v2.ts";
 import { emptyReliabilityV2State } from "../reliability-v2.ts";
 import { buildInitOwnershipReceipt } from "../reconciliation-command.ts";
 import { REGISTRY_REFRESH_TTL_MS } from "../ux-status.ts";
+import { loadConfigForReload } from "../config.ts";
 
 function writeRecentProbeCache(path: string, results: unknown): void {
   writeFileSync(path, JSON.stringify(results));
@@ -424,6 +425,94 @@ describe("bifrost command ui", () => {
       assert.equal(calls.some((call) => call.kind === "select"), false);
       const saved = JSON.parse(readFileSync(join(tempDir, ".pi", "bifrost.json"), "utf8"));
       assert.equal(saved.classifier.backend, undefined);
+      assert.equal(saved.classifier.model, "fixture/chat", "fresh init persists only a detected model backed by a recent healthy probe");
+    } finally {
+      process.chdir(previousCwd);
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not pin extension-owned classifier or nondefault public settings", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "bifrost-init-extension-ownership-"));
+    const previousCwd = process.cwd();
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    const extensionDir = join(tempDir, "extension");
+    mkdirSync(extensionDir);
+    process.env.PI_CODING_AGENT_DIR = join(tempDir, "agent");
+    mkdirSync(process.env.PI_CODING_AGENT_DIR);
+    process.chdir(tempDir);
+    try {
+      mkdirSync(join(tempDir, ".pi"));
+      writeFileSync(join(extensionDir, "bifrost.json"), JSON.stringify({
+        classifier: { enabled: true, backend: "prompt", endpoint: "https://extension-private.invalid", systemPrompt: "EXTENSION_PRIVATE_CANARY" },
+        cache: { enabled: false, maxEntries: 17, threshold: 0.1 },
+        reliability: { enabled: true, failureThreshold: 19 },
+        debug: { enabled: true },
+      }));
+      writeRecentProbeCache(join(tempDir, ".pi", "bifrost-probe.json"), [
+        { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
+      ]);
+      const { ctx } = makeCtx([{ provider: "fixture", id: "chat" }]);
+      const state = makeState();
+      state.extensionDir = extensionDir;
+      await createCommandRouter(state as never)("init --write", ctx as never);
+      const saved = JSON.parse(readFileSync(join(tempDir, ".pi", "bifrost.json"), "utf8"));
+      for (const key of ["classifier", "cache", "reliability", "debug"]) {
+        assert.equal(Object.hasOwn(saved, key), false, `init pinned extension-owned ${key}`);
+      }
+      const effective = loadConfigForReload(tempDir, extensionDir).config;
+      assert.equal(effective.classifier?.systemPrompt, "EXTENSION_PRIVATE_CANARY");
+      assert.equal(effective.classifier?.endpoint, "https://extension-private.invalid");
+      assert.equal(effective.cache?.enabled, false);
+      assert.equal(effective.cache?.maxEntries, 17);
+      assert.equal(effective.reliability?.failureThreshold, 19);
+      assert.equal(effective.debug?.enabled, true);
+    } finally {
+      process.chdir(previousCwd);
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not pin custom extension settings on forced fresh init", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "bifrost-init-extension-force-"));
+    const previousCwd = process.cwd();
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    const extensionDir = join(tempDir, "extension");
+    mkdirSync(extensionDir);
+    process.env.PI_CODING_AGENT_DIR = join(tempDir, "agent");
+    mkdirSync(process.env.PI_CODING_AGENT_DIR);
+    process.chdir(tempDir);
+    try {
+      mkdirSync(join(tempDir, ".pi"));
+      writeFileSync(join(extensionDir, "bifrost.json"), JSON.stringify({
+        classifier: { enabled: true, backend: "prompt", endpoint: "https://extension-private.invalid", systemPrompt: "EXTENSION_PRIVATE_CANARY" },
+        cache: { enabled: false, maxEntries: 17, threshold: 0.1 },
+        reliability: { enabled: true, failureThreshold: 19 },
+        debug: { enabled: true },
+      }));
+      const model = makeModel("fixture", "chat");
+      const { ctx } = makeCtx([model as never]);
+      const modelRegistry = (ctx as any).modelRegistry;
+      modelRegistry.streamSimple = () => ({ result: async () => ({
+        role: "assistant", content: [{ type: "text", text: "ok" }], usage: { totalTokens: 1 }, stopReason: "stop",
+      }) });
+      const state = makeState() as any;
+      state.extensionDir = extensionDir;
+      state.reliabilityStore = { ...state.reliabilityStore, applyOutcomes: () => {} };
+      await createCommandRouter(state)("init -f --write", ctx);
+      const saved = JSON.parse(readFileSync(join(tempDir, ".pi", "bifrost.json"), "utf8"));
+      for (const key of ["classifier", "cache", "reliability", "debug"]) {
+        assert.equal(Object.hasOwn(saved, key), false, `forced init pinned extension-owned ${key}`);
+      }
+      const effective = loadConfigForReload(tempDir, extensionDir).config;
+      assert.equal(effective.classifier?.systemPrompt, "EXTENSION_PRIVATE_CANARY");
+      assert.equal(effective.cache?.enabled, false);
+      assert.equal(effective.reliability?.failureThreshold, 19);
+      assert.equal(effective.debug?.enabled, true);
     } finally {
       process.chdir(previousCwd);
       if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -604,7 +693,7 @@ describe("bifrost command ui", () => {
     }
   });
 
-  it("preserves explicit classifier backend, disabled state, model, and criteria during normal init", async () => {
+  it("keeps inherited classifier settings out of a new project config", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "bifrost-init-classifier-preserve-"));
     const previousCwd = process.cwd();
     const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -630,11 +719,11 @@ describe("bifrost command ui", () => {
       await createCommandRouter(state as never)("init", ctx as never);
       assert.equal(confirmCalls, 1);
       const saved = JSON.parse(readFileSync(join(tempDir, ".pi", "bifrost.json"), "utf8"));
-      assert.equal(saved.classifier.backend, "typesafe");
-      assert.equal(saved.classifier.enabled, false);
-      assert.equal(saved.classifier.model, "fixture/custom-fallback");
-      assert.deepEqual(saved.classifier.criteria, { general: "Keep this user criterion." });
-      assert.equal(saved.classifier.typesafe.model, "jev-1.13.0");
+      assert.equal(saved.classifier.enabled, true);
+      assert.equal(saved.classifier.backend, undefined);
+      assert.equal(saved.classifier.model, undefined);
+      assert.equal(saved.classifier.criteria, undefined);
+      assert.equal(saved.classifier.typesafe, undefined);
       assert.equal(calls.some((call) => call.kind === "select"), false);
       assert.equal(calls.some((call) => call.kind === "notify" && String(call.value).includes("No working models found for classifier")), false);
       assert(calls.some((call) => call.kind === "widget" && call.lines?.some((line) => line.includes("classifier: off"))));
@@ -1337,7 +1426,7 @@ describe("preview failure report", () => {
 });
 
 describe("preview command hint", () => {
-  it("advertises the --json flag in the dashboard menu row", async () => {
+  it("advertises preview flags in the dashboard menu row", async () => {
     const { ctx, calls } = makeCtx();
     const dispatch = createCommandRouter(makeState() as never);
 
@@ -1346,7 +1435,7 @@ describe("preview command hint", () => {
     const select = calls.find((call) => call.kind === "select");
     const rows = select?.options ?? [];
     assert(
-      rows.includes("/bifrost preview [--trace] [--json] <prompt> — Preview routing for a prompt"),
+      rows.includes("/bifrost preview [--offline] [--trace] [--json] <prompt> — Preview routing for a prompt"),
       `preview menu row must advertise --json, got:\n${rows.join("\n")}`,
     );
   });
@@ -1685,9 +1774,68 @@ describe("preview json flag", () => {
       prompt: "--trace explain", json: false, trace: true,
     });
   });
+
+  it("accepts offline with the other leading flags and leaves unknown flags as prompt text", () => {
+    assert.deepEqual(parsePreviewArgs("preview --offline --trace --json fix the bug", "preview"), {
+      prompt: "fix the bug", json: true, trace: true, offline: true,
+    });
+    assert.deepEqual(parsePreviewArgs("preview --json --offline fix it", "preview"), {
+      prompt: "fix it", json: true, offline: true,
+    });
+    assert.deepEqual(parsePreviewArgs("preview --unknown keep this", "preview"), {
+      prompt: "--unknown keep this", json: false,
+    });
+    assert.deepEqual(parsePreviewArgs("preview --offline --offline keep this", "preview"), {
+      prompt: "--offline keep this", json: false, offline: true,
+    });
+  });
 });
 
 describe("preview route trace", () => {
+  it("blocks preview and emits a content-free config error for every invalid policy flag", async () => {
+    for (const key of ["tierPolicyValid", "economicPolicyValid", "reliabilityV2ConfigValid", "affinityConfigValid"] as const) {
+      const { ctx, calls } = makeCtx();
+      const state = makeState() as any;
+      state[key] = false;
+      let classifyCalls = 0;
+      state.getPipeline = () => ({ classify: async () => {
+        classifyCalls++;
+        return { kind: "fallback" as const, tier: "general" };
+      } });
+      const dispatch = createCommandRouter(state);
+      const [trace] = await captureJsonReports(async () => {
+        await dispatch("preview --trace --json PRIVATE_PROMPT_CANARY", ctx as never);
+      }) as Array<Record<string, any>>;
+
+      assert.equal(classifyCalls, 0, `${key} must block preview classification`);
+      assert.equal(trace.outcome, "config_invalid");
+      assert.equal(trace.error, "config_invalid");
+      assert.deepEqual(trace.classification, { source: "unclassified" });
+      assert.deepEqual(trace.classifierDisclosure, { enabled: false, configuredClassifierMayReceivePrompt: false });
+      assert.equal(JSON.stringify(trace).includes("PRIVATE_PROMPT_CANARY"), false);
+      assert(calls.some((call) => String(call.value).includes("configuration source is invalid")));
+    }
+  });
+
+  it("marks offline traces as unable to send the prompt to a classifier", async () => {
+    const { ctx } = makeCtx();
+    const state = makeState();
+    let options: unknown;
+    state.getPipeline = () => ({
+      classify: async (_prompt: string, _signal?: AbortSignal, classificationOptions?: unknown) => {
+        options = classificationOptions;
+        return { kind: "fallback" as const, tier: "general" };
+      },
+    }) as never;
+    const dispatch = createCommandRouter(state as never);
+    const [trace] = await captureJsonReports(async () => {
+      await dispatch("preview --offline --trace --json private prompt words", ctx as never);
+    }) as Array<Record<string, unknown>>;
+
+    assert.deepEqual(options, { offline: true });
+    assert.deepEqual(trace.classifierDisclosure, { enabled: false, configuredClassifierMayReceivePrompt: false });
+  });
+
   it("emits versioned content-free JSON and discloses classifier access", async () => {
     const model = makeModel("openai", "gpt-5.4");
     const { ctx } = makeCtx([model]);
@@ -2141,6 +2289,8 @@ describe("route dispatch", () => {
     const state = makeState();
     const lastGoodConfig = state.config;
     await inTempDir(async () => {
+      mkdirSync("extension");
+      state.extensionDir = join(process.cwd(), "extension");
       writeFileSync("bifrost.json", JSON.stringify({
         schemaVersion: 2,
         default: "general",
@@ -2158,7 +2308,8 @@ describe("route dispatch", () => {
     const rejection = calls.find((call) => String(call.value).includes("reload rejected"));
     assert.ok(rejection);
     const message = String(rejection.value);
-    assert.equal(message.split("The configured economic policy is invalid or unsupported.").length - 1, 1);
+    assert.equal(message.split("workspace config economics contains an invalid source-local policy.").length - 1, 1, message);
+    assert.doesNotMatch(message, /extension config economics/u);
   });
 
   it("rejects an invalid classifier total budget reload without exposing its raw value", async () => {
@@ -2470,7 +2621,7 @@ describe("dashboard menu", () => {
   it("keeps the prompt commands together in the common block", async () => {
     const rows = await rowsFor();
     assert.deepEqual(rows.slice(4, 11), [
-      "/bifrost preview [--trace] [--json] <prompt> — Preview routing for a prompt",
+      "/bifrost preview [--offline] [--trace] [--json] <prompt> — Preview routing for a prompt",
       "/bifrost benchmark <prompt> — Classify a benchmark prompt",
       "/bifrost providers — List available providers",
       "/bifrost probe — Probe working models",
@@ -2504,7 +2655,7 @@ describe("dashboard menu", () => {
     const state = makeState();
     await createCommandRouter(state as never)("", ctx as never);
     const rows = rowsOf(calls);
-    assert.ok(rows.some((row) => row.includes("/bifrost preview [--trace] [--json] <prompt>")));
+    assert.ok(rows.some((row) => row.includes("/bifrost preview [--offline] [--trace] [--json] <prompt>")));
   });
 
   it("cannot go stale when a command is renamed in the registry", async () => {

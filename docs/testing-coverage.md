@@ -10,7 +10,7 @@ When a user reports a failure, keep their error shape and sequence in a regressi
 
 Some contracts need a different boundary. The resolve-only API uses an installed-package consumer test. File-system faults, lease races, and exact deadline boundaries use deterministic lower-level tests as well as the Pi happy and failure paths. State this distinction in review. Do not call these tests Pi E2E.
 
-Before review, run `npm run verify:release` on a frozen candidate. Attach its result manifest to the reviewed revision. If source changes during the run, repeat the affected checks on the final candidate. The reviewer checks this map against the changed behavior and checks that assertions can fail for the reported regression.
+Before review, run `npm run verify:release` on a frozen candidate. Attach its result manifest to the reviewed revision. If source changes during the run, rerun the complete command on the final frozen candidate. Partial reruns do not replace a failed manifest. The reviewer checks this map against the changed behavior and checks that assertions can fail for the reported regression.
 
 ## Release feature map
 
@@ -24,9 +24,9 @@ The requirement IDs come from [the PRD](../PRD.md). These rows name test boundar
 | R04: chat-model pools | [Fresh catalog setup and background probe completion](../tests/integration/auto-virtual.test.mjs); [init probe regressions](../tests/integration/init-regression.test.mjs) | Pinned Pi catalog contract and model-type tests; all-failed background warning and no-write checks; image routing is deferred |
 | R05: strict fallback | [Physical no-route](../tests/integration/legacy-behavior.test.mjs); [Auto boundary and reserve rejection](../tests/integration/auto-virtual.test.mjs) | Ordered fallback and requirement propagation tests |
 | R06: stop before unsafe generation | Physical and Auto no-route cases above | Activation, cancellation and late-result tests |
-| R07: offline inspection and validation | [Command acceptance](../tests/integration/command-policy-acceptance.test.mjs) | Config diagnostics and inspection projections |
+| R07: offline inspection and validation | [Command acceptance](../tests/integration/command-policy-acceptance.test.mjs); [offline preview and invalid-source rejection](../tests/integration/preview-offline-acceptance.test.mjs) | Config diagnostics and inspection projections |
 | R08: durable model and provider pauses | [V2 leases and recovery](../tests/integration/reliability-v2-auto.test.mjs); [physical 402 and restart](../tests/integration/release-acceptance.test.mjs); [scope reload](../tests/integration/command-policy-acceptance.test.mjs) | Lease ownership, half-open recovery and both scope-reload directions |
-| R09: safe reload and storage | [Invalid physical reload](../tests/integration/legacy-behavior.test.mjs); [reload UI](../scripts/ui-smoke.py) | Atomic storage, compare-and-swap, journal and invalid-config tests |
+| R09: safe reload and storage | [Invalid physical reload](../tests/integration/legacy-behavior.test.mjs); [startup source validation and repair](../tests/integration/config-startup-acceptance.test.mjs); [reload UI](../scripts/ui-smoke.py) | Atomic storage, compare-and-swap, journal and invalid-config tests |
 | R10: declared economic policy | [Reserve rejection](../tests/integration/auto-virtual.test.mjs); [billing preference dispatch](../tests/integration/command-policy-acceptance.test.mjs) | Signal units, freshness, conflicts and unknown-value tests; live quota fetching is deferred |
 | R11: retention within a tier | [Native-turn retention and prefix selection](../tests/integration/reliability-v2-auto.test.mjs) | Branch-local ownership and affinity tests |
 | R12: bounded classification and visible fallback | [Timeout notice followed by generation](../tests/integration/command-policy-acceptance.test.mjs) | Shared budget, pending callbacks, abort and notice-deduplication tests |
@@ -45,6 +45,10 @@ The exact OpenCode Go subscription error, one alternate attempt, disabled retry,
 Classifier-timeout fallback, offline commands, billing preference, reviewed reconciliation, probes that outlast catalog freshness, and provider-to-model allowance-scope reload live in [command acceptance](../tests/integration/command-policy-acceptance.test.mjs). Precise callback cancellation and both allowance-scope reload directions are also tested through registered host handlers.
 
 The first-use background scenarios check that the first response returns before probes finish, that saving does not interrupt active generation, and that the next input uses verified pools. They also check all-failed warnings without configuration writes, provider pauses, and concurrent configuration edits. The earlier one-shot scenario cancels its background probe at process exit and does not prove persistence. Final release evidence must come from the frozen-candidate verification manifest.
+
+The audit repair adds finite branch checks. Source tests cover every on-disk layer and every prospective edit target, unsupported versions, intrinsic policy errors, legitimate partial overrides, last-good reload, bounded reads and deep graphs. Init tests cover normal and forced runs across fresh, existing-empty and unchanged-owned targets. They check exact source bytes, inherited private settings, later edits and fresh classifier use. The background restart case checks that a surviving model makes the saved default usable. Offline tests use an enabled classifier and an unmatched prompt; a direct-rule-only case cannot prove offline classification.
+
+Provider projection tests require one state snapshot per nonempty decision and zero for an empty catalog. They check pause semantics, cross-revision consistency and failed reads. The performance script compares the actual pinned baseline export with the current export across memory and durable-file fixtures; each case checks identical projected state. Latency measurements are evidence, not timing assertions in unit tests.
 
 ## Limits
 

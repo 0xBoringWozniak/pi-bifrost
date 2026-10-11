@@ -408,6 +408,40 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     }
   });
 
+  it("saves a nonempty verified default and routes from it after restart", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-default-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-default-work-"));
+    const configPath = join(work, ".pi", "bifrost.json");
+    try {
+      writePiModels({ home, port: server.port, models: [
+        { id: "fail", reasoning: false, cost: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0 } },
+        { id: "healthy", reasoning: false, cost: { input: 20, output: 20, cacheRead: 0, cacheWrite: 0 } },
+      ] });
+      const before = await fakeStats(server.port);
+      const rpc = startRpc({ home, work });
+      try {
+        await rpc.userTurn("frontier say ready");
+        await waitForFile(configPath, 10_000, rpc.stderr);
+      } finally { await rpc.close(); }
+
+      const saved = JSON.parse(readFileSync(configPath, "utf8"));
+      assert.equal(saved.default, "frontier", `default must select a verified nonempty tier: ${JSON.stringify(saved)}`);
+      assert.deepEqual(saved.models.frontier, ["fake/healthy"]);
+
+      const beforeRestart = await fakeStats(server.port);
+      const restarted = await runAuto({ home, work, messages: ["say ready"] });
+      const afterRestart = await fakeStats(server.port);
+      assert.equal(restarted.code, 0, restarted.stderr);
+      assert.equal(afterRestart.stats.slice(beforeRestart.stats.length).filter((item) => item.kind === "generation").length, 1,
+        `a normal Auto prompt after restart should use the verified default; initial stats ${JSON.stringify(before.stats)}`);
+      assert.match(restarted.stderr, /Bifrost auto: frontier → fake\/healthy/u);
+      assertNoNetworkViolations(home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
   it("keeps all-failed probe candidates out of config and does not retry on every prompt", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-all-failed-home-"));
     const work = mkdtempSync(join(tmpdir(), "bifrost-all-failed-work-"));

@@ -20,6 +20,45 @@ function deps(overrides: Partial<PipelineDeps> = {}): PipelineDeps {
 }
 
 describe("classification-pipeline", () => {
+  it("keeps offline classification on the shared cache and local rule path", async () => {
+    let directCalls = 0;
+    let promptCalls = 0;
+    let cacheCalls = 0;
+    const pipeline = createPipeline(deps({
+      cacheLookup: () => { cacheCalls++; return undefined; },
+      classifyDirect: async () => { directCalls++; return { tier: "frontier", backend: "typesafe" }; },
+      classifierModels: [makeClassifierModel("a", "one")],
+      classifyWithLLM: async () => { promptCalls++; return "frontier"; },
+      regexRules: [{ pattern: "local match", model: "economical" }],
+      defaultTier: "frontier",
+    }));
+
+    assert.deepEqual(await pipeline.classify("local match", undefined, { offline: true }), {
+      kind: "classified", tier: "economical", source: "regex",
+    });
+    assert.deepEqual(await pipeline.classify("unmatched", undefined, { offline: true }), {
+      kind: "fallback", tier: "frontier",
+    });
+    assert.deepEqual({ directCalls, promptCalls, cacheCalls }, { directCalls: 0, promptCalls: 0, cacheCalls: 2 });
+  });
+
+  it("returns an offline cache hit before any classifier backend", async () => {
+    let directCalls = 0;
+    let promptCalls = 0;
+    let cacheCalls = 0;
+    const pipeline = createPipeline(deps({
+      cacheLookup: () => { cacheCalls++; return "frontier"; },
+      classifyDirect: async () => { directCalls++; return { tier: "economical", backend: "typesafe" }; },
+      classifierModels: [makeClassifierModel("a", "one")],
+      classifyWithLLM: async () => { promptCalls++; return "economical"; },
+    }));
+
+    assert.deepEqual(await pipeline.classify("cached prompt", undefined, { offline: true }), {
+      kind: "classified", tier: "frontier", source: "cache",
+    });
+    assert.deepEqual({ cacheCalls, directCalls, promptCalls }, { cacheCalls: 1, directCalls: 0, promptCalls: 0 });
+  });
+
   it("disables external classification for an invalid total budget but keeps local fallback available", async () => {
     let directCalls = 0;
     let promptCalls = 0;

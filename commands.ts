@@ -5,7 +5,7 @@ import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, open
 import { dirname, join } from "node:path";
 import { loadRuntimeState, runtimeStatePath } from "./runtime-state.ts";
 import type { BifrostConfig, ClassifierConfig } from "./config.ts";
-import { DEFAULT_CLASSIFIER_CRITERIA, DEFAULT_RULES, PROMPT_ONLY_FIELDS, classifierTotalTimeoutIssue, loadConfigForReload, loadConfigWithSourceOverride, validateConfig, validateEconomicConfig, validateTierPolicyConfig } from "./config.ts";
+import { BUNDLED_PUBLIC_INIT_DEFAULTS, DEFAULT_CLASSIFIER_CRITERIA, DEFAULT_RULES, MAX_CONFIG_SOURCE_BYTES, PROMPT_ONLY_FIELDS, classifierTotalTimeoutIssue, loadConfigForReload, loadConfigWithSourceOverride, validateConfig, validateEconomicConfig, validateTierPolicyConfig } from "./config.ts";
 import type { CacheEntry } from "./cache.ts";
 import { cachePath, loadCache, saveCache, DEFAULT_MAX_ENTRIES, DEFAULT_THRESHOLD } from "./cache.ts";
 import { buildRouteDecisionSummary, type ClassificationPipeline, type ClassificationResult, type ClassificationSource, type RouteDecisionSummary } from "./classification-pipeline.ts";
@@ -456,7 +456,6 @@ export function buildInitProposal(
 // ── Command handlers ────────────────────────────────────────
 
 const isForced = (args:string):boolean => args?.split(/\s+/).includes("-f");
-const MAX_RECONCILIATION_CONFIG_BYTES = 10_000_000;
 const MAX_RECONCILIATION_OWNERSHIP_BYTES = 5_000_000;
 
 function reconciliationPaths(source: ReconciliationConfigSource): { configPath: string; ownershipPath: string; journalPath: string } {
@@ -481,7 +480,7 @@ function readReconciliationSource(source: ReconciliationConfigSource): Reconcili
   const paths = reconciliationPaths(source);
   const configBytes = readBoundedRegularSnapshot(paths.configPath) ?? null;
   const ownershipBytes = readBoundedRegularSnapshot(paths.ownershipPath) ?? null;
-  if (configBytes && configBytes.byteLength > MAX_RECONCILIATION_CONFIG_BYTES
+  if (configBytes && configBytes.byteLength > MAX_CONFIG_SOURCE_BYTES
     || ownershipBytes && ownershipBytes.byteLength > MAX_RECONCILIATION_OWNERSHIP_BYTES) {
     throw new Error("source exceeds reconciliation bounds");
   }
@@ -904,6 +903,38 @@ async function handleInit(
     }
   }
 
+  let source: ReconciliationSourceSnapshot;
+  try { source = selectInitSource(); }
+  catch {
+    log(ctx, "Init could not safely snapshot the current config; no files were changed.", "error");
+    return;
+  }
+  let sourceConfig: Record<string, unknown> = {};
+  if (source.configBytes !== null) {
+    try {
+      const parsed: unknown = JSON.parse(Buffer.from(source.configBytes).toString("utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid config root");
+      sourceConfig = parsed as Record<string, unknown>;
+    } catch {
+      log(ctx, "Init could not safely read the selected config; no files were changed.", "error");
+      return;
+    }
+  }
+  const sourceClassifier = sourceConfig.classifier && typeof sourceConfig.classifier === "object" && !Array.isArray(sourceConfig.classifier)
+    ? sourceConfig.classifier as Record<string, unknown>
+    : {};
+  const configLayers = loadConfigForReload(process.cwd(), state.extensionDir);
+  const publicDefaults = BUNDLED_PUBLIC_INIT_DEFAULTS as unknown as Record<string, unknown>;
+  const layerOrder = ["extension", "global", "workspace", "project"] as const;
+  const targetLayer = source.source === "project" ? "project" : source.source === "workspace" ? "workspace" : "global";
+  const targetLayerIndex = layerOrder.indexOf(targetLayer);
+  const inheritedFields = new Set(configLayers.sourceFields
+    .filter(({ layer }) => layer !== "extension" && layerOrder.indexOf(layer) < targetLayerIndex)
+    .flatMap(({ fields }) => fields));
+  const extensionFields = configLayers.sourceFields.find(({ layer }) => layer === "extension")?.fields ?? [];
+  for (const key of extensionFields) {
+    if (key !== "models" && !configLayers.publicDefaultFields.includes(key)) inheritedFields.add(key);
+  }
   const detectedClassifier = state.effectiveClassifierBackend(initConfig, ctx);
   const classifierEnabled = state.classifierEnabled && initConfig.classifier?.enabled !== false;
   const needsDetectedPromptModel = classifierEnabled
@@ -945,50 +976,38 @@ async function handleInit(
 
   const proposal = buildInitProposal(
     models,
-    classifierModel,
+    inheritedFields.has("classifier") || sourceConfig.classifier !== undefined ? undefined : classifierModel,
     state.extensionDir,
-    initConfig.classifier?.backend,
+    sourceClassifier.backend as ClassifierBackend | undefined,
   ) as Record<string, unknown> & { classifier: Record<string, unknown> };
-  proposal.cache = {
-    enabled: initConfig.cache?.enabled ?? true,
-    maxEntries: initConfig.cache?.maxEntries ?? DEFAULT_MAX_ENTRIES,
-    threshold: initConfig.cache?.threshold ?? DEFAULT_THRESHOLD,
-    ...initConfig.cache,
-    ...(initConfig.cache?.ttlHours === undefined ? {} : { ttlHours: initConfig.cache.ttlHours }),
+  proposal.cache = publicDefaults.cache ?? {
+    enabled: true,
+    maxEntries: DEFAULT_MAX_ENTRIES,
+    threshold: DEFAULT_THRESHOLD,
   };
-  proposal.reliability = { ...resolveReliabilityConfig(initConfig.reliability), ...initConfig.reliability };
-  proposal.debug = { enabled: initConfig.debug?.enabled ?? false, ...initConfig.debug };
+  proposal.classifier = {
+    ...(publicDefaults.classifier as Record<string, unknown> | undefined),
+    ...proposal.classifier,
+  };
+  proposal.reliability = publicDefaults.reliability ?? resolveReliabilityConfig(undefined);
+  proposal.debug = publicDefaults.debug ?? { enabled: false };
   for (const key of ["schemaVersion", "tierPolicies", "economics", "affinity", "probe"] as const) {
-    if (initConfig[key] !== undefined) proposal[key] = initConfig[key];
+    if (sourceConfig[key] !== undefined) proposal[key] = sourceConfig[key];
+    else if (publicDefaults[key] !== undefined) proposal[key] = publicDefaults[key];
   }
-  proposal.enabled = initConfig.enabled ?? true;
-  proposal.strategy = initConfig.strategy ?? "first";
+  proposal.enabled = sourceConfig.enabled ?? publicDefaults.enabled ?? true;
+  proposal.strategy = sourceConfig.strategy ?? publicDefaults.strategy ?? "first";
   const proposedStrategies = proposal.categoryStrategies as Record<string, RoutingStrategy>;
   proposal.categoryStrategies = Object.fromEntries(Object.keys(models).map((tier) => [
     tier,
-    initConfig.categoryStrategies?.[tier] ?? proposedStrategies[tier] ?? "first",
+    (sourceConfig.categoryStrategies as Record<string, RoutingStrategy> | undefined)?.[tier]
+      ?? (publicDefaults.categoryStrategies as Record<string, RoutingStrategy> | undefined)?.[tier]
+      ?? proposedStrategies[tier]
+      ?? "first",
   ]));
-  proposal.rules = initConfig.rules ?? DEFAULT_RULES;
-  if (initConfig.default && models[initConfig.default]?.length) proposal.default = initConfig.default;
-  const activeClassifier = initConfig.classifier ?? {};
-  proposal.classifier = {
-    ...proposal.classifier,
-    ...activeClassifier,
-    ...(activeClassifier.typesafe ? { typesafe: {
-      ...(proposal.classifier.typesafe as Record<string, unknown> | undefined),
-      ...activeClassifier.typesafe,
-    } } : {}),
-    ...(activeClassifier.piNative ? { piNative: {
-      ...(proposal.classifier.piNative as Record<string, unknown> | undefined),
-      ...activeClassifier.piNative,
-    } } : {}),
-  };
-  let source: ReconciliationSourceSnapshot;
-  try { source = selectInitSource(); }
-  catch {
-    log(ctx, "Init could not safely snapshot the current config; no files were changed.", "error");
-    return;
-  }
+  proposal.rules = sourceConfig.rules ?? publicDefaults.rules ?? DEFAULT_RULES;
+  const defaultTier = sourceConfig.default ?? publicDefaults.default;
+  if (typeof defaultTier === "string" && models[defaultTier]?.length) proposal.default = defaultTier;
   let transaction: Parameters<typeof applyReconciliationTransaction>[0];
   let changes: readonly { kind: "add" | "remove"; tier: string; modelKey: string }[];
   let settingsAdded = false;
@@ -1029,7 +1048,7 @@ async function handleInit(
         const existing = JSON.parse(Buffer.from(source.configBytes!).toString("utf8")) as Record<string, unknown>;
         let addedSetting = false;
         for (const [key, value] of Object.entries(proposal)) {
-          if (key !== "$schema" && existing[key] === undefined) {
+          if (key !== "$schema" && (key === "models" || !inheritedFields.has(key)) && existing[key] === undefined) {
             existing[key] = value;
             addedSetting = true;
           }
@@ -1038,7 +1057,7 @@ async function handleInit(
           settingsAdded = true;
           const nextConfigBytes = Buffer.from(JSON.stringify(existing, null, 2) + "\n", "utf8");
           const ownershipBytes = source.ownershipBytes ?? Buffer.from(JSON.stringify({ version: 1, sources: {} }, null, 2) + "\n", "utf8");
-          if (nextConfigBytes.byteLength > MAX_RECONCILIATION_CONFIG_BYTES
+          if (nextConfigBytes.byteLength > MAX_CONFIG_SOURCE_BYTES
             || !prospectiveConfigInstallable(source.source, nextConfigBytes, state)) {
             log(ctx, "Init's proposed config is invalid or exceeds the safe write limit; no files were changed.", "error");
             return;
@@ -1069,13 +1088,13 @@ async function handleInit(
     } else {
       const reconciled = JSON.parse(Buffer.from(plan.transaction.nextConfigBytes).toString("utf8")) as Record<string, unknown>;
       for (const [key, value] of Object.entries(proposal)) {
-        if (key !== "$schema" && reconciled[key] === undefined) {
+        if (key !== "$schema" && (key === "models" || !inheritedFields.has(key)) && reconciled[key] === undefined) {
           reconciled[key] = value;
           settingsAdded = true;
         }
       }
       const nextConfigBytes = Buffer.from(JSON.stringify(reconciled, null, 2) + "\n", "utf8");
-      if (nextConfigBytes.byteLength > MAX_RECONCILIATION_CONFIG_BYTES
+      if (nextConfigBytes.byteLength > MAX_CONFIG_SOURCE_BYTES
         || !prospectiveConfigInstallable(source.source, nextConfigBytes, state)) {
         log(ctx, "Init's proposed config is invalid or exceeds the safe write limit; no files were changed.", "error");
         return;
@@ -1093,9 +1112,11 @@ async function handleInit(
       log(ctx, "Init could not create a safe exact-membership ownership receipt; no files were changed.", "error");
       return;
     }
-    const configBytes = Buffer.from(JSON.stringify(proposal, null, 2) + "\n", "utf8");
+    const installProposal = Object.fromEntries(Object.entries(proposal)
+      .filter(([key]) => key === "$schema" || key === "models" || !inheritedFields.has(key)));
+    const configBytes = Buffer.from(JSON.stringify(installProposal, null, 2) + "\n", "utf8");
     const ownershipBytes = Buffer.from(JSON.stringify(ownership, null, 2) + "\n", "utf8");
-    if (configBytes.byteLength > MAX_RECONCILIATION_CONFIG_BYTES
+    if (configBytes.byteLength > MAX_CONFIG_SOURCE_BYTES
       || ownershipBytes.byteLength > 5_000_000
       || !prospectiveConfigInstallable(source.source, configBytes, state)) {
       log(ctx, "Init's proposed config is invalid or exceeds the safe write limit; no files were changed.", "error");
@@ -1433,7 +1454,7 @@ export type BifrostPreviewSuccess = {
 export type BifrostPreviewFailure = {
   readonly ok: false;
   readonly prompt: string;
-  readonly error: "usage" | "unclassified";
+  readonly error: "usage" | "unclassified" | "config_invalid";
 };
 
 /** Marker prefix for machine-readable command output, so a caller can find the line without guessing. */
@@ -1454,20 +1475,22 @@ const PREVIEW_SUB = "preview";
  * loses that many leading characters; pass the real subcommand, or pass `""` to
  * parse a bare prompt with nothing removed.
  */
-export function parsePreviewArgs(args: string, sub: string): { prompt: string; json: boolean; trace?: true } {
+export function parsePreviewArgs(args: string, sub: string): { prompt: string; json: boolean; trace?: true; offline?: true } {
   let rest = args.slice(sub.length).trim();
   let json = false;
   let trace = false;
-  while (rest.startsWith("--json") || rest.startsWith("--trace")) {
-    const flag = /^(--json|--trace)(?=\s|$)/.exec(rest)?.[1];
+  let offline = false;
+  while (rest.startsWith("--json") || rest.startsWith("--trace") || rest.startsWith("--offline")) {
+    const flag = /^(--json|--trace|--offline)(?=\s|$)/.exec(rest)?.[1];
     if (!flag) break;
-    if ((flag === "--json" && json) || (flag === "--trace" && trace)) break;
+    if ((flag === "--json" && json) || (flag === "--trace" && trace) || (flag === "--offline" && offline)) break;
     json ||= flag === "--json";
     trace ||= flag === "--trace";
+    offline ||= flag === "--offline";
     rest = rest.slice(flag.length).trimStart();
   }
   const parsed = { prompt: rest.trim(), json };
-  return trace ? { ...parsed, trace: true } : parsed;
+  return { ...parsed, ...(trace ? { trace: true as const } : {}), ...(offline ? { offline: true as const } : {}) };
 }
 
 /** Build the failure half of the report. Pure: no classification, no display, no side effects. */
@@ -1535,6 +1558,7 @@ export function renderTracePreview(trace: BifrostTracePreview): string[] {
   const lines = [
     "--- route trace v1 ---",
     `outcome: ${trace.outcome}`,
+    ...(trace.error ? [`error: ${trace.error}`] : []),
     `classification: ${trace.classification.source}${trace.classification.tier ? ` → ${trace.classification.tier}` : ""}`,
     `classifier disclosure: ${trace.classifierDisclosure.enabled
       ? "enabled; the configured classifier may receive the preview prompt"
@@ -1613,12 +1637,19 @@ function emitPreviewReport(report: BifrostPreviewReport): void {
   console.error(`${BIFROST_JSON_PREFIX}${serializePreviewReport(report)}`);
 }
 
+function hasInvalidRoutingConfig(state: Pick<BifrostState, "tierPolicyValid" | "economicPolicyValid" | "reliabilityV2ConfigValid" | "affinityConfigValid">): boolean {
+  return state.tierPolicyValid === false
+    || state.economicPolicyValid === false
+    || state.reliabilityV2ConfigValid === false
+    || state.affinityConfigValid === false;
+}
+
 async function handlePreview(
   args: string,
   ctx: ExtensionContext,
   state: BifrostState,
 ): Promise<void> {
-  const { prompt, json, trace } = parsePreviewArgs(args, PREVIEW_SUB);
+  const { prompt, json, trace, offline } = parsePreviewArgs(args, PREVIEW_SUB);
   if (!prompt) {
     // A machine caller must still get its line: the text notification below stays
     // for the interactive path, but a consumer that scans for the marker needs a
@@ -1631,21 +1662,37 @@ async function handlePreview(
         error: "usage",
         classification: { source: "unclassified" },
       };
-      console.error(`${BIFROST_JSON_PREFIX}${JSON.stringify(buildTracePreview(summary, state.classifierEnabled))}`);
+      console.error(`${BIFROST_JSON_PREFIX}${JSON.stringify(buildTracePreview(summary, state.classifierEnabled && !offline))}`);
     } else if (json) emitPreviewReport(buildPreviewFailure(prompt, "usage"));
-    log(ctx, json ? `usage: /bifrost preview ${trace ? "--trace " : ""}--json <prompt>` : `usage: /bifrost preview ${trace ? "--trace " : ""}<prompt>`, "warning");
+    log(ctx, json ? `usage: /bifrost preview ${offline ? "--offline " : ""}${trace ? "--trace " : ""}--json <prompt>` : `usage: /bifrost preview ${offline ? "--offline " : ""}${trace ? "--trace " : ""}<prompt>`, "warning");
     return;
   }
 
   clearBifrostWidgets(ctx);
-  if (trace && state.classifierEnabled) {
+  if (hasInvalidRoutingConfig(state)) {
+    if (trace) {
+      const summary: RouteDecisionSummary = {
+        version: 1,
+        kind: "route-decision",
+        outcome: "config_invalid",
+        error: "config_invalid",
+        classification: { source: "unclassified" },
+      };
+      const report = buildTracePreview(summary, false);
+      if (json) console.error(`${BIFROST_JSON_PREFIX}${JSON.stringify(report)}`);
+      else await uiResult(ctx, "Bifrost route trace", renderTracePreview(report));
+    } else if (json) emitPreviewReport(buildPreviewFailure(prompt, "config_invalid"));
+    log(ctx, "Preview is unavailable because a configuration source is invalid. Run /bifrost validate and repair the reported source.", "error");
+    return;
+  }
+  if (trace && state.classifierEnabled && !offline) {
     log(ctx, "Preview may send the prompt to the configured classifier", "warning");
   }
   setBifrostStatus(ctx, "previewing prompt...", "accent");
   uiBusy(ctx, "Classifying preview prompt...");
   let classification;
   try {
-    classification = await state.getPipeline(ctx).classify(prompt);
+    classification = await state.getPipeline(ctx).classify(prompt, undefined, { offline });
   } finally {
     uiDone(ctx);
     syncBifrostModeStatus(ctx, state);
@@ -1653,7 +1700,7 @@ async function handlePreview(
   if (classification.kind === "unclassified") {
     if (trace) {
       const summary = buildRouteDecisionSummary(classification);
-      const report = buildTracePreview(summary, state.classifierEnabled);
+      const report = buildTracePreview(summary, state.classifierEnabled && !offline);
       if (json) console.error(`${BIFROST_JSON_PREFIX}${JSON.stringify(report)}`);
       else await uiResult(ctx, "Bifrost route trace", renderTracePreview(report));
       return;
@@ -1670,7 +1717,7 @@ async function handlePreview(
       resolution: display.resolution,
       options,
     });
-    const report = buildTracePreview(summary, state.classifierEnabled);
+    const report = buildTracePreview(summary, state.classifierEnabled && !offline);
     if (json) console.error(`${BIFROST_JSON_PREFIX}${JSON.stringify(report)}`);
     else await uiResult(ctx, "Bifrost route trace", renderTracePreview(report));
     return;
@@ -1753,7 +1800,7 @@ export const BIFROST_COMMAND_OPTIONS: readonly CommandSpec[] = [
   { value: "unpin", description: "Resume routing", reflects: { state: "pinned", sets: false, note: "already unpinned" } },
   // Common commands, in menu order. The two prompt commands lead because both
   // prefill the editor rather than run: keep them adjacent.
-  { value: PREVIEW_SUB, description: "Preview routing for a prompt", argumentHint: `[--trace] [--json] <prompt>`, menu: "common" },
+  { value: PREVIEW_SUB, description: "Preview routing for a prompt", argumentHint: `[--offline] [--trace] [--json] <prompt>`, menu: "common" },
   { value: "benchmark", description: "Classify a benchmark prompt", argumentHint: "<prompt>", menu: "common" },
   { value: "providers", description: "List available providers", menu: "common" },
   { value: "probe", description: "Probe working models", menu: "common" },
@@ -2387,7 +2434,7 @@ function persistBootstrapConfig(
   const ownershipBytes = ownership
     ? Buffer.from(JSON.stringify(ownership, null, 2) + "\n", "utf8")
     : source.ownershipBytes ? Buffer.from(source.ownershipBytes) : undefined;
-  if (!ownershipBytes || configBytes.byteLength > MAX_RECONCILIATION_CONFIG_BYTES
+  if (!ownershipBytes || configBytes.byteLength > MAX_CONFIG_SOURCE_BYTES
     || ownershipBytes.byteLength > MAX_RECONCILIATION_OWNERSHIP_BYTES
     || !prospectiveConfigInstallable(source.source, configBytes, state)) {
     log(ctx, "The requested classifier config is invalid or exceeds a safe write limit; no files were changed.", "error");

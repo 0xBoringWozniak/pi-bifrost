@@ -1,6 +1,7 @@
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { readJsonFile } from "./storage.ts";
 import type { RoutingStrategy, RouteRule } from "./routing.ts";
 import type { CacheOptions } from "./cache.ts";
@@ -12,6 +13,10 @@ import { emptyEconomicSnapshot, publishEconomicObservation, validateEconomicPoli
 export { CLASSIFIER_BACKEND_IDS, TYPE_SAFE_ENDPOINT, TYPE_SAFE_MODEL } from "./classifier-backends.ts";
 export type { ClassifierBackend, TierCriterion } from "./classifier-backends.ts";
 
+export const MAX_CONFIG_SOURCE_BYTES = 10_000_000;
+const MAX_CONFIG_SOURCE_DIAGNOSTICS = 32;
+const MAX_CONFIG_SOURCE_DIAGNOSTIC_CHARS = 192;
+
 type ClassifierMethod = "direct" | "subprocess" | "auto";
 
 /** Conservative defaults used when users opt into TypeSafe through init or the picker. */
@@ -20,6 +25,24 @@ export const DEFAULT_CLASSIFIER_CRITERIA: Record<string, TierCriterion> = {
   general: "Normal implementation, tests, API changes, or moderate reasoning with clear scope. Not purely mechanical or unusually ambiguous and consequential work.",
   frontier: "Complex debugging, architecture, security, concurrency, high ambiguity, or high-consequence work. Not routine bounded edits.",
 };
+
+/** Public settings in the bundled bifrost.json; private classifier templates are intentionally absent. */
+export const BUNDLED_PUBLIC_INIT_DEFAULTS: Readonly<Record<string, unknown>> = Object.freeze({
+  enabled: true,
+  default: "general",
+  strategy: "first",
+  categoryStrategies: Object.freeze({ quick: "random", general: "first", frontier: "first" }),
+  classifier: Object.freeze({ enabled: true, method: "auto", maxTokens: 20, temperature: 0, fallbackToRegex: true }),
+  cache: Object.freeze({ enabled: true, maxEntries: 500, threshold: 0.88 }),
+  reliability: Object.freeze({
+    enabled: true,
+    cooldownOnAllowanceExhausted: true,
+    failureThreshold: 3,
+    windowMinutes: 5,
+    cooldownMinutes: 60,
+  }),
+  debug: Object.freeze({ enabled: false }),
+});
 
 export interface ProbeConfig {
   /** Max concurrent model probes. Default 50. Lower this if providers rate-limit. */
@@ -267,12 +290,13 @@ export function hasClassifierConfigErrors(config: BifrostConfig, effectiveBacken
   return classifierConfigErrors(config, effectiveBackend).length > 0;
 }
 
-export function validateTierPolicyConfig(config: BifrostConfig): ConfigIssue[] {
+function validateTierPolicyConfigInternal(config: BifrostConfig, maxIssues = Number.POSITIVE_INFINITY): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
   const policyIssue = (code: string, path: string, message: string): void => {
-    issues.push({ severity: "error", code, path, message });
+    if (issues.length < maxIssues) issues.push({ severity: "error", code, path, message });
   };
   const modelKeys = Object.keys(config.models ?? {});
+  const modelKeySet = new Set(modelKeys);
   const schemaVersion = config.schemaVersion;
   if (schemaVersion !== undefined && schemaVersion !== 1 && schemaVersion !== 2) {
     policyIssue("config.schema_version_unsupported", "schemaVersion", `Unsupported schemaVersion "${String(schemaVersion)}"; supported versions are 1 and 2.`);
@@ -287,7 +311,8 @@ export function validateTierPolicyConfig(config: BifrostConfig): ConfigIssue[] {
   const edges = new Map<string, string[]>();
   if (tierPolicies && typeof tierPolicies === "object" && !Array.isArray(tierPolicies)) {
     for (const [tier, rawPolicy] of Object.entries(tierPolicies)) {
-      if (!modelKeys.includes(tier)) {
+      if (issues.length >= maxIssues) break;
+      if (!modelKeySet.has(tier)) {
         policyIssue("config.tier_policy_unknown_tier", "tierPolicies.*", `tierPolicies.${tier} references a tier not found in models [${modelKeys.join(", ")}].`);
       }
       if (!criterionObject(rawPolicy)) {
@@ -295,6 +320,7 @@ export function validateTierPolicyConfig(config: BifrostConfig): ConfigIssue[] {
         continue;
       }
       for (const key of Object.keys(rawPolicy)) {
+        if (issues.length >= maxIssues) break;
         if (key !== "fallbackTiers") {
           policyIssue("config.tier_policy_unknown_field", "tierPolicies.*", `Unknown field "${key}" in tierPolicies.${tier}.`);
         }
@@ -306,7 +332,8 @@ export function validateTierPolicyConfig(config: BifrostConfig): ConfigIssue[] {
       }
       const seenFallbacks = new Set<string>();
       for (const fallback of fallbackTiers) {
-        if (!modelKeys.includes(fallback)) {
+        if (issues.length >= maxIssues) break;
+        if (!modelKeySet.has(fallback)) {
           policyIssue("config.tier_policy_unknown_fallback", "tierPolicies.*.fallbackTiers", `Fallback tier "${fallback}" in tierPolicies.${tier} was not found in models.`);
         }
         if (fallback === tier) {
@@ -320,24 +347,41 @@ export function validateTierPolicyConfig(config: BifrostConfig): ConfigIssue[] {
       edges.set(tier, fallbackTiers);
     }
   }
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visitTier = (tier: string): void => {
-    if (visiting.has(tier)) {
-      policyIssue("config.tier_policy_cycle", "tierPolicies.*.fallbackTiers", `tierPolicies contains a fallback cycle through tier "${tier}".`);
-      return;
+  const color = new Map<string, 1 | 2>();
+  let cycleReported = false;
+  for (const root of edges.keys()) {
+    if (issues.length >= maxIssues) break;
+    if (color.has(root)) continue;
+    const stack: Array<{ tier: string; next: number }> = [{ tier: root, next: 0 }];
+    color.set(root, 1);
+    while (stack.length) {
+      if (issues.length >= maxIssues) break;
+      const frame = stack[stack.length - 1]!;
+      const fallbacks = edges.get(frame.tier) ?? [];
+      if (frame.next >= fallbacks.length) {
+        color.set(frame.tier, 2);
+        stack.pop();
+        continue;
+      }
+      const fallback = fallbacks[frame.next++]!;
+      if (!edges.has(fallback) || color.get(fallback) === 2) continue;
+      if (color.get(fallback) === 1) {
+        if (!cycleReported) {
+          policyIssue("config.tier_policy_cycle", "tierPolicies.*.fallbackTiers", "tierPolicies contains a fallback cycle.");
+          cycleReported = true;
+        }
+        continue;
+      }
+      color.set(fallback, 1);
+      stack.push({ tier: fallback, next: 0 });
     }
-    if (visited.has(tier)) return;
-    visiting.add(tier);
-    for (const fallback of edges.get(tier) ?? []) {
-      if (edges.has(fallback)) visitTier(fallback);
-    }
-    visiting.delete(tier);
-    visited.add(tier);
-  };
-  for (const tier of edges.keys()) visitTier(tier);
+  }
   issues.push(...validateEconomicConfig(config));
   return issues;
+}
+
+export function validateTierPolicyConfig(config: BifrostConfig): ConfigIssue[] {
+  return validateTierPolicyConfigInternal(config);
 }
 
 export function validateEconomicConfig(config: BifrostConfig): ConfigIssue[] {
@@ -777,14 +821,7 @@ export function loadConfig(
   cwd: string,
   extensionDir: string,
 ): BifrostConfig {
-  const base = defaultConfig();
-
-  const configs = configLayerPaths(cwd, extensionDir).map(([, path]) => readJson<BifrostConfig>(path));
-  let merged: BifrostConfig = base;
-  for (const cfg of configs) {
-    if (cfg) merged = mergeConfig(merged, cfg);
-  }
-  return merged;
+  return loadConfigForReload(cwd, extensionDir).config;
 }
 
 export interface ConfigLoadDiagnostic {
@@ -795,19 +832,136 @@ export interface ConfigLoadDiagnostic {
 export interface ConfigLoadResult {
   readonly config: BifrostConfig;
   readonly diagnostics: readonly ConfigLoadDiagnostic[];
+  readonly sourceFields: readonly { readonly layer: ConfigLoadDiagnostic["layer"]; readonly fields: readonly string[] }[];
+  readonly publicDefaultFields: readonly string[];
 }
 
-/** Load command-reload layers while preserving parse/root-shape failures for strict last-good gating. */
-export function loadConfigForReload(cwd: string, extensionDir: string): ConfigLoadResult {
+function sourcePolicyDiagnostics(value: Record<string, unknown>): string[] {
+  const diagnostics: string[] = [];
+  const add = (message: string): void => {
+    if (diagnostics.length < 8) diagnostics.push(message.slice(0, MAX_CONFIG_SOURCE_DIAGNOSTIC_CHARS));
+  };
+  const version = value.schemaVersion;
+  if (version !== undefined && version !== 1 && version !== 2) {
+    add("schemaVersion is unsupported; supported versions are 1 and 2.");
+  }
+  const tierPolicies = value.tierPolicies;
+  if (tierPolicies !== undefined) {
+    if (!criterionObject(tierPolicies)) add("tierPolicies must be an object.");
+    else {
+      const sourceTierNames = new Set(Object.keys(tierPolicies));
+      for (const policy of Object.values(tierPolicies)) {
+        if (criterionObject(policy) && Object.keys(policy).some((key) => key !== "fallbackTiers")) {
+          add("tierPolicies contains an unsupported field.");
+        }
+        if (!criterionObject(policy) || !Array.isArray(policy.fallbackTiers)) continue;
+        for (const fallback of policy.fallbackTiers) if (typeof fallback === "string") sourceTierNames.add(fallback);
+      }
+      const completeSourcePolicies = Object.fromEntries(Object.entries(tierPolicies)
+        .filter(([, policy]) => !criterionObject(policy) || Object.hasOwn(policy, "fallbackTiers")));
+      const tierIssues = validateTierPolicyConfigInternal({
+        ...defaultConfig(),
+        schemaVersion: 2,
+        models: Object.fromEntries([...sourceTierNames].map((tier) => [tier, []])),
+        tierPolicies: completeSourcePolicies as BifrostConfig["tierPolicies"],
+      }, 8).filter(({ code }) => code?.startsWith("config.tier_policy_")
+        && code !== "config.tier_policy_unknown_tier"
+        && code !== "config.tier_policy_unknown_fallback");
+      if (tierIssues.length) add("tierPolicies contains an invalid source-local policy.");
+    }
+  }
+  const economics = value.economics;
+  if (economics !== undefined) {
+    const economicIssues = validateEconomicConfig({ ...value, schemaVersion: 2 } as unknown as BifrostConfig);
+    if (economicIssues.length) add("economics contains an invalid source-local policy.");
+  }
+  const affinity = value.affinity;
+  const reliability = value.reliability;
+  const sourceIssues = validateConfig({
+    ...defaultConfig(),
+    schemaVersion: 2,
+    models: {},
+    ...(affinity === undefined ? {} : { affinity }),
+    ...(reliability === undefined ? {} : { reliability }),
+  } as BifrostConfig).filter((issue) => issue.severity === "error"
+    && (issue.code?.startsWith("config.affinity_") || issue.code?.startsWith("config.reliability_"))
+    && issue.code !== "config.reliability_observations_invalid");
+  if (sourceIssues.length) add("affinity or reliability contains an invalid source-local policy.");
+  const observations = criterionObject(reliability) ? reliability.observations : undefined;
+  if (observations !== undefined && (!criterionObject(observations)
+    || Object.keys(observations).some((key) => key !== "enabled")
+    || (observations.enabled !== undefined && typeof observations.enabled !== "boolean"))) {
+    add("reliability.observations is invalid.");
+  }
+  return diagnostics;
+}
+
+function readBoundedConfigText(path: string): { readonly text?: string; readonly oversized?: true } {
+  const beforeOpen = statSync(path);
+  if (!beforeOpen.isFile()) throw new Error("not a regular config file");
+  if (beforeOpen.size > MAX_CONFIG_SOURCE_BYTES) return { oversized: true };
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) throw new Error("not a regular config file");
+    if (opened.size > MAX_CONFIG_SOURCE_BYTES) return { oversized: true };
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= MAX_CONFIG_SOURCE_BYTES) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_CONFIG_SOURCE_BYTES + 1 - total));
+      const count = readSync(fd, chunk, 0, chunk.byteLength, null);
+      if (count === 0) break;
+      total += count;
+      chunks.push(chunk.subarray(0, count));
+    }
+    if (total > MAX_CONFIG_SOURCE_BYTES) return { oversized: true };
+    return { text: Buffer.concat(chunks, total).toString("utf8") };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Parse and validate each layer before merging; cross-layer references are checked after composition. */
+function loadConfigLayers(
+  cwd: string,
+  extensionDir: string,
+  replacement?: { readonly layer: ConfigLoadDiagnostic["layer"]; readonly bytes: Uint8Array },
+): ConfigLoadResult {
   const diagnostics: ConfigLoadDiagnostic[] = [];
+  const addDiagnostic = (layer: ConfigLoadDiagnostic["layer"], message: string): void => {
+    if (diagnostics.length < MAX_CONFIG_SOURCE_DIAGNOSTICS) {
+      diagnostics.push({ layer, message: message.slice(0, MAX_CONFIG_SOURCE_DIAGNOSTIC_CHARS) });
+    }
+  };
+  const sourceFields: Array<{ layer: ConfigLoadDiagnostic["layer"]; fields: readonly string[] }> = [];
+  const publicDefaultFields: string[] = [];
   let merged = defaultConfig();
   for (const [layer, path] of configLayerPaths(cwd, extensionDir)) {
     let text: string | undefined;
-    try {
-      if (existsSync(path)) text = readFileSync(path, "utf8");
-    } catch {
-      diagnostics.push({ layer, message: `${layer} config could not be read.` });
-      continue;
+    if (replacement?.layer === layer) {
+      if (replacement.bytes.byteLength > MAX_CONFIG_SOURCE_BYTES) {
+        addDiagnostic(layer, `${layer} config exceeds the ${MAX_CONFIG_SOURCE_BYTES}-byte size limit.`);
+        continue;
+      }
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(replacement.bytes); }
+      catch {
+        addDiagnostic(layer, `${layer} config is not valid UTF-8.`);
+        continue;
+      }
+    } else {
+      try {
+        if (existsSync(path)) {
+          const readResult = readBoundedConfigText(path);
+          if (readResult.oversized) {
+            addDiagnostic(layer, `${layer} config exceeds the ${MAX_CONFIG_SOURCE_BYTES}-byte size limit.`);
+            continue;
+          }
+          text = readResult.text;
+        }
+      } catch {
+        addDiagnostic(layer, `${layer} config could not be read.`);
+        continue;
+      }
     }
     if (text === undefined) continue;
 
@@ -815,16 +969,37 @@ export function loadConfigForReload(cwd: string, extensionDir: string): ConfigLo
     try {
       parsed = JSON.parse(text);
     } catch {
-      diagnostics.push({ layer, message: `${layer} config is not valid JSON.` });
+      addDiagnostic(layer, `${layer} config is not valid JSON.`);
       continue;
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      diagnostics.push({ layer, message: `${layer} config must contain an object.` });
+      addDiagnostic(layer, `${layer} config must contain an object.`);
       continue;
+    }
+    const sourceDiagnostics = sourcePolicyDiagnostics(parsed as Record<string, unknown>);
+    if (sourceDiagnostics.length) {
+      for (const message of sourceDiagnostics) addDiagnostic(layer, `${layer} config ${message}`);
+      continue;
+    }
+    sourceFields.push(Object.freeze({ layer, fields: Object.freeze(Object.keys(parsed)) }));
+    if (layer === "extension") {
+      publicDefaultFields.push(...Object.keys(BUNDLED_PUBLIC_INIT_DEFAULTS)
+        .filter((key) => Object.hasOwn(parsed, key)
+          && isDeepStrictEqual((parsed as Record<string, unknown>)[key], BUNDLED_PUBLIC_INIT_DEFAULTS[key])));
     }
     merged = mergeConfig(merged, parsed as BifrostConfig);
   }
-  return { config: merged, diagnostics };
+  return {
+    config: merged,
+    diagnostics,
+    sourceFields: Object.freeze(sourceFields),
+    publicDefaultFields: Object.freeze(publicDefaultFields),
+  };
+}
+
+/** Load startup/reload layers while retaining invalid-source diagnostics for fail-closed routing. */
+export function loadConfigForReload(cwd: string, extensionDir: string): ConfigLoadResult {
+  return loadConfigLayers(cwd, extensionDir);
 }
 
 /**
@@ -838,49 +1013,17 @@ export function loadConfigWithSourceOverride(
   source: "project" | "workspace" | "user",
   replacementBytes: Uint8Array,
 ): ConfigLoadResult {
-  const diagnostics: ConfigLoadDiagnostic[] = [];
   if (source !== "project" && source !== "workspace" && source !== "user") {
     return {
       config: defaultConfig(),
       diagnostics: [{ layer: "project", message: "Selected config source is invalid." }],
+      sourceFields: Object.freeze([]),
+      publicDefaultFields: [],
     };
   }
   const selectedLayer: ConfigLoadDiagnostic["layer"] = source === "project" ? "project"
     : source === "workspace" ? "workspace" : "global";
-  let merged = defaultConfig();
-  for (const [layer, path] of configLayerPaths(cwd, extensionDir)) {
-    let text: string | undefined;
-    if (layer === selectedLayer) {
-      try {
-        text = new TextDecoder("utf-8", { fatal: true }).decode(replacementBytes);
-      } catch {
-        diagnostics.push({ layer, message: `${layer} config is not valid UTF-8.` });
-        continue;
-      }
-    } else {
-      try {
-        if (existsSync(path)) text = readFileSync(path, "utf8");
-      } catch {
-        diagnostics.push({ layer, message: `${layer} config could not be read.` });
-        continue;
-      }
-    }
-    if (text === undefined) continue;
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      diagnostics.push({ layer, message: `${layer} config is not valid JSON.` });
-      continue;
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      diagnostics.push({ layer, message: `${layer} config must contain an object.` });
-      continue;
-    }
-    merged = mergeConfig(merged, parsed as BifrostConfig);
-  }
-  return { config: merged, diagnostics };
+  return loadConfigLayers(cwd, extensionDir, { layer: selectedLayer, bytes: replacementBytes });
 }
 
 function defaultConfig(): BifrostConfig {

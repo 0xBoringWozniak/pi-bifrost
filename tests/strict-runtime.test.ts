@@ -19,6 +19,7 @@ type RuntimeHarness = {
   command: CommandHandler;
   route: VirtualModelDefinition["route"];
   selected: string[];
+  notices: string[];
   editor: { value: string };
   cleanup: () => void;
 };
@@ -65,6 +66,7 @@ function makeHarness(config: Config, available: Model<Api>[] = [], options: {
   delete process.env[TYPE_SAFE_API_KEY_ENV];
 
   const selected: string[] = [];
+  const notices: string[] = [];
   const editor = { value: "" };
   const active = options.active ?? makeModel("fixture", "active");
   const modelRegistry = {
@@ -88,7 +90,7 @@ function makeHarness(config: Config, available: Model<Api>[] = [], options: {
     },
     setWorkingMessage: () => {},
     setWorkingVisible: () => {},
-    notify: () => {},
+    notify: (message: unknown) => { notices.push(String(message)); },
     custom: async () => null,
     theme: { fg: (_color: string, text: string) => text },
   };
@@ -128,6 +130,7 @@ function makeHarness(config: Config, available: Model<Api>[] = [], options: {
     command,
     route: definition.route,
     selected,
+    notices,
     editor,
     cleanup: () => {
       process.chdir(previousCwd);
@@ -377,6 +380,23 @@ describe("strict runtime boundaries through registered Pi hooks", () => {
     try {
       writeFileSync(join(harness.cwd, ".pi", "bifrost.json"), JSON.stringify(invalid));
       await harness.command("reload", harness.ctx);
+      assert.deepEqual(await sendInput(harness), { action: "continue" });
+      assert.deepEqual(harness.selected, ["fixture/allowed"]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("retains the last-good config when an invalid lower source is masked during reload", async () => {
+    const target = makeModel("fixture", "allowed");
+    const harness = makeHarness(strictConfig({ models: { restricted: ["fixture/allowed"] } }), [target], { mode: "tui" });
+    try {
+      writeFileSync(join(harness.cwd, "bifrost.json"), JSON.stringify({
+        schemaVersion: 2,
+        tierPolicies: { restricted: { fallbackTiers: ["restricted"] } },
+      }));
+      await harness.command("reload", harness.ctx);
+      assert.ok(harness.notices.some((message) => message.includes("config reload rejected")));
       assert.deepEqual(await sendInput(harness), { action: "continue" });
       assert.deepEqual(harness.selected, ["fixture/allowed"]);
     } finally {

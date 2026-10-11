@@ -66,7 +66,7 @@ Use these commands in Pi:
 
 | Command | Result |
 | --- | --- |
-| `/bifrost preview <prompt>` | Show a route before a model answers. A classifier can receive the prompt. |
+| `/bifrost preview --offline <prompt>` | Show a route using local cache and rules. Makes no classifier request. |
 | `quick <message>` | Use the `quick` tier once. Bifrost removes its name before sending the prompt. |
 | `/bifrost pin` / `/bifrost unpin` | Keep the model or resume routing. |
 | `/bifrost off` / `/bifrost on` | Stop or resume routing. |

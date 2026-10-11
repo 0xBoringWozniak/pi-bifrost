@@ -3,10 +3,11 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { after, before, describe, it } from "node:test";
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadConfigForReload } from "../../config.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PI = join(ROOT, "node_modules", ".bin", "pi");
@@ -36,7 +37,7 @@ function startFakeProvider() {
         return json(response, 402, { error: { message: "No remaining credits" } });
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.end(`data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+      response.end(`data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "general" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
     });
   });
   return new Promise((resolve, reject) => {
@@ -64,11 +65,11 @@ function ownership(generated) {
   return JSON.stringify({ version: 1, sources: { [sourceId]: { generated: { quick: generated }, tombstones: {} } } });
 }
 
-function runInit({ home, work, args }) {
+function runInit({ home, work, args, prompt = `/bifrost init ${args}` }) {
   const base = Object.fromEntries(["PATH", "TMPDIR", "LANG", "TERM"]
     .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
   return new Promise((resolve, reject) => {
-    const child = spawn(PI, ["-e", EXTENSION, "--approve", "--no-tools", "--no-session", "-p", `/bifrost init ${args}`], {
+    const child = spawn(PI, ["-e", EXTENSION, "--approve", "--no-tools", "--no-session", "-p", prompt], {
       cwd: work,
       env: { ...base, HOME: home, PI_CODING_AGENT_DIR: join(home, ".pi", "agent"), PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1",
         NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`, BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${server.address().port}`,
@@ -99,6 +100,100 @@ function runInit({ home, work, args }) {
   });
 }
 
+function globalPrivateSettings(revision = "BEFORE") {
+  return {
+    classifier: {
+      enabled: true,
+      backend: "prompt",
+      model: "fake/healthy",
+      endpoint: `https://${revision.toLowerCase()}.private-endpoint.invalid`,
+      systemPrompt: `${revision}_SYSTEM_PROMPT_CANARY`,
+      criteria: { general: `${revision}_CRITERIA_CANARY` },
+      privateSetting: `${revision}_CLASSIFIER_UNKNOWN_CANARY`,
+    },
+    cache: { enabled: false, maxEntries: revision === "BEFORE" ? 17 : 23, threshold: revision === "BEFORE" ? 0.1 : 0.2 },
+    reliability: { failureThreshold: revision === "BEFORE" ? 19 : 23, windowMinutes: 47, cooldownMinutes: 91 },
+    rules: [{ pattern: `${revision}_RULE_CANARY`, model: "general" }],
+  };
+}
+
+async function assertInheritedSettingsMatrixCase(port, args, targetKind) {
+  requests = [];
+  const env = fixture(port, ["healthy", "credits-exhausted"]);
+  const globalPath = join(env.home, ".pi", "agent", "bifrost.json");
+  const targetPath = join(env.work, ".pi", "bifrost.json");
+  const ownershipPath = join(env.work, ".pi", "bifrost-reconcile-ownership.json");
+  const probePath = join(env.work, ".pi", "bifrost-probe.json");
+  const globalBytes = targetKind === "absent" ? null : Buffer.from(JSON.stringify(globalPrivateSettings()));
+  if (globalBytes) writeFileSync(globalPath, globalBytes);
+  if (targetKind === "empty") writeFileSync(targetPath, "{}\n");
+  if (targetKind === "owned") {
+    writeFileSync(targetPath, JSON.stringify({ models: { quick: ["fake/healthy"] }, targetPrivateSetting: "KEEP_TARGET_CANARY" }));
+    writeFileSync(ownershipPath, ownership(["fake/healthy"]));
+    writeFileSync(probePath, JSON.stringify([
+      { provider: "fake", model: "healthy", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
+    ]));
+    const recent = new Date(Date.now() - 60_000);
+    utimesSync(probePath, recent, recent);
+  }
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(env.home, ".pi", "agent");
+  try {
+    const result = await runInit({ ...env, args });
+    assert.equal(result.timedOut, false);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.violations, "");
+    assert.equal(existsSync(targetPath), true, `${args} should write the selected project source`);
+    const saved = JSON.parse(readFileSync(targetPath, "utf8"));
+    if (targetKind === "absent") {
+      assert.equal(existsSync(globalPath), false, `${args} fresh init unexpectedly created a lower global config`);
+      assert.equal(saved.classifier?.model, "fake/healthy");
+      assert.equal(saved.cache?.enabled, true);
+      assert.equal(saved.reliability?.failureThreshold, 3);
+      assert.ok(Array.isArray(saved.rules));
+    } else {
+      for (const key of ["classifier", "cache", "reliability", "rules"]) {
+        assert.equal(Object.hasOwn(saved, key), false, `${args} ${targetKind} target pinned inherited ${key}`);
+      }
+      assert.deepEqual(readFileSync(globalPath), globalBytes, `${args} ${targetKind} init changed the inherited global bytes`);
+    }
+    if (targetKind === "owned") {
+      assert.deepEqual(saved.models, { quick: ["fake/healthy"] });
+      assert.equal(saved.targetPrivateSetting, "KEEP_TARGET_CANARY");
+      assert.match(result.stdout + result.stderr, /memberships: \+0 \/ -0/, `expected the owned-membership case to exercise settings-only reconciliation: ${JSON.stringify(result)}`);
+    }
+
+    const before = loadConfigForReload(env.work, ROOT).config;
+    if (targetKind === "absent") {
+      assert.equal(before.cache?.enabled, true);
+      assert.equal(before.reliability?.failureThreshold, 3);
+    } else {
+      assert.equal(before.classifier?.systemPrompt, "BEFORE_SYSTEM_PROMPT_CANARY");
+      assert.deepEqual(before.classifier?.criteria, { general: "BEFORE_CRITERIA_CANARY" });
+      assert.equal(before.classifier?.endpoint, "https://before.private-endpoint.invalid");
+      assert.equal(before.classifier?.privateSetting, "BEFORE_CLASSIFIER_UNKNOWN_CANARY");
+      assert.deepEqual(before.cache, { enabled: false, maxEntries: 17, threshold: 0.1 });
+      assert.equal(before.reliability?.failureThreshold, 19);
+      assert.equal(before.rules?.[0]?.pattern, "BEFORE_RULE_CANARY");
+
+      writeFileSync(globalPath, JSON.stringify(globalPrivateSettings("AFTER")));
+      const after = loadConfigForReload(env.work, ROOT).config;
+      assert.equal(after.classifier?.systemPrompt, "AFTER_SYSTEM_PROMPT_CANARY");
+      assert.deepEqual(after.classifier?.criteria, { general: "AFTER_CRITERIA_CANARY" });
+      assert.equal(after.classifier?.endpoint, "https://after.private-endpoint.invalid");
+      assert.equal(after.classifier?.privateSetting, "AFTER_CLASSIFIER_UNKNOWN_CANARY");
+      assert.deepEqual(after.cache, { enabled: false, maxEntries: 23, threshold: 0.2 });
+      assert.equal(after.reliability?.failureThreshold, 23);
+      assert.equal(after.rules?.[0]?.pattern, "AFTER_RULE_CANARY");
+    }
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(env.home, { recursive: true, force: true });
+    rmSync(env.work, { recursive: true, force: true });
+  }
+}
+
 describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () => {
   let port;
   before(async () => { port = await startFakeProvider(); });
@@ -121,7 +216,16 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
       assert.equal(config.cache.threshold, 0.88);
       assert.equal(config.reliability.failureThreshold, 3);
       assert.equal(config.debug.enabled, false);
+      assert.equal(config.classifier?.model, "fake/healthy", "fresh init should persist the healthy prompt classifier model with bundled public defaults");
       assert.deepEqual(Object.keys(config.categoryStrategies), Object.keys(config.models));
+      requests = [];
+      const preview = await runInit({ ...env, args: "", prompt: "/bifrost preview --json a prompt with no local rule" });
+      assert.equal(preview.code, 0, preview.stderr);
+      assert.equal(preview.violations, "");
+      assert.deepEqual(requests, ["healthy"], "ordinary preview should use the classifier model selected by init");
+      const report = JSON.parse(preview.stderr.split("[bifrost-json] ").at(-1));
+      assert.equal(report.source, "classifier");
+      assert.equal(report.model, "fake/healthy");
     } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
   });
 
@@ -140,6 +244,20 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
     } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
   });
 
+  it("persists the detected prompt classifier model on forced fresh init", async () => {
+    requests = [];
+    const env = fixture(port, ["healthy", "credits-exhausted"]);
+    try {
+      const result = await runInit({ ...env, args: "-f --write" });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.violations, "");
+      assert.deepEqual([...new Set(requests)], ["healthy", "credits-exhausted"]);
+      const config = JSON.parse(readFileSync(join(env.work, ".pi", "bifrost.json"), "utf8"));
+      assert.equal(config.classifier.model, "fake/healthy");
+      assert.equal(Object.values(config.models).flat().includes("fake/credits-exhausted"), false);
+    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+  });
+
   it("removes failed generated memberships, keeps handwritten entries and preserves settings", async () => {
     requests = [];
     const env = fixture(port, ["healthy", "credits-exhausted"]);
@@ -149,7 +267,10 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
       strategy: "cheapest",
       classifier: {
         enabled: false,
+        endpoint: "https://PROJECT_ENDPOINT_CANARY.invalid",
+        systemPrompt: "PROJECT_SYSTEM_PROMPT_CANARY",
         criteria: { general: "keep classifier criteria" },
+        projectPrivateSetting: "PROJECT_CLASSIFIER_UNKNOWN_CANARY",
         typesafe: { timeoutMs: 1234, maxAttempts: 2, debug: true, metrics: { enabled: false } },
         piNative: { timeoutMs: 2345, maxAttempts: 2, metrics: { enabled: false } },
       },
@@ -160,7 +281,7 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
     writeFileSync(join(env.work, ".pi", "bifrost.json"), original);
     writeFileSync(join(env.work, ".pi", "bifrost-reconcile-ownership.json"), ownership(["fake/credits-exhausted"]));
     try {
-      const result = await runInit({ ...env, args: "--write" });
+      const result = await runInit({ ...env, args: "-f --write" });
       assert.equal(result.timedOut, false);
       assert.equal(result.violations, "");
       assert.equal(result.code, 0, result.stderr);
@@ -168,6 +289,9 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
       assert.deepEqual(saved.models.quick, ["handwritten/model", "fake/healthy"]);
       assert.equal(saved.cache.enabled, false);
       assert.equal(saved.strategy, "cheapest");
+      assert.equal(saved.classifier.endpoint, "https://PROJECT_ENDPOINT_CANARY.invalid");
+      assert.equal(saved.classifier.systemPrompt, "PROJECT_SYSTEM_PROMPT_CANARY");
+      assert.equal(saved.classifier.projectPrivateSetting, "PROJECT_CLASSIFIER_UNKNOWN_CANARY");
       assert.deepEqual(saved.classifier.criteria, { general: "keep classifier criteria" });
       assert.deepEqual(saved.classifier.typesafe, { timeoutMs: 1234, maxAttempts: 2, debug: true, metrics: { enabled: false } });
       assert.deepEqual(saved.classifier.piNative, { timeoutMs: 2345, maxAttempts: 2, metrics: { enabled: false } });
@@ -222,4 +346,105 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
       assert.deepEqual(readFileSync(join(env.work, ".pi", "bifrost.json")), original);
     } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
   });
+
+  it("adds public starter defaults when reconciliation has no membership changes", async () => {
+    requests = [];
+    const env = fixture(port, ["healthy"]);
+    const configPath = join(env.work, ".pi", "bifrost.json");
+    const ownershipPath = join(env.work, ".pi", "bifrost-reconcile-ownership.json");
+    const probePath = join(env.work, ".pi", "bifrost-probe.json");
+    writeFileSync(configPath, JSON.stringify({ models: { quick: ["fake/healthy"] }, selectedPrivate: "KEEP_ME" }));
+    writeFileSync(ownershipPath, ownership(["fake/healthy"]));
+    writeFileSync(probePath, JSON.stringify([
+      { provider: "fake", model: "healthy", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
+    ]));
+    const recent = new Date(Date.now() - 60_000);
+    utimesSync(probePath, recent, recent);
+    try {
+      const result = await runInit({ ...env, args: "--write" });
+      assert.equal(result.code, 0, result.stderr);
+      const saved = JSON.parse(readFileSync(configPath, "utf8"));
+      assert.deepEqual(saved.models, { quick: ["fake/healthy"] });
+      assert.equal(saved.selectedPrivate, "KEEP_ME");
+      assert.equal(saved.cache.enabled, true);
+      assert.equal(saved.cache.maxEntries, 500);
+      assert.equal(saved.cache.threshold, 0.88);
+      assert.equal(saved.reliability.failureThreshold, 3);
+      assert.equal(saved.debug.enabled, false);
+    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+  });
+
+  it("keeps inherited private and nondefault policy out of a new project config", async () => {
+    requests = [];
+    const env = fixture(port, ["healthy"]);
+    const agentConfig = join(env.home, ".pi", "agent", "bifrost.json");
+    const projectConfig = join(env.work, ".pi", "bifrost.json");
+    writeFileSync(agentConfig, JSON.stringify({
+      classifier: {
+        enabled: true,
+        backend: "prompt",
+        model: "fake/healthy",
+        endpoint: "https://private-endpoint-canary.invalid",
+        systemPrompt: "GLOBAL_SYSTEM_PROMPT_CANARY",
+        criteria: { general: "GLOBAL_CRITERIA_CANARY" },
+        privateSetting: "GLOBAL_CLASSIFIER_UNKNOWN_CANARY",
+      },
+      cache: { enabled: false, maxEntries: 17, threshold: 0.1 },
+      reliability: { failureThreshold: 19, windowMinutes: 47, cooldownMinutes: 91 },
+      rules: [{ pattern: "GLOBAL_RULE_CANARY", model: "general" }],
+    }));
+    writeFileSync(projectConfig, "{}\n");
+    try {
+      const result = await runInit({ ...env, args: "--write" });
+      assert.equal(result.timedOut, false);
+      assert.equal(result.violations, "");
+      assert.equal(result.code, 0, result.stderr);
+      assert.ok(requests.includes("healthy"));
+      const saved = JSON.parse(readFileSync(projectConfig, "utf8"));
+      const savedText = JSON.stringify(saved);
+      for (const inherited of ["GLOBAL_SYSTEM_PROMPT_CANARY", "GLOBAL_CRITERIA_CANARY", "private-endpoint-canary", "GLOBAL_CLASSIFIER_UNKNOWN_CANARY", "GLOBAL_RULE_CANARY"]) {
+        assert.equal(savedText.includes(inherited), false, `project config copied inherited value ${inherited}`);
+      }
+      for (const inheritedNamespace of ["classifier", "cache", "reliability", "rules"]) {
+        assert.equal(Object.hasOwn(saved, inheritedNamespace), false, `project config pinned inherited ${inheritedNamespace}`);
+      }
+
+      const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = join(env.home, ".pi", "agent");
+      try {
+        const inherited = loadConfigForReload(env.work, ROOT).config;
+        assert.equal(inherited.classifier?.systemPrompt, "GLOBAL_SYSTEM_PROMPT_CANARY");
+        assert.deepEqual(inherited.classifier?.criteria, { general: "GLOBAL_CRITERIA_CANARY" });
+        assert.equal(inherited.classifier?.endpoint, "https://private-endpoint-canary.invalid");
+        assert.equal(inherited.classifier?.privateSetting, "GLOBAL_CLASSIFIER_UNKNOWN_CANARY");
+        assert.equal(inherited.cache?.enabled, false);
+        assert.equal(inherited.cache?.maxEntries, 17);
+        assert.equal(inherited.cache?.threshold, 0.1);
+        assert.equal(inherited.reliability?.failureThreshold, 19);
+        assert.deepEqual(inherited.rules, [{ pattern: "GLOBAL_RULE_CANARY", model: "general" }]);
+        writeFileSync(agentConfig, JSON.stringify({ classifier: {
+          enabled: true,
+          backend: "prompt",
+          model: "fake/healthy",
+          endpoint: "https://private-endpoint-canary.invalid",
+          systemPrompt: "GLOBAL_SYSTEM_PROMPT_AFTER_EDIT",
+          criteria: { general: "GLOBAL_CRITERIA_AFTER_EDIT" },
+          privateSetting: "GLOBAL_CLASSIFIER_UNKNOWN_AFTER_EDIT",
+        } }));
+        assert.equal(loadConfigForReload(env.work, ROOT).config.classifier?.systemPrompt, "GLOBAL_SYSTEM_PROMPT_AFTER_EDIT");
+      } finally {
+        if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      }
+    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+  });
+
+  for (const args of ["--write", "-f --write"]) {
+    for (const targetKind of ["absent", "empty", "owned"]) {
+      const expectation = targetKind === "absent" ? "creates a fresh public starter" : "preserves inherited private settings";
+      it(`${expectation} through ${args} with ${targetKind} target`, async () => {
+        await assertInheritedSettingsMatrixCase(port, args, targetKind);
+      });
+    }
+  }
 });

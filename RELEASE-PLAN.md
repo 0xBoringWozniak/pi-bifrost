@@ -2,6 +2,18 @@
 
 Status: implementation authorized by the user on 7 October 2026. Scope is PRD.md and IMPLEMENTATION.md with image support excluded. This ledger records actual acceptance evidence; planned milestones are not completed features.
 
+## Release-audit repair (11 October)
+
+The five reproduced audit failures are repaired: offline preview, invalid startup sources, masked source versions, empty verified default tiers, and inherited settings copied by init. Preview also rejects invalid routing sources before it can call a classifier. Source-local self-fallback, duplicate and cycle errors cannot be hidden by overlays. Valid partial policies and regular-file read symlinks remain supported; source reads are capped at 10,000,000 bytes. Tier graph checks are iterative.
+
+Init keeps settings owned by the selected file and preserves inheritance from other layers. Exact public bundled defaults can seed a fresh file. Fresh init still detects a probe-verified classifier; private extension/global classifier settings remain inherited. Normal and forced init have finite source-selection and persistence-branch tests.
+
+Provider routing uses one immutable state snapshot per projection, then retains fresh atomic dispatch admission. The benchmark executes a pinned baseline export and compares memory/file-backed fixtures with semantic assertions and source/revision fingerprints.
+
+Independent code and assertion reviews approved their scopes before the final invalid-preview guard; that guard received a separate follow-up review. The primary passed 995 unit tests and typecheck before that final guard. The final complete release run and performance results must be bound to the published repair revision; the PR records that evidence. Earlier green checkpoints did not cover the failures found by this audit and are not evidence for these new branches. Live-provider acceptance remains separate. No merge, package publication, tag or version bump is authorized by this checkpoint.
+
+Full phase timing remains deferred under the accepted narrowed scope of ADR 0007. The public router remains experimental, with documented v1 snapshots; account-selectable dispatch, live quota adapters, general capability enforcement, images and thinking policy remain outside this repair.
+
 ## Probe-based first-use follow-up (11 October)
 
 The user explicitly authorized background provider probes for first-use setup. The implementation now starts with provisional catalog pools, checks model access without waiting before generation, and saves only successful generated pools with supported public settings. Private classifier templates remain inherited. Manual init preserves existing configuration data. If every probe fails, configuration stays unchanged. Manual `/bifrost init` retains probe-based behavior: reuse results from the last hour, probe when they are missing or old, and force fresh probes with `-f`.

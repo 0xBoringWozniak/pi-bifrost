@@ -44,6 +44,23 @@ function scope(state: ReliabilityV2State, key: string): ReliabilityV2State["scop
   return state.scopes[modelScopeKey(key)];
 }
 
+function providerView(state: Readonly<ReliabilityV2State>, providerId: string, includeUsagePause: boolean, now: number): ProviderCooldownView {
+  const usage = includeUsagePause ? scope(state, providerScopeModelKey("usage", providerId)) : undefined;
+  const rate = scope(state, providerScopeModelKey("rate", providerId));
+  const trial = scope(state, providerScopeModelKey("trial", providerId));
+  const activeUntil = [usage?.openUntil, rate?.openUntil]
+    .filter((until): until is number => typeof until === "number" && until > now)
+    .reduce<number | undefined>((latest, until) => Math.max(latest ?? 0, until), undefined);
+  const recoveryPending = [usage?.openUntil, rate?.openUntil]
+    .some((until) => until !== undefined && until <= now);
+  return {
+    providerId,
+    ...(activeUntil === undefined ? {} : { openUntil: activeUntil }),
+    trialActive: !!trial?.lease && trial.lease.generation === trial.generation && trial.lease.expiresAt > now,
+    recoveryPending,
+  };
+}
+
 export class ProviderCooldownStore {
   readonly store: ReliabilityV2Store;
   private readonly cooldownMs: number;
@@ -58,21 +75,14 @@ export class ProviderCooldownStore {
   }
 
   read(providerId: string, includeUsagePause = true, now = Date.now()): ProviderCooldownView {
+    return providerView(this.store.readSnapshot(), providerId, includeUsagePause, now);
+  }
+
+  readMany(providerIds: readonly string[], includeUsagePause = true, now = Date.now()): Map<string, ProviderCooldownView> {
+    const providers = new Set(providerIds);
+    if (providers.size === 0) return new Map();
     const state = this.store.readSnapshot();
-    const usage = includeUsagePause ? scope(state, providerScopeModelKey("usage", providerId)) : undefined;
-    const rate = scope(state, providerScopeModelKey("rate", providerId));
-    const trial = scope(state, providerScopeModelKey("trial", providerId));
-    const activeUntil = [usage?.openUntil, rate?.openUntil]
-      .filter((until): until is number => typeof until === "number" && until > now)
-      .reduce<number | undefined>((latest, until) => Math.max(latest ?? 0, until), undefined);
-    const recoveryPending = [usage?.openUntil, rate?.openUntil]
-      .some((until) => until !== undefined && until <= now);
-    return {
-      providerId,
-      ...(activeUntil === undefined ? {} : { openUntil: activeUntil }),
-      trialActive: !!trial?.lease && trial.lease.generation === trial.generation && trial.lease.expiresAt > now,
-      recoveryPending,
-    };
+    return new Map([...providers].map((providerId) => [providerId, providerView(state, providerId, includeUsagePause, now)]));
   }
 
   list(now = Date.now()): ProviderCooldownView[] {
@@ -263,10 +273,7 @@ export function projectProviderCooldownsForRouting(
   now = Date.now(),
 ): ReliabilityState {
   const projected: ReliabilityState["models"] = Object.assign(Object.create(null), state.models);
-  const providers = new Map<string, ProviderCooldownView>();
-  for (const model of models) {
-    if (!providers.has(model.provider)) providers.set(model.provider, providerStore.read(model.provider, includeUsagePause, now));
-  }
+  const providers = providerStore.readMany(models.map((model) => model.provider), includeUsagePause, now);
   for (const model of models) {
     const view = providers.get(model.provider)!;
     if (view.openUntil === undefined && !view.trialActive) continue;

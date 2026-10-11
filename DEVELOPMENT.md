@@ -74,3 +74,15 @@ npm run build:router
 ```
 
 `npm pack` runs this build through the `prepack` script.
+
+## Provider-state performance check
+
+Run this after freezing the candidate:
+
+```bash
+node --experimental-strip-types scripts/provider-projection-benchmark.mjs /tmp/provider-projection.json
+```
+
+The script executes the projection from pinned commit `b5b38945` and the current implementation. It checks identical selected and excluded state, snapshot read counts, source fingerprints and revision stability. Fixtures cover 10, 100 and 1,000 models, multiple providers, and small and large histories. It measures both injected-memory and real local-file reads. Representative cases use 101 samples and nearest-rank percentiles.
+
+This measures the provider projection and store, not a full Pi turn. Heap and RSS changes are noisy; JSON volume is a separate work estimate. Run the existing routing benchmark for the core resolver. Keep provider latency and generation quality out of these claims.

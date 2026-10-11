@@ -94,8 +94,8 @@ export interface RouteDecisionPool {
 export interface RouteDecisionSummary {
   readonly version: 1;
   readonly kind: "route-decision";
-  readonly outcome: "selected" | "unresolved" | "unclassified" | "usage";
-  readonly error?: "usage";
+  readonly outcome: "selected" | "unresolved" | "unclassified" | "usage" | "config_invalid";
+  readonly error?: "usage" | "config_invalid";
   readonly classification: {
     readonly source: ClassificationSource | "fallback" | "unclassified";
     readonly tier?: string;
@@ -298,7 +298,7 @@ export interface PipelineDeps {
 // ── Pipeline interface ─────────────────────────────────────────
 
 export interface ClassificationPipeline {
-  readonly classify: (text: string, signal?: AbortSignal) => Promise<ClassificationResult>;
+  readonly classify: (text: string, signal?: AbortSignal, options?: { readonly offline?: boolean }) => Promise<ClassificationResult>;
   /** Cheap local check used to preserve explicit rule ownership before recovery routing. */
   readonly matchRule: (text: string) => string | undefined;
 }
@@ -341,7 +341,7 @@ export function createPipeline(deps: PipelineDeps): ClassificationPipeline {
   // Per-rule testing preserves rule-order match precedence exactly.
   const regexRules = compileRules(rawRegexRules);
 
-  async function classify(text: string, signal?: AbortSignal): Promise<ClassificationResult> {
+  async function classify(text: string, signal?: AbortSignal, options?: { readonly offline?: boolean }): Promise<ClassificationResult> {
     const startedAt = performance.now();
     const deadlineAt = totalTimeoutValid && totalTimeoutMs !== undefined ? startedAt + totalTimeoutMs : undefined;
     let runController: AbortController | undefined;
@@ -462,7 +462,7 @@ export function createPipeline(deps: PipelineDeps): ClassificationPipeline {
     }
 
     // Stage 3: optional direct classifier (typesafe or pi-native), then prompt fallback.
-    if (classifyDirect && classificationOutcome !== "deadline" && !disableExternalForInvalidTimeout) {
+    if (!options?.offline && classifyDirect && classificationOutcome !== "deadline" && !disableExternalForInvalidTimeout) {
       const endDirect = measureDebug("pipeline", "direct.attempt");
       let directMeasured = false;
       const finishDirect = (meta?: Record<string, unknown>): void => {
@@ -497,7 +497,7 @@ export function createPipeline(deps: PipelineDeps): ClassificationPipeline {
     }
 
     // Existing prompt classifier — try each model in priority order.
-    for (const model of disableExternalForInvalidTimeout ? [] : classifierModels) {
+    for (const model of options?.offline || disableExternalForInvalidTimeout ? [] : classifierModels) {
       if (classificationOutcome === "deadline") break;
       const endLLM = measureDebug("pipeline", "classifier.attempt");
       let llmMeasured = false;

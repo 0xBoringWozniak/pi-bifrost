@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { loadConfigWithSourceOverride } from "../config.ts";
+import { BUNDLED_PUBLIC_INIT_DEFAULTS, loadConfigForReload, loadConfigWithSourceOverride } from "../config.ts";
 
 const AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 
@@ -50,6 +50,12 @@ describe("config source override loading", () => {
         general: ["project/model"],
         quick: ["candidate/quick"],
       });
+      assert.deepEqual(loaded.sourceFields, [
+        { layer: "extension", fields: ["models"] },
+        { layer: "global", fields: ["models"] },
+        { layer: "workspace", fields: ["models"] },
+        { layer: "project", fields: ["models"] },
+      ]);
     });
   });
 
@@ -82,6 +88,155 @@ describe("config source override loading", () => {
       const overlayInvalid = loadConfigWithSourceOverride(cwd, extensionDir, "user", Buffer.from("{}"));
       assert.deepEqual(overlayInvalid.diagnostics.map(({ layer }) => layer), ["project"]);
       assert.match(overlayInvalid.diagnostics[0]!.message, /must contain an object/u);
+    });
+  });
+
+  it("rejects an unsupported version in the selected layer before a higher layer can mask it", () => {
+    withConfigTree(({ cwd, extensionDir }) => {
+      writeJson(join(cwd, ".pi", "bifrost.json"), { schemaVersion: 2 });
+      const loaded = loadConfigWithSourceOverride(cwd, extensionDir, "workspace", Buffer.from(JSON.stringify({
+        schemaVersion: 999,
+      }), "utf8"));
+      assert.equal(loaded.diagnostics.length, 1);
+      assert.equal(loaded.diagnostics[0]!.layer, "workspace");
+      assert.match(loaded.diagnostics[0]!.message, /schemaVersion is unsupported/u);
+    });
+  });
+
+  it("qualifies only exact bundled public extension defaults without exposing source values", () => {
+    withConfigTree(({ cwd, extensionDir }) => {
+      const defaults = BUNDLED_PUBLIC_INIT_DEFAULTS;
+      writeJson(join(extensionDir, "bifrost.json"), {
+        cache: { threshold: 0.88, maxEntries: 500, enabled: true },
+        classifier: { fallbackToRegex: true, temperature: 0, maxTokens: 20, method: "auto", enabled: true },
+        customNote: "private extension setting",
+      });
+
+      const canonical = loadConfigWithSourceOverride(cwd, extensionDir, "project", Buffer.from("{}"));
+      assert.deepEqual(canonical.publicDefaultFields, ["classifier", "cache"]);
+      assert.deepEqual(canonical.sourceFields, [{
+        layer: "extension",
+        fields: ["cache", "classifier", "customNote"],
+      }, { layer: "project", fields: [] }]);
+      assert.deepEqual(defaults.classifier, {
+        enabled: true, method: "auto", maxTokens: 20, temperature: 0, fallbackToRegex: true,
+      });
+
+      writeJson(join(extensionDir, "bifrost.json"), {
+        cache: { enabled: false, maxEntries: 500, threshold: 0.88 },
+        classifier: {
+          enabled: true, method: "auto", maxTokens: 20, temperature: 0, fallbackToRegex: true,
+          systemPrompt: "private custom prompt",
+        },
+      });
+      const customized = loadConfigWithSourceOverride(cwd, extensionDir, "project", Buffer.from("{}"));
+      assert.deepEqual(customized.publicDefaultFields, []);
+      assert.deepEqual(customized.sourceFields, [
+        { layer: "extension", fields: ["cache", "classifier"] },
+        { layer: "project", fields: [] },
+      ]);
+      assert.equal(JSON.stringify(customized.publicDefaultFields).includes("private custom prompt"), false);
+      assert.equal(JSON.stringify(customized.sourceFields).includes("private custom prompt"), false);
+    });
+  });
+
+  it("rejects source-local self, duplicate, and cycle errors before higher layers mask them", () => {
+    withConfigTree(({ cwd, extensionDir, agentDir }) => {
+      writeJson(join(extensionDir, "bifrost.json"), {
+        tierPolicies: {
+          self: { fallbackTiers: ["self"] },
+          duplicate: { fallbackTiers: ["other", "other"] },
+          cycleA: { fallbackTiers: ["cycleB"] },
+          cycleB: { fallbackTiers: ["cycleA"] },
+        },
+      });
+      writeJson(join(agentDir, "bifrost.json"), { tierPolicies: { self: { fallbackTiers: [] } } });
+      writeJson(join(cwd, "bifrost.json"), { tierPolicies: { duplicate: { fallbackTiers: [] } } });
+      writeJson(join(cwd, ".pi", "bifrost.json"), { tierPolicies: { cycleA: { fallbackTiers: [] }, cycleB: { fallbackTiers: [] } } });
+
+      const loaded = loadConfigForReload(cwd, extensionDir);
+      const extensionDiagnostics = loaded.diagnostics.filter(({ layer }) => layer === "extension");
+      assert.equal(extensionDiagnostics.length, 1);
+      assert.match(extensionDiagnostics[0]!.message, /source-local policy/u);
+    });
+  });
+
+  it("checks every on-disk source layer and each prospective editable source", () => {
+    const sourceFiles = {
+      extension: (extensionDir: string, _agentDir: string, _cwd: string) => join(extensionDir, "bifrost.json"),
+      global: (_extensionDir: string, agentDir: string, _cwd: string) => join(agentDir, "bifrost.json"),
+      workspace: (_extensionDir: string, _agentDir: string, cwd: string) => join(cwd, "bifrost.json"),
+      project: (_extensionDir: string, _agentDir: string, cwd: string) => join(cwd, ".pi", "bifrost.json"),
+    };
+    for (const source of ["extension", "global", "workspace", "project"] as const) {
+      withConfigTree(({ cwd, extensionDir, agentDir }) => {
+        writeJson(sourceFiles[source](extensionDir, agentDir, cwd), {
+          tierPolicies: { general: { fallbackTiers: ["general"] } },
+        });
+        if (source !== "project") {
+          writeJson(join(cwd, ".pi", "bifrost.json"), { tierPolicies: { general: { fallbackTiers: [] } } });
+        }
+        const loaded = loadConfigForReload(cwd, extensionDir);
+        const expectedLayer = source === "global" ? "global" : source;
+        assert.ok(loaded.diagnostics.some(({ layer }) => layer === expectedLayer), `${source} source should be diagnosed`);
+      });
+    }
+
+    for (const source of ["project", "workspace", "user"] as const) {
+      withConfigTree(({ cwd, extensionDir }) => {
+        writeJson(join(cwd, ".pi", "bifrost.json"), { tierPolicies: { general: { fallbackTiers: [] } } });
+        const loaded = loadConfigWithSourceOverride(cwd, extensionDir, source, Buffer.from(JSON.stringify({
+          tierPolicies: { general: { fallbackTiers: ["general"] } },
+        }), "utf8"));
+        const expectedLayer = source === "user" ? "global" : source;
+        assert.ok(loaded.diagnostics.some(({ layer }) => layer === expectedLayer), `${source} prospective source should be diagnosed`);
+      });
+    }
+  });
+
+  it("rejects invalid source-local economics before a valid higher namespace replaces it", () => {
+    withConfigTree(({ cwd, extensionDir, agentDir }) => {
+      writeJson(join(agentDir, "bifrost.json"), {
+        schemaVersion: 2,
+        economics: {
+          mode: "policy",
+          scopes: { selected: { kind: "model", model: "fixture/model" } },
+          sources: [],
+          admission: [{ id: "daily", scopeRef: "selected", windowId: "day", reserveRatio: 2 }],
+        },
+      });
+      writeJson(join(cwd, "bifrost.json"), {
+        economics: { mode: "observe", scopes: {}, sources: [], admission: [] },
+      });
+
+      const loaded = loadConfigForReload(cwd, extensionDir);
+      assert.ok(loaded.diagnostics.some(({ layer, message }) => layer === "global" && /economics/u.test(message)));
+    });
+  });
+
+  it("rejects oversized prospective config bytes before decoding or applying them", () => {
+    withConfigTree(({ cwd, extensionDir }) => {
+      const bytes = Buffer.alloc(10_000_001, 0x20);
+      const loaded = loadConfigWithSourceOverride(cwd, extensionDir, "project", bytes);
+      assert.equal(loaded.diagnostics.length, 1);
+      assert.match(loaded.diagnostics[0]!.message, /size limit/u);
+    });
+  });
+
+  it("bounds source diagnostics and never includes source values", () => {
+    withConfigTree(({ cwd, extensionDir, agentDir }) => {
+      const secret = `PRIVATE_CONFIG_VALUE_${"x".repeat(10_000)}`;
+      for (const path of [
+        join(extensionDir, "bifrost.json"),
+        join(agentDir, "bifrost.json"),
+        join(cwd, "bifrost.json"),
+        join(cwd, ".pi", "bifrost.json"),
+      ]) writeJson(path, { schemaVersion: secret, affinity: { mode: "private-invalid-value" } });
+
+      const loaded = loadConfigForReload(cwd, extensionDir);
+      assert.ok(loaded.diagnostics.length <= 32);
+      assert.ok(loaded.diagnostics.every(({ message }) => message.length <= 192));
+      assert.equal(JSON.stringify(loaded.diagnostics).includes(secret), false);
     });
   });
 });

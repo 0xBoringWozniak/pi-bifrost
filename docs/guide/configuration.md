@@ -52,7 +52,9 @@ By default, an unavailable or unhealthy tier can still fall back to the configur
 }
 ```
 
-For `frontier`, Bifrost tries `frontier`, then `general`, then `quick`; it stops at the first tier with an eligible model. The empty list makes `quick` a singleton boundary. A tier without a `tierPolicies` entry keeps the legacy default-tier fallback, including when `schemaVersion` is `2`. Version 2 by itself does not change routing. References must name configured tiers, and duplicate, self, or cyclic fallback references are rejected. Invalid version-2 policy configuration blocks physical and Auto routing until corrected. Reload rejects unreadable, malformed, or non-object config layers and keeps the active configuration, including any session-local pin.
+For `frontier`, Bifrost tries `frontier`, then `general`, then `quick`; it stops at the first tier with an eligible model. The empty list makes `quick` a singleton boundary. A tier without a `tierPolicies` entry keeps the legacy default-tier fallback, including when `schemaVersion` is `2`. Version 2 by itself does not change routing. References must name configured tiers, and duplicate, self, or cyclic fallback references are rejected. Invalid version-2 policy configuration blocks physical and Auto routing until corrected. Startup checks each source before merging. An invalid source, unsupported version, or invalid strict policy stops routing and preview classification. A higher layer cannot hide the invalid source. Reload keeps the last valid configuration and session-local pin if a source fails these checks. Fix that source and reload to resume.
+
+Configuration sources must be regular files of at most 10,000,000 bytes. Read-only symlinks to regular files are supported. Managed writes keep their existing symlink protection. Oversized sources are rejected, not truncated.
 
 ### Economic observations and billing preference (schema version 2)
 
