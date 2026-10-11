@@ -953,7 +953,7 @@ def main() -> int:
             if name == "reload-invalid-economics":
                 reload_text = " ".join((OUT / "reload-invalid-economics.txt").read_text(errors="ignore").split())
                 prefix = "Bifrost config reload rejected:"
-                body = "The configured economic policy is invalid or unsupported."
+                body = "workspace config economics contains an invalid source-local policy."
                 if reload_text.count(prefix) != 1 or reload_text.count(body) != 1:
                     raise AssertionError("invalid economics reload should report the rejection once in the current UI")
                 if "hello after rejected reload" not in reload_text or "healthy" not in reload_text:

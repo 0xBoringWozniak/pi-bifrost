@@ -108,6 +108,81 @@ function runPi({ home, work, args }) {
   });
 }
 
+function startRpc({ home, work }) {
+  const env = { ...process.env };
+  delete env.TYPESAFE_API_KEY;
+  const child = spawn("pi", ["-e", EXTENSION_PATH, "--approve", "--mode", "rpc", "--no-session", "--no-tools", "--model", "fake/fast"], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...env,
+      HOME: home,
+      PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
+      PI_SKIP_VERSION_CHECK: "1",
+      PI_OFFLINE: "1",
+      NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
+      BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
+      BIFROST_TEST_NETWORK_VIOLATIONS: join(home, "test-network-violations.log"),
+    },
+    cwd: work,
+  });
+  const records = [];
+  let pending = "";
+  let stderr = "";
+  let wake;
+  let closed;
+  let spawnError;
+  const childClosed = new Promise((resolve) => child.once("close", (code) => { closed = code; wake?.(); resolve(code); }));
+  child.once("error", (error) => { spawnError = error; wake?.(); });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    const lines = `${pending}${chunk}`.split("\n");
+    pending = lines.pop();
+    for (const line of lines) { try { records.push(JSON.parse(line)); } catch { /* wait for the expected response */ } }
+    wake?.();
+  });
+  child.stderr.on("data", (chunk) => { stderr += chunk; wake?.(); });
+  const wait = (deadline) => new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); if (wake === finish) wake = undefined; resolve(); };
+    const timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
+    wake = finish;
+  });
+  async function prompt(message) {
+    const id = `legacy-reload-${Date.now()}-${records.length}`;
+    const start = records.length;
+    child.stdin.write(`${JSON.stringify({ id, type: "prompt", message })}\n`);
+    const deadline = Date.now() + 30_000;
+    let index = start;
+    let settled = false;
+    while (Date.now() < deadline) {
+      while (index < records.length) {
+        const record = records[index++];
+        if (record.id === id && record.type === "response") {
+          assert.equal(record.success, true, JSON.stringify(record));
+          if (record.data?.disposition !== "started") return records.slice(start);
+          settled = true;
+        }
+        if (settled && record.type === "agent_settled") return records.slice(start);
+      }
+      assert.ifError(spawnError);
+      assert.equal(closed, undefined, `Pi RPC exited before handling: ${message}`);
+      await wait(deadline);
+    }
+    throw new Error(`Pi RPC timed out: ${message}\n${stderr}`);
+  }
+  async function close() {
+    child.stdin.end();
+    await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+    if (closed === undefined) { child.kill("SIGKILL"); await childClosed; }
+    assert.equal(closed, 0, stderr);
+    try {
+      assert.equal(readFileSync(join(home, "test-network-violations.log"), "utf8"), "",
+        "test network guard recorded a blocked external request");
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  return { prompt, close, get stderr() { return stderr; } };
+}
+
 function readState(work) {
   try {
     return JSON.parse(readFileSync(join(work, ".pi", "bifrost-state.json"), "utf8"));
@@ -263,22 +338,30 @@ describe("legacy physical routing regression", { timeout: 240_000, concurrency: 
         models: [{ id: "fast", reasoning: false }],
         bifrost: strictConfig,
       });
-      writeFileSync(join(home, ".pi", "agent", "bifrost.json"), JSON.stringify(strictConfig));
-      writeFileSync(join(work, "bifrost.json"), "null\n");
+      const rpc = startRpc({ home, work });
+      try {
+        const handshake = await rpc.prompt("/bifrost inspect --json");
+        assert.ok(handshake.some((record) => record.type === "response" && record.data?.disposition === "handled"),
+          "Pi must finish the inspect handshake with the valid strict config before the source changes");
+        writeFileSync(join(work, "bifrost.json"), "null\n");
 
-      const before = await fakeStats(server.port);
-      const { code, stderr } = await runPi({
-        home, work,
-        args: ["--no-session", "--model", "fake/fast", "-p", "/bifrost reload", "restricted keep this turn"],
-      });
-      const after = await fakeStats(server.port);
+        const before = await fakeStats(server.port);
+        const reload = await rpc.prompt("/bifrost reload");
+        const rejectedTurn = await rpc.prompt("restricted keep this turn");
+        const after = await fakeStats(server.port);
+        const messages = [...reload, ...rejectedTurn]
+          .filter((record) => record.type === "extension_ui_request" && record.method === "notify")
+          .map((record) => record.message);
+        const output = `${messages.join("\n")}\n${rpc.stderr}`;
 
-      assert.equal(code, 0);
-      assert.match(stderr, /config reload rejected: workspace config must contain an object/);
-      assert.match(stderr, /strict route for tier "restricted" has no healthy model/);
-      assert.match(stderr, /the turn was not sent/);
-      assert.equal((after.attempts.fast ?? 0) - (before.attempts.fast ?? 0), 0,
-        "a malformed project layer must not erase the last-good strict boundary and continue on Pi's active model");
+        assert.match(output, /config reload rejected: workspace config must contain an object/);
+        assert.match(output, /strict route for tier "restricted" has no healthy model/);
+        assert.match(output, /the turn was not sent/);
+        assert.equal((after.attempts.fast ?? 0) - (before.attempts.fast ?? 0), 0,
+          "a malformed project layer must not erase the last-good strict boundary and continue on Pi's active model");
+      } finally {
+        await rpc.close();
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
