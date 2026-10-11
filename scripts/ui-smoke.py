@@ -658,16 +658,38 @@ def capture(
             if not config_path.is_file() or not ownership_path.is_file():
                 raise AssertionError("fresh background setup did not persist project config and ownership receipt")
             saved = json.loads(config_path.read_text())
-            if set(saved) - {"schemaVersion", "default", "models", "classifier"}:
-                raise AssertionError("fresh background setup copied unrelated or sensitive config fields")
+            supported_settings = {
+                "schemaVersion", "enabled", "default", "models", "strategy", "categoryStrategies", "rules",
+                "tierPolicies", "classifier", "cache", "debug", "reliability", "probe", "affinity",
+            }
+            if set(saved) - supported_settings:
+                raise AssertionError("fresh background setup copied unsupported or unrelated config fields")
             if saved.get("default") not in saved.get("models", {}):
                 raise AssertionError("fresh background config default does not name a saved tier")
             memberships = [model for values in saved.get("models", {}).values() for model in values]
             if "fake/healthy" not in memberships:
                 raise AssertionError("fresh background config did not save the catalog model")
+            source = json.loads((ROOT / "bifrost.json").read_text())
+            for key in ("strategy", "categoryStrategies", "cache", "debug", "reliability"):
+                if key in source and saved.get(key) != source[key]:
+                    raise AssertionError(f"fresh background config did not preserve supported {key} settings")
             classifier = saved.get("classifier", {})
-            if set(classifier) - {"model", "method"}:
-                raise AssertionError("fresh background config copied unrelated classifier fields")
+            classifier_settings = {
+                "enabled", "backend", "model", "method", "maxTokens", "temperature", "fallbackToRegex",
+                "totalTimeoutMs", "minConfidence", "fallback", "apiKeyEnv", "typesafe", "piNative",
+            }
+            if set(classifier) - classifier_settings:
+                raise AssertionError("fresh background config copied unsupported classifier fields")
+            nested_classifier_settings = {
+                "typesafe": {"model", "timeoutMs", "maxAttempts", "debug", "apiKeyEnv", "metrics"},
+                "piNative": {"model", "timeoutMs", "maxAttempts"},
+            }
+            for key, supported in nested_classifier_settings.items():
+                nested = classifier.get(key, {})
+                if set(nested) - supported or set(nested.get("metrics", {})) - {"enabled"}:
+                    raise AssertionError(f"fresh background config copied unsupported classifier {key} fields")
+            if "systemPrompt" in classifier or "criteria" in classifier:
+                raise AssertionError("fresh background config copied inherited classifier prompt content")
             receipt = json.loads(ownership_path.read_text())
             generated = [
                 model
@@ -692,6 +714,20 @@ def capture(
             memberships = [model for values in saved.get("models", {}).values() for model in values]
             if "manual/keep" not in memberships or "fake/healthy" not in memberships:
                 raise AssertionError("manual init did not preserve manual membership and add catalog membership")
+            if "fake/classifier" not in memberships or "fake/usage-exhausted" in memberships:
+                raise AssertionError("manual init did not save only the successful probe memberships")
+            ownership_path = workspace / ".pi" / "bifrost-reconcile-workspace-ownership.json"
+            if not ownership_path.is_file():
+                raise AssertionError("manual init did not save the generated-membership ownership receipt")
+            receipt = json.loads(ownership_path.read_text())
+            generated = [
+                model
+                for source in receipt.get("sources", {}).values()
+                for models in source.get("generated", {}).values()
+                for model in models
+            ]
+            if "fake/usage-exhausted" in generated or not {"fake/healthy", "fake/classifier"}.issubset(generated):
+                raise AssertionError("manual init ownership receipt does not match successful probe results")
             if saved.get("customSetting") != {"preserve": True}:
                 raise AssertionError("manual init changed an unrelated config field")
             if saved.get("classifier") != {
@@ -706,7 +742,7 @@ def capture(
                 raise AssertionError("manual init must ask exactly once to save the refreshed setup")
             if "choose classifier" in init_screen or "select classifier" in init_screen:
                 raise AssertionError("manual init opened a classifier picker after save")
-            if "save memberships: +3 / -0" not in init_screen or "to workspace (bifrost.json)" not in init_screen:
+            if "save memberships: +2 / -0" not in init_screen or "to workspace (bifrost.json)" not in init_screen:
                 raise AssertionError("manual init did not preview the exact workspace membership changes")
 
         time.sleep(2.0)
