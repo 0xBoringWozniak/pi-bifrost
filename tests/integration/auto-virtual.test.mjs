@@ -427,6 +427,19 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
         assert.ok(probesAfterFirst >= 1);
         assert.ok(afterFirst.stats.some((item) => item.kind === "probe" && item.completed && item.model === "probe-background-slow-fail"));
         assert.ok(existsSync(join(work, ".pi", "bifrost-probe.json")), "the safe health report explains why setup was not saved");
+        const warningText = "No catalog models passed the background health check; starter config was not saved.";
+        const warningDeadline = Date.now() + 5_000;
+        let warningNotification;
+        while (Date.now() < warningDeadline) {
+          warningNotification = rpc.records.find((record) => record.type === "extension_ui_request"
+            && record.method === "notify" && typeof record.message === "string" && record.message.includes(warningText));
+          if (warningNotification) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        assert.ok(warningNotification, `all-failed background setup must notify the user: ${JSON.stringify({
+          stderr: rpc.stderr,
+          notifications: rpc.records.filter((record) => record.type === "extension_ui_request" && record.method === "notify"),
+        })}`);
 
         await rpc.userTurn("quick say ready again");
         const afterSecond = await fakeStats(server.port);
