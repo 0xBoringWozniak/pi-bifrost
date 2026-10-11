@@ -2,6 +2,12 @@
 
 Status: implementation authorized by the user on 7 October 2026. Scope is PRD.md and IMPLEMENTATION.md with image support excluded. This ledger records actual acceptance evidence; planned milestones are not completed features.
 
+## Probe-based first-use follow-up (11 October)
+
+The user explicitly authorized background provider probes for first-use setup. The implementation now starts with provisional catalog pools, checks model access without waiting before generation, and saves only successful generated pools with supported public settings. Private classifier templates remain inherited. Manual init preserves existing configuration data. If every probe fails, configuration stays unchanged. Manual `/bifrost init` retains probe-based behavior: reuse results from the last hour, probe when they are missing or old, and force fresh probes with `-f`.
+
+The added Pi integration cases cover first-response timing, successful-only persistence, safe installation on the next input, all-failed warnings without writes, provider pauses, and configuration races. Manual-init review approved cache completeness, settings preservation, forced probes, and consistent project cache paths. Background review and full release verification remain required on the final frozen candidate. The verification manifest and repair PR record that evidence. Earlier checkpoints below do not verify this follow-up.
+
 ## Current review repair checkpoint (10 October)
 
 The seven remaining review findings are addressed. Init refreshes the catalog before forced probes, adds only probe-verified new models, and preserves existing memberships. Long probes retain the command's original refresh evidence only while catalog keys and evidence identities remain unchanged, including after save confirmation. Expired prior evidence remains advisory. Classifier selection can save generated pools into an unchanged empty configuration through the existing transaction.

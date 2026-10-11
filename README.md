@@ -20,9 +20,9 @@ pi install npm:pi-bifrost
 
 Fresh installs route by default. Before Pi sends your message, Bifrost chooses the active model in Pi.
 
-When no route file or meaningful configuration blocks setup, Bifrost builds model lists from Pi's catalog in the background. It saves a minimal `.pi/bifrost.json` in the background. You do not need to run `/bifrost init`. An empty `{}` file does not block setup. A partial configuration, route file, or explicit routing override does.
+When no route file, meaningful configuration, runtime routing preference, or explicit routing override blocks setup, Bifrost loads provisional model lists from Pi's catalog before it sends your first message. It checks model access in the background, then saves only successful generated pools to `.pi/bifrost.json`. An empty `{}` file does not block setup. A configuration with settings does.
 
-The save stores no prompt or secret data. If a safe save cannot finish, routing continues in memory and Bifrost warns you. See [Getting started](docs/guide/getting-started.md).
+Provisional pools are catalog entries, not proof that a model works. Background probes send small provider requests and can use credits or reach rate limits. If no model passes, Bifrost leaves configuration unchanged and warns you. The generated configuration adds no prompts or credentials. See [Getting started](docs/guide/getting-started.md).
 
 Select `bifrost/auto` in Pi's `/model` picker to let Bifrost choose which model answers each message. The footer shows Auto and the selected model. Use `/bifrost inspect` or `/bifrost debug` to see model lists and status without a classifier call. Pi's list does not prove a model will work.
 
@@ -39,7 +39,7 @@ sequenceDiagram
     Bifrost->>Model: Use quick tier strategy
 ```
 
-Run `/bifrost init` to refresh Pi's model list or save starter lists. It asks once before saving, but its summary does not list every model ID or how Bifrost chooses among models. Review or edit the saved configuration before sending a message. Pass `-f` to send model test requests. These requests can use credits or reach usage limits.
+Run `/bifrost init` to refresh Pi's model list or reconcile model pools. It reuses probe results from the last hour; otherwise it checks models before it proposes changes. Pass `-f` to force fresh probes. Probes can use credits or reach rate limits. Init preserves other configuration fields and handwritten model entries. It asks once before saving, but its summary does not list every model ID or how Bifrost chooses among models.
 
 By default, Auto can keep a successful model for later messages in the same tier while it remains allowed. A different tier uses its own model selection rule. See [Auto routing](docs/guide/auto-routing.md).
 

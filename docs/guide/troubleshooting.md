@@ -24,14 +24,15 @@ It shows effective routing and reliability state after configuration layers merg
 | Pi reports a usage or billing rejection | `/bifrost reliability`; `/bifrost debug` | By default, the configured Pi provider is paused in Auto and physical routing | Wait for the pause or use `/bifrost reliability reset --provider <exact-id>`. A reset stops during an active recovery trial. Auto can make one alternate attempt only after Pi proves the turn was empty and safe. Set `reliability.retryOnAllowanceExhausted: false` to disable that retry. See [provider pauses](reliability-and-cache.md#provider-pauses-are-not-account-checks) |
 | A provider returns HTTP 429 | `/bifrost reliability`; `/bifrost debug` | Bifrost applies a short provider pause. A clear quota response uses the usage-pause policy instead. | Wait for the pause. The rate-limit pause does not retry the current prompt. See [provider pauses](reliability-and-cache.md#provider-pauses-are-not-account-checks) |
 | Config edit has no effect | `/bifrost debug` | Higher-precedence config overrides it or config was not reloaded | Check all config locations; edit winning layer; run `/bifrost reload` |
-| Init probe result is stale | `/bifrost init -f` | Cached probe is older than one hour | Run `/bifrost init -f` to force a fresh probe |
+| Init reuses old probe results | `/bifrost init` | Probe results are newer than one hour | Pass `-f` to `/bifrost init` to force fresh probes |
+| First-use setup cannot save verified pools | `/bifrost debug`; inspect provider access | No model passed its background probe, or a configuration changed before the safe save | Fix provider access and run `/bifrost init -f`; review the save target before confirming |
 | Prompt classifier fails | `/bifrost classifier test`; `/bifrost classifier status` | Missing model, provider error, invalid response, or fallback configuration | Select a working classifier model or disable classifier for rules/default-only routing |
 | TypeSafe/Jev or Pi-native is unavailable | `/bifrost classifier status`; `/bifrost classifier test` | Missing TypeSafe credential, empty Pi classifier catalog, timeout, rate limit, or open classifier circuit | Run `/login` or set `TYPESAFE_API_KEY`; inspect Pi's catalog and `enabledModels` filter; use prompt/regex fallback |
 | Tier prefix reaches model unchanged | `/bifrost debug` | Session is pinned, prefix is unknown, or tier key is unsupported syntax | Unpin; use a configured lowercase alphabetic single-word tier followed by whitespace |
 
 ## Lower probe pressure
 
-`/bifrost probe` sends a tiny request to every available chat model. `/bifrost init` refreshes model metadata but does not probe models. Pass `-f` to `/bifrost init` when you want a fresh probe. Default concurrency is 50. Before a probe, lower it in `~/.pi/agent/bifrost.json` or `.pi/bifrost.json` when providers enforce tight burst limits:
+`/bifrost probe` sends a tiny request to every available chat model. `/bifrost init` reuses results from the last hour or probes when they are missing or old. Pass `-f` to force fresh probes. Manual probe concurrency defaults to 50. First-use background concurrency defaults to 3. The default timeout is 10 seconds per model. `probe.concurrency` and `probe.timeoutMs` apply to both paths. These probe results expire after one hour. Before a probe, lower concurrency in `~/.pi/agent/bifrost.json` or `.pi/bifrost.json` when providers enforce tight burst limits:
 
 ```json
 {
@@ -42,7 +43,7 @@ It shows effective routing and reliability state after configuration layers merg
 }
 ```
 
-The primary probe transport uses `1+1=` and caps output at 5 tokens. An empty response may trigger one minimal-session fallback request. Probes may incur provider usage or rate limits.
+The primary probe transport uses `1+1=` and caps output at 5 tokens. An empty response may trigger one minimal-session fallback request. Probes can use provider credits or reach rate limits. First-use routes can use provisional catalog pools while those checks run. If all checks fail, Bifrost does not save a configuration.
 
 ## Understand preview output
 

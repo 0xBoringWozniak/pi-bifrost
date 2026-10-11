@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, ModelSelectorComponent, getAgentDir, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
-import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadRuntimeState, runtimeStatePath } from "./runtime-state.ts";
 import type { BifrostConfig, ClassifierConfig } from "./config.ts";
@@ -10,7 +10,7 @@ import type { CacheEntry } from "./cache.ts";
 import { cachePath, loadCache, saveCache, DEFAULT_MAX_ENTRIES, DEFAULT_THRESHOLD } from "./cache.ts";
 import { buildRouteDecisionSummary, type ClassificationPipeline, type ClassificationResult, type ClassificationSource, type RouteDecisionSummary } from "./classification-pipeline.ts";
 import { setupDebug, debug, debugMeasure } from "./debug.ts";
-import { runProbe, probeOptionsFromConfig, PROBE_PROMPT_TEXT } from "./probe.ts";
+import { runProbe, probeOptionsFromConfig, PROBE_PROMPT_TEXT, readRecentCompleteProbeReport } from "./probe.ts";
 import { setBifrostModeStatus, setBifrostStatus } from "./ux-status.ts";
 import { showBifrostResult } from "./result-viewer.ts";
 import {
@@ -29,7 +29,7 @@ import type { ReliabilityV2Store } from "./reliability-v2-store.ts";
 import { ReliabilityV2StoreError } from "./reliability-v2-store.ts";
 import type { ProviderCooldownStore } from "./provider-cooldowns.ts";
 import { projectProviderCooldownsForRouting, providerScopeModelKey } from "./provider-cooldowns.ts";
-import { emptyReliabilityState, getCircuitState, hasActiveAllowanceCooldown } from "./reliability.ts";
+import { emptyReliabilityState, getCircuitState, hasActiveAllowanceCooldown, resolveReliabilityConfig } from "./reliability.ts";
 import { createProviderCooldownStore, createReliabilityV2Store, reliabilityV2Config, reliabilityV2Path } from "./runtime-reliability-v2.ts";
 import { projectReliabilityV2ForRouting } from "./reliability-v2-routing.ts";
 import { classifierMetricsEnabled, type ClassifierMetricsState, type ClassifierMetricsStore } from "./classifier-metrics.ts";
@@ -90,6 +90,7 @@ export interface BifrostState {
   reliabilityV2ConfigValid?: boolean;
   reliabilityV2StateError?: string;
   onConfigInstalled?: (config: BifrostConfig, previousConfig: BifrostConfig, validatedReload?: boolean) => void;
+  onInitStarted?: (session: object) => BifrostConfig | undefined;
   onManualControl?: (session: object, action?: "on" | "off" | "pin" | "unpin") => void;
   /** Read-only projection of the current branch-local successful Auto anchor. */
   getAffinityAnchor?: (ctx: ExtensionContext) => AffinityAnchor | undefined;
@@ -707,8 +708,9 @@ async function handleInit(
   ctx: ExtensionContext,
   state: BifrostState,
 ): Promise<void> {
+  const bootstrapOriginalConfig = state.onInitStarted?.(ctx.sessionManager);
+  const initConfig = bootstrapOriginalConfig ?? state.config;
   clearBifrostWidgets(ctx);
-  const forceProbe = isForced(args);
   let initRefreshReceipt: { catalogKeys: string[]; evidence: Map<string, object> } | undefined;
   let refreshedCatalogKeys: string[] | undefined;
   let refreshedProviders: string[] = [];
@@ -760,39 +762,32 @@ async function handleInit(
       log(ctx, "Pi's model catalog could not be refreshed; using the available catalog snapshot.", "warning");
     } finally { uiDone(ctx); }
   }
-  // Reuse valid probe data when present. A paid probe runs only for explicit -f.
+  // Reuse recent probe data; otherwise manual init probes before proposing model pools.
   const probePath = join(process.cwd(), ".pi", "bifrost-probe.json");
+  const available = ctx.modelRegistry.getAvailable().filter((model) => !isVirtualModel(model));
   let workingModels: { provider: string; model: string; cost: { input: number; output: number }; duration_ms: number }[] = [];
   let probeLoaded = false;
+  let ranProbe = false;
   let probeAge = "";
 
-  if (existsSync(probePath)) {
-    try {
-      const probeData = JSON.parse(readFileSync(probePath, "utf-8"));
-      const probeStat = statSync(probePath);
-      const ageMs = Date.now() - probeStat.mtimeMs;
-      const ageMin = Math.round(ageMs / 60000);
-
-      if (ageMs < 3600_000 && !isForced(args)) {
-        workingModels = probeData
-          .filter((r: any) => r.status === "ok")
-          .map((r: any) => ({
-            provider: r.provider,
-            model: r.model,
-            cost: { input: r.cost_input ?? 0, output: r.cost_output ?? 0 },
-            duration_ms: r.duration_ms ?? 0,
-          }));
-        probeAge = `${ageMin}m ago`;
-        probeLoaded = true;
-      }
-    } catch {
-      // Corrupt — will re-probe below.
+  if (!isForced(args)) {
+    const cachedResults = readRecentCompleteProbeReport(probePath, available);
+    if (cachedResults) {
+      workingModels = cachedResults
+        .filter((result) => result.status === "ok")
+        .map((result) => ({
+          provider: result.provider,
+          model: result.model,
+          cost: { input: result.cost_input ?? 0, output: result.cost_output ?? 0 },
+          duration_ms: result.duration_ms ?? 0,
+        }));
+      probeAge = "within the past hour";
+      probeLoaded = true;
     }
   }
 
-  // If requested, run the existing explicit paid probe flow.
-  if (!probeLoaded && forceProbe) {
-    const available = ctx.modelRegistry.getAvailable();
+  if (!probeLoaded) {
+    ranProbe = true;
     const availableCount = available.length;
     log(ctx, `Probing ${availableCount} models to find working ones...`);
     let okCount = 0;
@@ -800,8 +795,9 @@ async function handleInit(
     const lastModels: string[] = [];
 
     uiBusy(ctx, `Probing ${availableCount} models...`);
-    const { results } = await runProbe(ctx, {
-      ...probeOptionsFromConfig(state.config.probe),
+    const probeRun = await runProbe(ctx, {
+      ...probeOptionsFromConfig(initConfig.probe),
+      signal: ctx.signal,
       onProgress: (done, total, last) => {
         if (last.status === "ok") okCount++;
         else if (last.status === "error" || last.status === "timeout") errCount++;
@@ -819,6 +815,11 @@ async function handleInit(
       },
     });
     uiDone(ctx);
+    if (probeRun.cancelled || ctx.signal?.aborted) {
+      log(ctx, "Init probing was cancelled; no configuration was changed.", "warning");
+      return;
+    }
+    const { results } = probeRun;
     state.reliabilityStore.applyOutcomes(
       results.map((r) =>
         r.status === "ok"
@@ -844,15 +845,14 @@ async function handleInit(
     const timeouts = results.filter((r) => r.status === "timeout").length;
     const skipped = results.filter((r) => r.status === "skipped").length;
     log(ctx, `Probe complete: ok=${ok} error=${errors} timeout=${timeouts} skipped=${skipped}.`);
-    if (ok === 0) {
-      log(ctx, "No usable models found. Check API keys, network, and credits.", "error");
-      log(ctx, "Proceeding with full registry — most models will likely be unreachable.", "warning");
-      probeLoaded = false;
-    }
+  }
+  if (probeLoaded && workingModels.length === 0) {
+    log(ctx, "No usable models found. Check API keys, network, and credits; no configuration was changed.", "error");
+    return;
   }
 
   let refreshRemainsCurrent = false;
-  if (forceProbe && initRefreshReceipt && !ctx.signal?.aborted && !state.forceRegistryRefresh) {
+  if (ranProbe && initRefreshReceipt && !ctx.signal?.aborted && !state.forceRegistryRefresh) {
     try {
       const currentKeys = ctx.modelRegistry.getAll().filter((model) => !isBifrostAuto(model)).map(modelKey).sort();
       refreshRemainsCurrent = currentKeys.length === initRefreshReceipt.catalogKeys.length
@@ -866,7 +866,6 @@ async function handleInit(
     log(ctx, `Using ${workingModels.length} probe-verified models (${probeAge}).`);
   }
 
-  const available = ctx.modelRegistry.getAvailable();
   const models: Record<string, string[]> = {};
   const uncategorized: string[] = [];
 
@@ -874,11 +873,11 @@ async function handleInit(
     const key = `${m.provider}/${m.id}`;
 
     // If probe data is loaded, skip models that failed or timed out.
-    if (probeLoaded && workingModels.length > 0) {
+    if (probeLoaded) {
       const working = workingModels.find(
         (w) => w.provider === m.provider && w.model === m.id,
       );
-      if (!working) continue; // known-broken, silently skip
+      if (!working) continue;
     }
 
     const tier = guessTier(m);
@@ -890,6 +889,12 @@ async function handleInit(
     }
   }
 
+  if (probeLoaded && Object.values(models).every((pool) => pool.length === 0)) {
+    log(ctx, "No probe-verified models remain in Pi's current catalog; no configuration was changed.", "error");
+    return;
+  }
+  const probeVerified = new Set(Object.values(models).flat());
+
   // Sort each tier by probe response time (fastest first) so "first"
   // strategy picks the fastest model.
   if (probeLoaded) {
@@ -899,11 +904,11 @@ async function handleInit(
     }
   }
 
-  const detectedClassifier = state.effectiveClassifierBackend(state.config, ctx);
-  const classifierEnabled = state.classifierEnabled && state.config.classifier?.enabled !== false;
+  const detectedClassifier = state.effectiveClassifierBackend(initConfig, ctx);
+  const classifierEnabled = state.classifierEnabled && initConfig.classifier?.enabled !== false;
   const needsDetectedPromptModel = classifierEnabled
     && detectedClassifier.backend === CLASSIFIER_BACKEND_IDS.prompt
-    && state.config.classifier?.model === undefined;
+    && initConfig.classifier?.model === undefined;
   let classifierModel: string | undefined;
   if (needsDetectedPromptModel) {
     const reliability = state.reliabilityStore.getState();
@@ -912,7 +917,7 @@ async function handleInit(
       .sort((left, right) => modelKey(left).localeCompare(modelKey(right)))
       .filter((model) => {
         const key = modelKey(model);
-        const circuit = getCircuitState(reliability, key, Date.now(), state.config.reliability);
+        const circuit = getCircuitState(reliability, key, Date.now(), initConfig.reliability);
         return !circuit.open && !hasActiveAllowanceCooldown(reliability, key, Date.now());
       });
     const eligibleKeys = new Set(eligible.map(modelKey));
@@ -924,7 +929,7 @@ async function handleInit(
       : [];
     classifierModel = probeChoices[0]
       ? `${probeChoices[0].provider}/${probeChoices[0].model}`
-      : eligible[0] ? modelKey(eligible[0]) : undefined;
+      : !probeLoaded && eligible[0] ? modelKey(eligible[0]) : undefined;
     if (!classifierModel) {
       log(ctx, "No working models found for classifier. Init will omit classifier.model; regex fallback remains available.", "warning");
     }
@@ -932,8 +937,8 @@ async function handleInit(
   const effectiveClassifierSummary = !classifierEnabled ? "off"
     : detectedClassifier.backend !== CLASSIFIER_BACKEND_IDS.prompt
       ? `${detectedClassifier.backend} (${detectedClassifier.auto ? "detected default" : "configured"})`
-      : state.config.classifier?.model
-        ? `prompt (${state.config.classifier.model}, configured)`
+      : initConfig.classifier?.model
+        ? `prompt (${initConfig.classifier.model}, configured)`
         : classifierModel
           ? `prompt (${classifierModel}, detected default)`
           : "prompt (no eligible model; regex fallback)";
@@ -942,14 +947,42 @@ async function handleInit(
     models,
     classifierModel,
     state.extensionDir,
-    state.config.classifier?.backend,
+    initConfig.classifier?.backend,
   ) as Record<string, unknown> & { classifier: Record<string, unknown> };
+  proposal.cache = {
+    enabled: initConfig.cache?.enabled ?? true,
+    maxEntries: initConfig.cache?.maxEntries ?? DEFAULT_MAX_ENTRIES,
+    threshold: initConfig.cache?.threshold ?? DEFAULT_THRESHOLD,
+    ...initConfig.cache,
+    ...(initConfig.cache?.ttlHours === undefined ? {} : { ttlHours: initConfig.cache.ttlHours }),
+  };
+  proposal.reliability = { ...resolveReliabilityConfig(initConfig.reliability), ...initConfig.reliability };
+  proposal.debug = { enabled: initConfig.debug?.enabled ?? false, ...initConfig.debug };
+  for (const key of ["schemaVersion", "tierPolicies", "economics", "affinity", "probe"] as const) {
+    if (initConfig[key] !== undefined) proposal[key] = initConfig[key];
+  }
+  proposal.enabled = initConfig.enabled ?? true;
+  proposal.strategy = initConfig.strategy ?? "first";
+  const proposedStrategies = proposal.categoryStrategies as Record<string, RoutingStrategy>;
+  proposal.categoryStrategies = Object.fromEntries(Object.keys(models).map((tier) => [
+    tier,
+    initConfig.categoryStrategies?.[tier] ?? proposedStrategies[tier] ?? "first",
+  ]));
+  proposal.rules = initConfig.rules ?? DEFAULT_RULES;
+  if (initConfig.default && models[initConfig.default]?.length) proposal.default = initConfig.default;
+  const activeClassifier = initConfig.classifier ?? {};
   proposal.classifier = {
     ...proposal.classifier,
-    ...state.config.classifier,
-    enabled: state.config.classifier?.enabled ?? true,
+    ...activeClassifier,
+    ...(activeClassifier.typesafe ? { typesafe: {
+      ...(proposal.classifier.typesafe as Record<string, unknown> | undefined),
+      ...activeClassifier.typesafe,
+    } } : {}),
+    ...(activeClassifier.piNative ? { piNative: {
+      ...(proposal.classifier.piNative as Record<string, unknown> | undefined),
+      ...activeClassifier.piNative,
+    } } : {}),
   };
-
   let source: ReconciliationSourceSnapshot;
   try { source = selectInitSource(); }
   catch {
@@ -958,32 +991,18 @@ async function handleInit(
   }
   let transaction: Parameters<typeof applyReconciliationTransaction>[0];
   let changes: readonly { kind: "add" | "remove"; tier: string; modelKey: string }[];
+  let settingsAdded = false;
   if (source.configBytes !== null) {
     const byProvider = new Map<string, Record<string, string[]>>();
-    let configuredModels: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = JSON.parse(Buffer.from(source.configBytes).toString("utf8"));
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const configured = (parsed as Record<string, unknown>).models;
-        if (configured && typeof configured === "object" && !Array.isArray(configured)) {
-          configuredModels = configured as Record<string, unknown>;
-        }
-      }
-    } catch { /* the membership planner reports invalid source config */ }
-    const probeVerified = new Set(Object.values(models).flat());
     for (const model of available) {
       if (isBifrostAuto(model)) continue;
       const tier = guessTier(model);
-      if (!tier) continue;
       const key = modelKey(model);
-      const configuredPool = configuredModels[tier];
-      const alreadyConfigured = typeof configuredPool === "string"
-        ? configuredPool === key
-        : Array.isArray(configuredPool) && configuredPool.includes(key);
-      if (probeLoaded && !probeVerified.has(key) && !alreadyConfigured) continue;
       const byTier = byProvider.get(model.provider) ?? {};
-      byTier[tier] = [...(byTier[tier] ?? []), key];
       byProvider.set(model.provider, byTier);
+      if (!tier) continue;
+      if (probeLoaded && !probeVerified.has(key)) continue;
+      byTier[tier] = [...(byTier[tier] ?? []), key];
     }
     const inventories = [...byProvider.entries()].map(([provider, modelsByTier]) => {
       const evidence = state.registryInventoryEvidence?.[provider];
@@ -1003,9 +1022,42 @@ async function handleInit(
       source,
       inventories,
       (selected, bytes) => prospectiveConfigInstallable(selected, bytes, state),
-      source.source === "workspace" ? state.config.models : undefined,
+      source.source === "workspace" ? initConfig.models : undefined,
     );
     if (plan.status !== "ready" || !plan.transaction) {
+      if (plan.reason === "no_changes" && plan.status === "blocked") {
+        const existing = JSON.parse(Buffer.from(source.configBytes!).toString("utf8")) as Record<string, unknown>;
+        let addedSetting = false;
+        for (const [key, value] of Object.entries(proposal)) {
+          if (key !== "$schema" && existing[key] === undefined) {
+            existing[key] = value;
+            addedSetting = true;
+          }
+        }
+        if (addedSetting) {
+          settingsAdded = true;
+          const nextConfigBytes = Buffer.from(JSON.stringify(existing, null, 2) + "\n", "utf8");
+          const ownershipBytes = source.ownershipBytes ?? Buffer.from(JSON.stringify({ version: 1, sources: {} }, null, 2) + "\n", "utf8");
+          if (nextConfigBytes.byteLength > MAX_RECONCILIATION_CONFIG_BYTES
+            || !prospectiveConfigInstallable(source.source, nextConfigBytes, state)) {
+            log(ctx, "Init's proposed config is invalid or exceeds the safe write limit; no files were changed.", "error");
+            return;
+          }
+          transaction = {
+            configPath: source.configPath,
+            ownershipPath: source.ownershipPath,
+            journalPath: source.journalPath,
+            expectedConfigDigest: createHash("sha256").update(source.configBytes!).digest("hex"),
+            expectedOwnershipDigest: source.ownershipBytes ? createHash("sha256").update(source.ownershipBytes).digest("hex") : null,
+            nextConfigBytes,
+            nextOwnershipBytes: ownershipBytes,
+          };
+          changes = [];
+        } else {
+          log(ctx, "The refreshed catalog has no safe membership or settings changes; no files were changed.");
+          return;
+        }
+      } else {
       log(ctx, plan.status === "advisory"
         ? "Pi's model inventory is incomplete or stale, so Init cannot safely change memberships. Refresh the catalog and retry; no files were changed."
         : plan.reason === "no_changes"
@@ -1013,9 +1065,24 @@ async function handleInit(
           : "Init could not safely prepare a membership update (" + (plan.reason ?? "unknown source state") + "); no files were changed.",
       plan.reason === "no_changes" ? undefined : "warning");
       return;
+      }
+    } else {
+      const reconciled = JSON.parse(Buffer.from(plan.transaction.nextConfigBytes).toString("utf8")) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(proposal)) {
+        if (key !== "$schema" && reconciled[key] === undefined) {
+          reconciled[key] = value;
+          settingsAdded = true;
+        }
+      }
+      const nextConfigBytes = Buffer.from(JSON.stringify(reconciled, null, 2) + "\n", "utf8");
+      if (nextConfigBytes.byteLength > MAX_RECONCILIATION_CONFIG_BYTES
+        || !prospectiveConfigInstallable(source.source, nextConfigBytes, state)) {
+        log(ctx, "Init's proposed config is invalid or exceeds the safe write limit; no files were changed.", "error");
+        return;
+      }
+      transaction = { ...plan.transaction, nextConfigBytes };
+      changes = plan.changes;
     }
-    transaction = plan.transaction;
-    changes = plan.changes;
   } else {
     if (source.ownershipBytes !== null) {
       log(ctx, "Init found an ownership receipt without its config and cannot safely replace it.", "error");
@@ -1043,8 +1110,13 @@ async function handleInit(
       nextConfigBytes: configBytes,
       nextOwnershipBytes: ownershipBytes,
     };
+    settingsAdded = true;
     changes = Object.entries(models).flatMap(([tier, keys]) => keys.map((key) => ({ kind: "add" as const, tier, modelKey: key })));
   }
+  const savedPools = (JSON.parse(Buffer.from(transaction.nextConfigBytes).toString("utf8")) as Record<string, unknown>).models as Record<string, unknown>;
+  const savedModelKeys = Object.values(savedPools).flatMap((pool) =>
+    typeof pool === "string" ? [pool] : Array.isArray(pool) ? pool.filter((key): key is string => typeof key === "string") : []);
+  const unverifiedSavedCount = probeLoaded ? savedModelKeys.filter((key) => !probeVerified.has(key)).length : 0;
   const added = changes.filter((change) => change.kind === "add");
   const removed = changes.filter((change) => change.kind === "remove");
   const tierSummary = [...new Set(changes.map((change) => change.tier))].sort()
@@ -1059,11 +1131,13 @@ async function handleInit(
     `save target: ${initSourceLabel(source)}`,
     deltaSummary,
     `classifier: ${effectiveClassifierSummary}`,
+    settingsAdded ? "settings: standard routing defaults added where missing" : "",
     `uncategorized: ${uncategorized.length}`,
     "proposed config: classifier and routing defaults detected from Pi's available models",
     "----------------",
     probeLoaded ? "" : "Catalog entries are listed models, not a health check.",
     uncategorized.length ? "Uncategorized models stay out of generated pools." : "",
+    unverifiedSavedCount ? `${unverifiedSavedCount} saved model membership(s) were not probe-verified; handwritten entries are preserved.` : "",
   ].filter(Boolean));
 
   if (uncategorized.length > 0) {
@@ -2553,8 +2627,13 @@ export function createCommandRouter(
       uiBusy(ctx, `Probing ${available.length} models...`);
       log(ctx, `Probing ${available.length} model(s) with "${PROBE_PROMPT_TEXT}"...`);
 
-      const { results, path } = await runProbe(ctx, probeOptionsFromConfig(state.config.probe));
+      const probeRun = await runProbe(ctx, { ...probeOptionsFromConfig(state.config.probe), signal: ctx.signal });
       uiDone(ctx);
+      if (probeRun.cancelled || ctx.signal?.aborted) {
+        log(ctx, "Probe was cancelled; partial results were not saved.", "warning");
+        return;
+      }
+      const { results, path } = probeRun;
       state.reliabilityStore.applyOutcomes(
         results.map((r) =>
           r.status === "ok"

@@ -21,7 +21,7 @@ The requirement IDs come from [the PRD](../PRD.md). These rows name test boundar
 | R01: explainable decisions | [Pi preview and status](../tests/integration/integration.test.mjs); [command acceptance](../tests/integration/command-policy-acceptance.test.mjs) | Routing pipeline and decision-envelope tests |
 | R02: physical default, Auto, pin and off | [Physical controls](../tests/integration/legacy-behavior.test.mjs); [Auto dispatch](../tests/integration/auto-virtual.test.mjs) | Registered input and manual-control tests |
 | R03: bounded recovery and no unsafe replay | [V1/V2 Auto recovery](../tests/integration/reliability-v2-auto.test.mjs); [HTTP 402 acceptance](../tests/integration/release-acceptance.test.mjs) | Tool, output, queue, cancellation and ownership guards |
-| R04: chat-model pools | [Fresh catalog setup](../tests/integration/auto-virtual.test.mjs) | Pinned Pi catalog contract and model-type tests; image routing is deferred |
+| R04: chat-model pools | [Fresh catalog setup and background probe completion](../tests/integration/auto-virtual.test.mjs); [init probe regressions](../tests/integration/init-regression.test.mjs) | Pinned Pi catalog contract and model-type tests; all-failed background warning and no-write checks; image routing is deferred |
 | R05: strict fallback | [Physical no-route](../tests/integration/legacy-behavior.test.mjs); [Auto boundary and reserve rejection](../tests/integration/auto-virtual.test.mjs) | Ordered fallback and requirement propagation tests |
 | R06: stop before unsafe generation | Physical and Auto no-route cases above | Activation, cancellation and late-result tests |
 | R07: offline inspection and validation | [Command acceptance](../tests/integration/command-policy-acceptance.test.mjs) | Config diagnostics and inspection projections |
@@ -32,7 +32,7 @@ The requirement IDs come from [the PRD](../PRD.md). These rows name test boundar
 | R12: bounded classification and visible fallback | [Timeout notice followed by generation](../tests/integration/command-policy-acceptance.test.mjs) | Shared budget, pending callbacks, abort and notice-deduplication tests |
 | R13: resolve-only API | [Installed consumer](../tests/router-package.test.mjs) | Router API contract and immutable snapshot tests |
 | R14: private diagnostics | Command acceptance and Pi UI notices | Debug projection, secret and prompt-content tests |
-| R15: reviewed membership changes | [Pi reconciliation and init](../tests/integration/command-policy-acceptance.test.mjs) | Ownership, stale inventory, concurrent edits and exact backup tests |
+| R15: reviewed membership changes | [Pi reconciliation and init](../tests/integration/command-policy-acceptance.test.mjs); [init probe regressions](../tests/integration/init-regression.test.mjs) | Ownership, stale inventory, concurrent edits, preserved settings, successful-only pools, recent probe reuse, forced probes, and exact backup tests |
 | R16: repeatable release checks | [Verification runner](../scripts/verify-release.mjs), guarded Pi suites and UI scenarios | Routing corpus, runner failure and source-change tests |
 | R17: custom tiers and neutral defaults | Physical and Auto routing cases above | Config, schema, generated defaults and strategy tests |
 
@@ -43,6 +43,8 @@ The physical HTTP 402 pause, same-provider exclusion after restart, and same-tie
 The exact OpenCode Go subscription error, one alternate attempt, disabled retry, exhausted alternatives, and no cross-tier escape live in [Auto reliability acceptance](../tests/integration/reliability-v2-auto.test.mjs). The parser still treats bare tier words as overrides; [issue 27](https://github.com/iamaamir/pi-bifrost/issues/27) tracks changing that behavior.
 
 Classifier-timeout fallback, offline commands, billing preference, reviewed reconciliation, probes that outlast catalog freshness, and provider-to-model allowance-scope reload live in [command acceptance](../tests/integration/command-policy-acceptance.test.mjs). Precise callback cancellation and both allowance-scope reload directions are also tested through registered host handlers.
+
+The first-use background scenarios check that the first response returns before probes finish, that saving does not interrupt active generation, and that the next input uses verified pools. They also check all-failed warnings without configuration writes, provider pauses, and concurrent configuration edits. The earlier one-shot scenario cancels its background probe at process exit and does not prove persistence. Final release evidence must come from the frozen-candidate verification manifest.
 
 ## Limits
 

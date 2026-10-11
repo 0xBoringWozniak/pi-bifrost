@@ -4,7 +4,7 @@
 
 A classifier is optional and enabled by default. Regex rules and the configured default tier can route without an extra classification call. On a local-cache miss, the active classifier can receive the current prompt.
 
-`/bifrost init` detects a classifier backend. If the prompt backend needs a model, Bifrost selects an available chat model as the default. Run `/bifrost classifier` when you want to change the backend or model. Run `/bifrost classifier off` to disable the extra call without editing a Bifrost JSON file, or set `classifier.enabled` to `false` in config for rules/default-only routing.
+`/bifrost init` detects a classifier backend. If the prompt backend needs a model, init selects a probe-verified available chat model when probe results are available. First-use setup can use a provisional chat model while its background probe runs. Run `/bifrost classifier` when you want to change the backend or model. Run `/bifrost classifier off` to disable the extra call without editing a Bifrost JSON file, or set `classifier.enabled` to `false` in config for rules/default-only routing.
 
 Classifiers resolve **tiers**, not exact provider models. Model pools, reliability filtering, and strategies remain Bifrost policy.
 

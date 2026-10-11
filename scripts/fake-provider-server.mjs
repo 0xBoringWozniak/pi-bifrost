@@ -38,6 +38,7 @@ const server = http.createServer((request, response) => {
     attempts.set(model, attempt);
     const classifierRequest = JSON.stringify(payload.messages ?? [])
       .includes("Classify the request into exactly one category.");
+    const probeRequest = JSON.stringify(payload.messages ?? []).includes("1+1=");
     const authorization = request.headers.authorization ?? "";
     const provider = authorization === "Bearer ui-fixture-backup-only"
       ? "fake-backup"
@@ -46,9 +47,14 @@ const server = http.createServer((request, response) => {
         : authorization.startsWith("Bearer fixture-")
           ? authorization.slice("Bearer fixture-".length)
           : "fake";
-    stats.push({ provider, model, attempt, kind: classifierRequest ? "classifier" : "generation" });
+    const stat = { provider, model, attempt, kind: classifierRequest ? "classifier" : probeRequest ? "probe" : "generation", completed: false };
+    stats.push(stat);
+    response.on("finish", () => { stat.completed = true; });
     if (model === "credits-exhausted") return json(response, 402, {
       error: { message: "You have no remaining credits. Purchase pre-paid credits to continue using Inference Providers. Alternatively, subscribe to PRO to get monthly included credits." },
+    });
+    if (model === "background-credits-exhausted" && probeRequest) return json(response, 402, {
+      error: { message: "You have no remaining credits. Purchase pre-paid credits to continue using Inference Providers." },
     });
     if (model === "subscription-required") return json(response, 403, {
       type: "error",
@@ -65,6 +71,10 @@ const server = http.createServer((request, response) => {
       return response.socket.destroy();
     }
     if (model === "probe-slow") return setTimeout(() => sse(response, "probe-slow-done"), 32_000);
+    if (model === "probe-background-slow-fail" && probeRequest) {
+      return setTimeout(() => json(response, 500, { error: { message: "probe-only failure" } }), 1_000);
+    }
+    if (model === "probe-background-slow-fail") return setTimeout(() => sse(response, "slow-generation-done"), 4_000);
     // "slow" keeps an agent run open long enough to queue steer prompts.
     if (model === "slow") return setTimeout(() => sse(response, "slow-done"), 8000);
     return sse(response, "healthy");

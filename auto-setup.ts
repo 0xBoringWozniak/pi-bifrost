@@ -1,9 +1,10 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { DEFAULT_RULES } from "./config.ts";
+import { ALL_STRATEGIES, DEFAULT_RULES, type BifrostConfig } from "./config.ts";
 import { guessTier } from "./routing.ts";
 import { isVirtualModel } from "./virtual-model.ts";
+import { isClassifierBackend } from "./classifier-backends.ts";
 
 export interface AutoBootstrapFacts {
   readonly userConfig: boolean;
@@ -15,6 +16,99 @@ export interface AutoBootstrapFacts {
 export interface BootstrapPools {
   readonly default: string;
   readonly models: Record<string, string[]>;
+}
+
+type PlainRecord = Record<string, unknown>;
+
+function plainRecord(value: unknown): PlainRecord | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  try { return Object.getPrototypeOf(value) === Object.prototype ? value as PlainRecord : undefined; }
+  catch { return undefined; }
+}
+
+function projectKnownFields(source: unknown, keys: readonly string[]): PlainRecord | undefined {
+  const record = plainRecord(source);
+  if (!record) return undefined;
+  const result: PlainRecord = {};
+  for (const key of keys) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (typeof value === "string" || typeof value === "boolean"
+      || (typeof value === "number" && Number.isFinite(value))) result[key] = value;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+function projectClassifier(source: unknown): PlainRecord | undefined {
+  const record = plainRecord(source);
+  if (!record) return undefined;
+  const result = projectKnownFields(record, [
+    "enabled", "model", "method", "maxTokens", "temperature", "fallbackToRegex",
+    "totalTimeoutMs", "minConfidence", "fallback", "apiKeyEnv",
+  ]) ?? {};
+  if (typeof record.backend === "string" && isClassifierBackend(record.backend)) result.backend = record.backend;
+  if (typeof record.model === "string" || (Array.isArray(record.model) && record.model.every((item) => typeof item === "string"))) {
+    result.model = Array.isArray(record.model) ? [...record.model] : record.model;
+  } else delete result.model;
+  if (record.method !== "direct" && record.method !== "subprocess" && record.method !== "auto") delete result.method;
+  if (record.fallback !== "prompt" && record.fallback !== "regex") delete result.fallback;
+  for (const [key, nestedKeys] of [
+    ["typesafe", ["model", "timeoutMs", "maxAttempts", "debug", "apiKeyEnv"]],
+    ["piNative", ["model", "timeoutMs", "maxAttempts"]],
+  ] as const) {
+    const nested: PlainRecord = projectKnownFields(record[key], nestedKeys) ?? {};
+    const nestedSource = plainRecord(record[key]);
+    const metrics = plainRecord(nestedSource?.metrics);
+    if (metrics && typeof metrics.enabled === "boolean") nested.metrics = { enabled: metrics.enabled };
+    if (Object.keys(nested).length) result[key] = nested;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+/** Serialize only supported public settings for first-use project setup. */
+export function serializeBootstrapConfig(
+  source: BifrostConfig,
+  defaultTier: string,
+  generatedModels: Record<string, string[]>,
+): BifrostConfig {
+  const result: PlainRecord = { default: defaultTier, models: generatedModels };
+  const strategySet = new Set<string>(ALL_STRATEGIES);
+  if (typeof source.schemaVersion === "number" && Number.isSafeInteger(source.schemaVersion)) result.schemaVersion = source.schemaVersion;
+  if (typeof source.enabled === "boolean") result.enabled = source.enabled;
+  if (typeof source.strategy === "string" && strategySet.has(source.strategy)) result.strategy = source.strategy;
+  const categoryStrategies = plainRecord(source.categoryStrategies);
+  if (categoryStrategies) {
+    result.categoryStrategies = Object.fromEntries(Object.entries(categoryStrategies)
+      .filter((entry) => typeof entry[1] === "string" && strategySet.has(entry[1])));
+  }
+  if (Array.isArray(source.rules)) {
+    const rules = source.rules.filter((rule) => !!rule && typeof rule.pattern === "string" && typeof rule.model === "string")
+      .map(({ pattern, model }) => ({ pattern, model }));
+    if (rules.length) result.rules = rules;
+  }
+  const sourceTierPolicies = plainRecord(source.tierPolicies);
+  if (sourceTierPolicies) {
+    const tierPolicies = Object.fromEntries(Object.entries(sourceTierPolicies).flatMap(([tier, value]) => {
+      const policy = plainRecord(value);
+      return policy && Array.isArray(policy.fallbackTiers) && policy.fallbackTiers.every((name) => typeof name === "string")
+        ? [[tier, { fallbackTiers: [...policy.fallbackTiers] }]] : [];
+    }));
+    if (Object.keys(tierPolicies).length) result.tierPolicies = tierPolicies;
+  }
+  for (const [key, value] of [
+    ["classifier", projectClassifier(source.classifier)],
+    ["cache", projectKnownFields(source.cache, ["enabled", "maxEntries", "threshold", "ttlHours", "path"])],
+    ["debug", projectKnownFields(source.debug, ["enabled", "path"])],
+    ["reliability", projectKnownFields(source.reliability, [
+      "enabled", "stateVersion", "cooldownOnAllowanceExhausted", "allowanceCooldownScope", "retryOnAllowanceExhausted",
+      "failureThreshold", "windowMinutes", "cooldownMinutes", "path",
+    ])],
+    ["probe", projectKnownFields(source.probe, ["concurrency", "timeoutMs"])],
+  ] as const) if (value) result[key] = value;
+  if (source.affinity && (source.affinity.mode === "off" || source.affinity.mode === "observe" || source.affinity.mode === "retain-within-tier")) {
+    result.affinity = { mode: source.affinity.mode, ...(typeof source.affinity.providerAdvisory === "boolean" ? { providerAdvisory: source.affinity.providerAdvisory } : {}) };
+  }
+  return result as BifrostConfig;
 }
 
 export function canBootstrapModels(facts: AutoBootstrapFacts): boolean {

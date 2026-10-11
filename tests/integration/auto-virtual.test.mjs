@@ -52,15 +52,21 @@ function writeFixture({ home, work, port, models, bifrost }) {
 
 function writePiModels({ home, port, models }) {
   mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  const providers = {};
+  for (const { provider = "fake", ...model } of models) {
+    const entry = providers[provider] ??= {
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      api: "openai-completions",
+      apiKey: provider === "fake" ? "fixture-only" : `fixture-${provider}`,
+      models: [],
+    };
+    entry.models.push(model);
+  }
   writeFileSync(
     join(home, ".pi", "agent", "models.json"),
-    JSON.stringify({
-      providers: {
-        fake: { baseUrl: `http://127.0.0.1:${port}/v1`, api: "openai-completions", apiKey: "test", models },
-      },
-    }),
+    JSON.stringify({ providers }),
   );
-  writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ retry: { enabled: false }, enabledModels: ["fake/*"] }));
+  writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ retry: { enabled: false }, enabledModels: Object.keys(providers).map((provider) => `${provider}/*`) }));
 }
 
 function piTestEnv(home) {
@@ -162,6 +168,81 @@ function runAuto({ home, work, messages, model = "bifrost/auto" }) {
   });
 }
 
+async function waitForFile(path, timeoutMs = 5_000, onTimeout = "") {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const details = typeof onTimeout === "function" ? await onTimeout() : onTimeout;
+  assert.fail(`file was not created: ${path}\n${details}`);
+}
+
+function startRpc({ home, work, model = "bifrost/auto" }) {
+  const child = spawn("pi", ["-e", EXTENSION_PATH, "--approve", "--mode", "rpc", "--no-session", "--no-tools", "--model", model], {
+    cwd: work,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: piTestEnv(home),
+  });
+  const records = [];
+  let incompleteLine = "";
+  let stderr = "";
+  let wake;
+  let closeInfo;
+  let spawnError;
+  const childClosed = new Promise((resolve) => child.once("close", (code) => {
+    closeInfo = { code };
+    wake?.();
+    resolve(closeInfo);
+  }));
+  child.once("error", (error) => { spawnError = error; wake?.(); });
+  child.stdin.on("error", (error) => { spawnError ??= error; wake?.(); });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    const lines = `${incompleteLine}${chunk}`.split("\n");
+    incompleteLine = lines.pop();
+    for (const line of lines) { try { records.push(JSON.parse(line)); } catch { /* malformed output is caught by response timeout */ } }
+    wake?.();
+  });
+  child.stderr.on("data", (chunk) => { stderr += chunk; wake?.(); });
+  const wait = (deadline) => new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); if (wake === finish) wake = undefined; resolve(); };
+    const timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
+    wake = finish;
+  });
+  async function userTurn(message) {
+    const id = `bootstrap-${Date.now()}-${records.length}`;
+    const start = records.length;
+    const deadline = Date.now() + 30_000;
+    child.stdin.write(`${JSON.stringify({ id, type: "prompt", message })}\n`);
+    let index = start;
+    let started = false;
+    while (Date.now() < deadline) {
+      while (index < records.length) {
+        const record = records[index++];
+        if (record.id === id && record.type === "response") {
+          assert.equal(record.success, true, JSON.stringify(record));
+          started = record.data?.disposition === "started";
+          if (!started) return;
+        }
+        if (started && record.type === "agent_settled") return;
+      }
+      assert.ifError(spawnError);
+      assert.equal(closeInfo, undefined, `Pi RPC exited before settling: ${message}`);
+      await wait(deadline);
+    }
+    throw new Error(`Pi RPC timed out: ${message}\n${stderr}`);
+  }
+  async function close() {
+    child.stdin.end();
+    await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+    if (!closeInfo) { child.kill("SIGKILL"); await childClosed; }
+    assert.equal(closeInfo.code, 0, stderr);
+  }
+  return { userTurn, close, get stderr() { return stderr; }, get records() { return records; } };
+}
+
 it("rejects a pre-recorded network guard violation without an uncaught close error", async () => {
   const home = mkdtempSync(join(tmpdir(), "bifrost-auto-home-"));
   const work = mkdtempSync(join(tmpdir(), "bifrost-auto-work-"));
@@ -228,35 +309,34 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
           assert.equal(result.code, 0, result.stderr);
           assert.match(result.stdout, /healthy/u);
           if (index === 0) {
-            assert.match(result.stderr, /Bifrost loaded 1 listed chat model\(s\) into in-memory pools/u);
-            assert.match(result.stderr, /Bifrost saved the detected starter pools to project config/u);
+            assert.match(result.stderr, /Bifrost loaded 1 provisional chat model\(s\) into in-memory pools/u);
           } else {
             assert.doesNotMatch(result.stderr, /Bifrost loaded .* into in-memory pools/u);
           }
           assert.match(result.stderr, /Bifrost(?: auto)?: quick → fake\/healthy/u);
           assert.deepEqual(
             promptStats.reduce((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] ?? 0) + 1 }), {}),
-            { classifier: 2, generation: 1 },
-            `ordinary ${model} prompt ${index + 1} must make exactly two classification and one generation requests`,
+            index === 0 ? { classifier: 2, generation: 1, probe: 1 } : { classifier: 2, generation: 1 },
+            `ordinary ${model} prompt ${index + 1} must match its first-use probe count`,
           );
         }
         const after = await fakeStats(server.port);
         const newStats = after.stats.slice(before.stats.length);
         assert.deepEqual(
           newStats.reduce((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] ?? 0) + 1 }), {}),
-          { classifier: 4, generation: 2 },
-          `the two ordinary ${model} sessions must make exact bounded request counts`,
+          { classifier: 4, generation: 2, probe: 1 },
+          `each one-shot process starts and cancels its own background probe`,
         );
         assert.equal(existsSync(join(work, "bifrost.json")), false);
         const savedConfigPath = join(work, ".pi", "bifrost.json");
         const ownershipPath = join(work, ".pi", "bifrost-reconcile-ownership.json");
-        assert.equal(existsSync(savedConfigPath), true);
-        assert.equal(existsSync(ownershipPath), true);
-        const savedConfig = JSON.parse(readFileSync(savedConfigPath, "utf8"));
-        assert.equal(savedConfig.default, "quick");
-        assert.deepEqual(savedConfig.models.quick, ["fake/healthy"]);
-        const ownership = JSON.parse(readFileSync(ownershipPath, "utf8"));
-        assert.ok(Object.values(ownership.sources).some((source) => source.generated.quick?.includes("fake/healthy")));
+        if (existsSync(savedConfigPath)) {
+          const savedConfig = JSON.parse(readFileSync(savedConfigPath, "utf8"));
+          assert.deepEqual(savedConfig.models.quick, ["fake/healthy"], "a one-shot process can persist only completed verified pools");
+          assert.equal(existsSync(ownershipPath), true);
+        } else {
+          assert.equal(existsSync(ownershipPath), false, "shutdown cancellation must not leave an ownership receipt without config");
+        }
         if (model === "bifrost/auto") {
           assert.deepEqual(JSON.parse(readFileSync(join(work, ".pi", "bifrost-state.json"), "utf8")), {
             enabled: true,
@@ -267,6 +347,167 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
         rmSync(home, { recursive: true, force: true });
         rmSync(work, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("returns the first Auto response before slow probes and later saves only verified pools", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-background-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-background-work-"));
+    const configPath = join(work, ".pi", "bifrost.json");
+    try {
+      writePiModels({ home, port: server.port, models: [
+        { id: "healthy", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
+        { id: "probe-background-slow-fail", reasoning: false, cost: { input: 20, output: 20, cacheRead: 0, cacheWrite: 0 } },
+      ] });
+      const before = await fakeStats(server.port);
+      const rpc = startRpc({ home, work });
+      try {
+        await rpc.userTurn("quick say ready");
+        const afterFirst = await fakeStats(server.port);
+        assert.ok(afterFirst.stats.some((item) => item.kind === "probe" && item.model === "healthy" && item.completed),
+          "at least one healthy probe completed before the first user response");
+        assert.ok((afterFirst.stats.filter((item) => item.kind === "generation" && item.model === "healthy").length
+          - before.stats.filter((item) => item.kind === "generation" && item.model === "healthy").length) >= 1,
+        "the first user generation completed while the slow probe was pending");
+        assert.ok(afterFirst.stats.some((item) => item.kind === "probe" && item.model === "probe-background-slow-fail" && !item.completed),
+          "the slow probe remains pending after the first user response");
+        assert.equal(existsSync(configPath), false, "no config is saved from a partial probe result");
+
+        const secondTurn = rpc.userTurn("frontier say ready");
+        await waitForFile(configPath, 5_000, async () => JSON.stringify({
+          stderr: rpc.stderr,
+          notifications: rpc.records.filter((record) => record.type === "extension_ui_request" && record.method === "notify").map((record) => record.message),
+          stats: await fakeStats(server.port),
+        }));
+        const saved = JSON.parse(readFileSync(configPath, "utf8"));
+        assert.equal(saved.default, "quick");
+        assert.deepEqual(saved.models, { quick: ["fake/healthy"], general: [], frontier: [] });
+        assert.equal(saved.enabled, true);
+        assert.equal(saved.strategy, "first");
+        assert.deepEqual(saved.categoryStrategies, { quick: "random", general: "first", frontier: "first" });
+        assert.deepEqual(saved.cache, { enabled: true, maxEntries: 500, threshold: 0.88 });
+        assert.equal(saved.reliability.enabled, true);
+        assert.equal(saved.debug.enabled, false);
+
+        await secondTurn;
+        const beforeVerifiedTurn = await fakeStats(server.port);
+        await rpc.userTurn("frontier say after verification");
+        const after = await fakeStats(server.port);
+        assert.equal((beforeVerifiedTurn.attempts["probe-background-slow-fail"] ?? 0) - (before.attempts["probe-background-slow-fail"] ?? 0), 2,
+          "the slow model handled a user turn while its probe was pending");
+        assert.equal((after.attempts["probe-background-slow-fail"] ?? 0) - (beforeVerifiedTurn.attempts["probe-background-slow-fail"] ?? 0), 0,
+          "after the probe result is installed, the next turn excludes the failed model");
+        assert.ok((after.attempts.healthy ?? 0) > (beforeVerifiedTurn.attempts.healthy ?? 0),
+          "the next turn routes through the verified healthy pool");
+      } finally {
+        await rpc.close();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps all-failed probe candidates out of config and does not retry on every prompt", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-all-failed-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-all-failed-work-"));
+    const configPath = join(work, ".pi", "bifrost.json");
+    try {
+      writePiModels({ home, port: server.port, models: [
+        { id: "probe-background-slow-fail", reasoning: false, cost: { input: 20, output: 20, cacheRead: 0, cacheWrite: 0 } },
+      ] });
+      const before = await fakeStats(server.port);
+      const rpc = startRpc({ home, work });
+      try {
+        await rpc.userTurn("quick say ready");
+        assert.equal(existsSync(configPath), false, "an all-failed run must not save an empty default pool");
+        const afterFirst = await fakeStats(server.port);
+        const probesAfterFirst = afterFirst.stats.filter((item) => item.kind === "probe").length
+          - before.stats.filter((item) => item.kind === "probe").length;
+        assert.ok(probesAfterFirst >= 1);
+        assert.ok(afterFirst.stats.some((item) => item.kind === "probe" && item.completed && item.model === "probe-background-slow-fail"));
+        assert.ok(existsSync(join(work, ".pi", "bifrost-probe.json")), "the safe health report explains why setup was not saved");
+
+        await rpc.userTurn("quick say ready again");
+        const afterSecond = await fakeStats(server.port);
+        assert.equal(afterSecond.stats.filter((item) => item.kind === "probe").length
+          - before.stats.filter((item) => item.kind === "probe").length, probesAfterFirst,
+        "a complete all-failed result is not retried on each prompt");
+        assert.equal(existsSync(configPath), false);
+      } finally {
+        await rpc.close();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it("pauses a quota-exhausted background provider before dispatching queued sibling probes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-background-quota-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-background-quota-work-"));
+    const configPath = join(work, ".pi", "bifrost.json");
+    try {
+      writePiModels({ home, port: server.port, models: [
+        { provider: "fake", id: "background-credits-exhausted", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
+        ...["sibling-one", "sibling-two", "sibling-three", "sibling-four"].map((id) => ({
+          provider: "fake", id, reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 },
+        })),
+        { provider: "good", id: "healthy", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
+      ] });
+      const before = await fakeStats(server.port);
+      const rpc = startRpc({ home, work });
+      try {
+        await rpc.userTurn("quick say ready");
+        await waitForFile(configPath, 10_000, async () => JSON.stringify(await fakeStats(server.port)));
+        const saved = JSON.parse(readFileSync(configPath, "utf8"));
+        assert.deepEqual(saved.models.quick, ["good/healthy"], "saved pools must omit every model from the quota-blocked provider");
+        const stats = await fakeStats(server.port);
+        const added = stats.stats.slice(before.stats.length);
+        const fakeProbes = added.filter((item) => item.provider === "fake" && item.kind === "probe");
+        assert.ok(fakeProbes.some((item) => item.model === "background-credits-exhausted"), "the primary candidate receives the probe");
+        assert.ok(fakeProbes.length <= 3, `queued fake-provider probes should stop after the initial concurrency window: ${JSON.stringify(fakeProbes)}`);
+        assert.equal(fakeProbes.some((item) => ["sibling-three", "sibling-four"].includes(item.model)), false,
+          `after the initial concurrency window, queued siblings must not start: ${JSON.stringify(fakeProbes)}`);
+        const providerStatePath = join(work, ".pi", "bifrost-provider-reliability.json");
+        assert.equal(existsSync(providerStatePath), true, "the confirmed provider quota pause is persisted");
+        assert.match(readFileSync(providerStatePath, "utf8"), /fake/u);
+        assertNoNetworkViolations(home);
+      } finally {
+        await rpc.close();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a concurrently created project config untouched", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-config-race-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-config-race-work-"));
+    const configPath = join(work, ".pi", "bifrost.json");
+    try {
+      writePiModels({ home, port: server.port, models: [
+        { id: "healthy", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
+        { id: "probe-background-slow-fail", reasoning: false, cost: { input: 20, output: 20, cacheRead: 0, cacheWrite: 0 } },
+      ] });
+      const rpc = startRpc({ home, work });
+      try {
+        await rpc.userTurn("quick say ready");
+        const userConfig = `${JSON.stringify({ strategy: "first", enabled: false, customSetting: "keep-me" }, null, 2)}\n`;
+        mkdirSync(join(work, ".pi"), { recursive: true });
+        writeFileSync(configPath, userConfig);
+        const reportPath = join(work, ".pi", "bifrost-probe.json");
+        await waitForFile(reportPath, 5_000, rpc.stderr);
+        assert.equal(readFileSync(configPath, "utf8"), userConfig, "background reconciliation must not replace a newly written user config");
+        assert.equal(existsSync(join(work, ".pi", "bifrost-reconcile-ownership.json")), false,
+          "a config race must not create an ownership receipt for pools it did not write");
+      } finally {
+        await rpc.close();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
     }
   });
 

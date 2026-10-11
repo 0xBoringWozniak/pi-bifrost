@@ -154,12 +154,12 @@
             </div>
             <section id="physical" class="story-secondary" data-demo-scene="physical" aria-labelledby="physical-title">
               <p class="eyebrow">04 / Default route</p><h2 id="physical-title">Pi switches models before the prompt.</h2>
-              <p>On a fresh install, routing is on by default. Bifrost builds model lists from Pi's catalog and saves a small project <code>.pi/bifrost.json</code> in the background. An empty <code>{}</code> configuration does not block setup. A configuration with one setting, a route file, or an explicit routing setting does. This save sends no probes and writes no prompts or secrets. If a safe save fails, routing continues in memory and Bifrost warns. <code>bifrost/auto</code> remains a separate opt-in. Use <code>/bifrost inspect</code> or <code>/bifrost debug</code> to review lists and status.</p>
+              <p>On a fresh install, routing is on by default. Bifrost loads provisional model lists from Pi's catalog before generation, then checks model access in the background. It saves only successful generated pools to project <code>.pi/bifrost.json</code>. An empty <code>{}</code> configuration does not block setup. A configuration with settings, a route file, or a runtime routing preference does. Probes can use provider credits or reach rate limits. If all probes fail, Bifrost leaves configuration unchanged and warns. <code>bifrost/auto</code> remains a separate opt-in. Use <code>/bifrost inspect</code> or <code>/bifrost debug</code> to review lists and status.</p>
               <p class="story-fact"><a href="https://github.com/iamaamir/pi-bifrost/blob/main/docs/guide/routing-controls.md#what-happens-when-you-send-a-message">See the default route</a>.</p>
             </section>
             <section id="setup" class="story-secondary" data-demo-scene="setup" aria-labelledby="setup-title">
               <p class="eyebrow">05 / Setup</p><h2 id="setup-title">Refresh or review model lists.</h2>
-              <p>First-use setup saves a minimal project config automatically when it is safe. Run <code>/bifrost init</code> to refresh the catalog or reconcile saved model lists. Init shows a short summary and asks once before it saves. The summary omits some model IDs and selection rules. Inspect and edit the saved config before a model answers when needed. Pass <code>-f</code> to probe models. Probes can use provider credits or reach rate limits.</p>
+              <p>First-use setup checks model access in the background. Run <code>/bifrost init</code> to refresh the catalog or reconcile saved model lists. It reuses probe results from the last hour, or probes before proposing pools. Pass <code>-f</code> to force fresh probes. Init shows a short summary and asks once before it saves. It preserves other configuration fields and handwritten model entries. The summary omits some model IDs and selection rules. Probes can use provider credits or reach rate limits.</p>
               <p class="story-fact"><a href="https://github.com/iamaamir/pi-bifrost/blob/main/docs/guide/getting-started.md#initialize">Read the init steps and probe limits</a>.</p>
             </section>
             <section id="rules" class="story-secondary" data-demo-scene="rules" aria-labelledby="rules-title">
@@ -324,7 +324,7 @@
               <div>
                 <h3>Install Bifrost</h3>
                 <p>Run this in your shell, then open Pi.</p>
-                <p>Bifrost builds model lists and saves a small project config in the background. No init is required.</p>
+                <p>Bifrost checks model access in the background, then saves successful starter pools. No init is required.</p>
                 <div class="command">
                   <code>pi install npm:pi-bifrost</code>
                   <button class="copy-button" type="button" data-copy="pi install npm:pi-bifrost">Copy<span class="sr-only"> install command</span></button>
@@ -335,7 +335,7 @@
               <span>02</span>
               <div>
                 <h3>Save model groups (optional)</h3>
-                <p>This step is optional. Run it inside Pi to refresh the catalog and save model pools. It does not probe models by default. Pass <code>-f</code> to probe, which can incur provider usage or rate limits. Review the summary before confirming it.</p>
+                <p>This step is optional. Run it inside Pi to refresh the catalog and save model pools. It reuses probe results from the last hour, or probes before proposing pools. Pass <code>-f</code> to force fresh probes. Provider requests can use credits or reach rate limits. Review the summary before confirming it.</p>
                 <div class="command">
                   <code>/bifrost init</code>
                   <button class="copy-button" type="button" data-copy="/bifrost init">Copy<span class="sr-only"> initialization command</span></button>

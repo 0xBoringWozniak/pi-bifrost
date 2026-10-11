@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BIFROST_COMMAND_OPTIONS, BIFROST_JSON_PREFIX, buildClassifierTestReport, buildPreviewFailure, buildPreviewReport, createCommandRouter, getBifrostCommandCompletions, log, nextClassifierConfig, parsePreviewArgs, renderPreviewReport, runBifrostCommand, serializePreviewReport, type BifrostPreviewSuccess } from "../commands.ts";
@@ -13,6 +13,12 @@ import { createProviderCooldownStore } from "../runtime-reliability-v2.ts";
 import { emptyReliabilityV2State } from "../reliability-v2.ts";
 import { buildInitOwnershipReceipt } from "../reconciliation-command.ts";
 import { REGISTRY_REFRESH_TTL_MS } from "../ux-status.ts";
+
+function writeRecentProbeCache(path: string, results: unknown): void {
+  writeFileSync(path, JSON.stringify(results));
+  const recent = new Date(Date.now() - 60_000);
+  utimesSync(path, recent, recent);
+}
 
 function makeCtx(
   models: Array<{ provider: string; id: string }> = [],
@@ -83,6 +89,7 @@ function makeStore(reliabilityState?: Record<string, { failures: number[]; openU
   const store = {
     getState: () => ({ version: 1 as const, models: reliabilityState ?? {} }),
     reload: () => {},
+    applyOutcomes: () => {},
     openCircuitCount: (now?: number) => {
       if (!enabled) return 0;
       const t = now ?? Date.now();
@@ -406,9 +413,9 @@ describe("bifrost command ui", () => {
     process.chdir(tempDir);
     try {
       mkdirSync(join(tempDir, ".pi"));
-      writeFileSync(join(tempDir, ".pi", "bifrost-probe.json"), JSON.stringify([
+      writeRecentProbeCache(join(tempDir, ".pi", "bifrost-probe.json"), [
         { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
-      ]));
+      ]);
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       const state = makeState();
       await createCommandRouter(state as never)("init --write", ctx as never);
@@ -576,9 +583,9 @@ describe("bifrost command ui", () => {
     process.chdir(tempDir);
     try {
       mkdirSync(join(tempDir, ".pi"));
-      writeFileSync(join(tempDir, ".pi", "bifrost-probe.json"), JSON.stringify([
+      writeRecentProbeCache(join(tempDir, ".pi", "bifrost-probe.json"), [
         { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
-      ]));
+      ]);
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       let confirmCalls = 0;
       (ctx as any).ui.confirm = async () => { confirmCalls += 1; return true; };
@@ -606,9 +613,9 @@ describe("bifrost command ui", () => {
     process.chdir(tempDir);
     try {
       mkdirSync(join(tempDir, ".pi"));
-      writeFileSync(join(tempDir, ".pi", "bifrost-probe.json"), JSON.stringify([
+      writeRecentProbeCache(join(tempDir, ".pi", "bifrost-probe.json"), [
         { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
-      ]));
+      ]);
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       let confirmCalls = 0;
       (ctx as any).ui.confirm = async () => { confirmCalls += 1; return true; };
@@ -618,7 +625,7 @@ describe("bifrost command ui", () => {
         enabled: false,
         model: "fixture/custom-fallback",
         criteria: { general: "Keep this user criterion." },
-        typesafe: { model: "typesafe/custom-classifier" },
+        typesafe: { model: "jev-1.13.0" },
       };
       await createCommandRouter(state as never)("init", ctx as never);
       assert.equal(confirmCalls, 1);
@@ -627,7 +634,7 @@ describe("bifrost command ui", () => {
       assert.equal(saved.classifier.enabled, false);
       assert.equal(saved.classifier.model, "fixture/custom-fallback");
       assert.deepEqual(saved.classifier.criteria, { general: "Keep this user criterion." });
-      assert.equal(saved.classifier.typesafe.model, "typesafe/custom-classifier");
+      assert.equal(saved.classifier.typesafe.model, "jev-1.13.0");
       assert.equal(calls.some((call) => call.kind === "select"), false);
       assert.equal(calls.some((call) => call.kind === "notify" && String(call.value).includes("No working models found for classifier")), false);
       assert(calls.some((call) => call.kind === "widget" && call.lines?.some((line) => line.includes("classifier: off"))));
@@ -648,9 +655,9 @@ describe("bifrost command ui", () => {
     process.chdir(tempDir);
     try {
       mkdirSync(join(tempDir, ".pi"));
-      writeFileSync(join(tempDir, ".pi", "bifrost-probe.json"), JSON.stringify([
+      writeRecentProbeCache(join(tempDir, ".pi", "bifrost-probe.json"), [
         { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
-      ]));
+      ]);
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       let confirmCalls = 0;
       (ctx as any).ui.confirm = async () => { confirmCalls += 1; return true; };
@@ -673,7 +680,7 @@ describe("bifrost command ui", () => {
     }
   });
 
-  it("refreshes generated memberships atomically, keeps manual config, and does not probe", async () => {
+  it("reconciles generated memberships from a recent probe cache and keeps manual config", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "bifrost-init-refresh-"));
     const previousCwd = process.cwd();
     process.chdir(tempDir);
@@ -689,6 +696,9 @@ describe("bifrost command ui", () => {
       writeFileSync(join(piDir, "bifrost-reconcile-ownership.json"), JSON.stringify(
         buildInitOwnershipReceipt({ quick: ["fixture/old"] }),
       ));
+      writeRecentProbeCache(join(piDir, "bifrost-probe.json"), [
+        { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
+      ]);
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       let refreshCalls = 0;
       const registry = (ctx as any).modelRegistry;
@@ -704,11 +714,116 @@ describe("bifrost command ui", () => {
       assert.deepEqual(saved.models.quick, ["manual/keep", "fixture/chat"]);
       assert.deepEqual(saved.customSetting, { preserve: true });
       assert.deepEqual(saved.classifier, { backend: "prompt", enabled: false, model: "fixture/manual-classifier" });
-      assert.equal(existsSync(join(piDir, "bifrost-probe.json")), false);
+      assert.equal(calls.some((call) => call.kind === "notify" && String(call.value).includes("Probing models")), false);
       assert.equal(calls.some((call) => call.kind === "select"), false);
     } finally {
       process.chdir(previousCwd);
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-probes malformed or incomplete recent caches instead of accepting a partial pool", async () => {
+    const invalidReports: unknown[] = [
+      [],
+      [{ provider: "fixture", model: "one", status: "ok" }],
+      [
+        { provider: "fixture", model: "one", status: "ok" },
+        { provider: "fixture", model: "one", status: "ok" },
+      ],
+      [
+        { provider: "fixture", model: "one", status: "ok" },
+        { provider: "fixture", model: "unknown", status: "ok" },
+      ],
+    ];
+    for (const invalidReport of invalidReports) {
+      const tempDir = mkdtempSync(join(tmpdir(), "bifrost-init-invalid-cache-"));
+      const previousCwd = process.cwd();
+      process.chdir(tempDir);
+      try {
+        const piDir = join(tempDir, ".pi");
+        mkdirSync(piDir);
+        writeRecentProbeCache(join(piDir, "bifrost-probe.json"), invalidReport);
+        const models = [makeModel("fixture", "one"), makeModel("fixture", "two")];
+        const { ctx } = makeCtx(models);
+        let probes = 0;
+        const registry = (ctx as any).modelRegistry;
+        registry.streamSimple = (model: { provider: string; id: string; api: string }) => {
+          probes++;
+          return { result: async () => ({
+            role: "assistant", api: model.api, provider: model.provider, model: model.id,
+            content: [{ type: "text", text: "ok" }], usage: { totalTokens: 1 }, stopReason: "stop", timestamp: Date.now(),
+          }) };
+        };
+        await createCommandRouter(makeState() as never)("init --write", ctx as never);
+        assert.equal(probes, 2);
+        const cached = JSON.parse(readFileSync(join(piDir, "bifrost-probe.json"), "utf8")) as Array<{ model: string; status: string }>;
+        assert.deepEqual(cached.map((row) => [row.model, row.status]), [["one", "ok"], ["two", "ok"]]);
+      } finally {
+        process.chdir(previousCwd);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+
+    const tempDir = mkdtempSync(join(tmpdir(), "bifrost-init-malformed-cache-"));
+    const previousCwd = process.cwd();
+    process.chdir(tempDir);
+    try {
+      const piDir = join(tempDir, ".pi");
+      mkdirSync(piDir);
+      const cachePath = join(piDir, "bifrost-probe.json");
+      writeFileSync(cachePath, "not-json");
+      const models = [makeModel("fixture", "one"), makeModel("fixture", "two")];
+      const { ctx } = makeCtx(models);
+      let probes = 0;
+      const registry = (ctx as any).modelRegistry;
+      registry.streamSimple = (model: { provider: string; id: string; api: string }) => {
+        probes++;
+        return { result: async () => ({
+          role: "assistant", api: model.api, provider: model.provider, model: model.id,
+          content: [{ type: "text", text: "ok" }], usage: { totalTokens: 1 }, stopReason: "stop", timestamp: Date.now(),
+        }) };
+      };
+      await createCommandRouter(makeState() as never)("init --write", ctx as never);
+      assert.equal(probes, 2);
+      const cached = JSON.parse(readFileSync(cachePath, "utf8")) as Array<{ model: string; status: string }>;
+      assert.deepEqual(cached.map((row) => [row.model, row.status]), [["one", "ok"], ["two", "ok"]]);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes and reuses the probe cache in the active project when ctx.cwd differs", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "bifrost-init-project-cache-path-"));
+    const otherCwd = mkdtempSync(join(tmpdir(), "bifrost-init-context-cwd-"));
+    const previousCwd = process.cwd();
+    process.chdir(tempDir);
+    try {
+      mkdirSync(join(tempDir, ".pi"));
+      const { ctx } = makeCtx([makeModel("fixture", "chat")]);
+      (ctx as any).cwd = otherCwd;
+      let probes = 0;
+      (ctx as any).modelRegistry.streamSimple = (model: { provider: string; id: string; api: string }) => {
+        probes++;
+        return { result: async () => ({
+          role: "assistant", api: model.api, provider: model.provider, model: model.id,
+          content: [{ type: "text", text: "ok" }], usage: { totalTokens: 1 }, stopReason: "stop", timestamp: Date.now(),
+        }) };
+      };
+      const state = makeState() as never;
+      await createCommandRouter(state)("probe", ctx as never);
+      const projectCache = join(tempDir, ".pi", "bifrost-probe.json");
+      const originalCache = readFileSync(projectCache, "utf8");
+      assert.equal(existsSync(join(otherCwd, ".pi", "bifrost-probe.json")), false);
+      assert.equal(probes, 1);
+
+      await createCommandRouter(state)("init --write", ctx as never);
+      assert.equal(probes, 1);
+      assert.equal(readFileSync(projectCache, "utf8"), originalCache);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(tempDir, { recursive: true, force: true });
+      rmSync(otherCwd, { recursive: true, force: true });
     }
   });
 
@@ -723,6 +838,9 @@ describe("bifrost command ui", () => {
       writeFileSync(join(piDir, "bifrost-reconcile-ownership.json"), JSON.stringify(
         buildInitOwnershipReceipt({ quick: ["fixture/old"] }),
       ));
+      writeRecentProbeCache(join(piDir, "bifrost-probe.json"), [
+        { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
+      ]);
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       const registry = (ctx as any).modelRegistry;
       registry.getAll = () => [makeModel("fixture", "chat", 0.2, 0.2)];
@@ -769,6 +887,10 @@ describe("bifrost command ui", () => {
       }, null, 2) + "\n");
       writeFileSync(globalConfigPath, globalBytes);
       writeFileSync(workspacePath, workspaceBytes);
+      mkdirSync(join(tempDir, ".pi"));
+      writeRecentProbeCache(join(tempDir, ".pi", "bifrost-probe.json"), [
+        { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
+      ]);
 
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       const registry = (ctx as any).modelRegistry;
@@ -782,6 +904,7 @@ describe("bifrost command ui", () => {
         return true;
       };
       const state = makeState();
+      (state as any).registryInventoryEvidence = { fixture: { status: "complete", refreshedAt: Date.now() } };
       (state.config as any) = {
         ...state.config,
         schemaVersion: 2,
@@ -1641,9 +1764,9 @@ describe("command aliases", () => {
       // Fresh, therefore reusable probe data: plain `init` would reuse it and
       // never probe. Only `-f` forces a re-probe, so "Probing" proves both
       // that the alias matched and that the flag reached handleInit.
-      writeFileSync(join(tempDir, ".pi", "bifrost-probe.json"), JSON.stringify([
+      writeRecentProbeCache(join(tempDir, ".pi", "bifrost-probe.json"), [
         { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
-      ]));
+      ]);
       const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
       const state = makeState();
       // handleInit's forced-probe branch calls applyOutcomes, which makeStore
@@ -1702,7 +1825,7 @@ describe("command aliases", () => {
 
       const saved = JSON.parse(readFileSync(configPath, "utf8"));
       assert.equal(refreshCalls, 1);
-      assert.deepEqual(saved.models.quick.sort(), ["fixture/failed-existing", "fixture/verified", "manual/only"]);
+      assert.deepEqual(saved.models.quick.sort(), ["fixture/verified", "manual/only"]);
       assert.equal(saved.models.quick.includes("fixture/failed-new"), false);
     } finally {
       Date.now = realNow;
@@ -2142,13 +2265,17 @@ describe("route dispatch", () => {
   });
 
   it("routes init", async () => {
-    const { ctx, calls } = makeCtx();
+    const { ctx, calls } = makeCtx([{ provider: "fixture", id: "chat" }]);
     const state = makeState();
     state.reliabilityStore = { ...state.reliabilityStore, applyOutcomes: () => {} } as never;
-    // A normal init refreshes only Pi's model catalog. Paid probes require -f.
+    // Normal init reuses a complete recent report; forced init would probe afresh.
     await inTempDir(async () => {
+      mkdirSync(join(process.cwd(), ".pi"), { recursive: true });
+      writeRecentProbeCache(join(process.cwd(), ".pi", "bifrost-probe.json"), [
+        { provider: "fixture", model: "chat", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 10 },
+      ]);
       await createCommandRouter(state as never)("init", ctx as never);
-      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost-probe.json")), false);
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost-probe.json")), true);
     });
     assert.equal(calls.some((c) => c.kind === "notify" && String(c.value).includes("Probing")), false);
   });

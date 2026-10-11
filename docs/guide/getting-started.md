@@ -55,7 +55,9 @@ flowchart TD
 
 ## Initialize
 
-On a fresh install, routing is on and physical model selection is the default. Bifrost reads Pi's available chat-model catalog in the background. If no meaningful user configuration, route file, or explicit routing override blocks setup, Bifrost builds model pools and saves a minimal `.pi/bifrost.json` in the background. An empty `{}` file does not block setup. Bifrost does not probe models or save prompts or secrets. Routing is ready before the save completes. If a safe save cannot finish, routing continues in memory and Bifrost warns you.
+On a fresh install, routing is on and physical model selection is the default. If no meaningful configuration, route file, runtime routing preference, or explicit routing override blocks setup, Bifrost loads provisional pools from Pi's catalog before generation. It checks model access in the background and saves only successful generated pools to `.pi/bifrost.json`. An empty `{}` file does not block setup. Probe requests can use credits or reach rate limits. Bifrost does not save prompts or secrets. If every probe fails, it leaves configuration unchanged and warns you.
+
+The first route can use a provisional model before its probe finishes. Bifrost applies verified results at a safe input boundary, so a probe does not stop active generation.
 
 You can send a first prompt without running init. A saved configuration or runtime preference can change routing; use `/bifrost debug` to inspect it. Selecting `bifrost/auto` in Pi's model picker is a separate opt-in. Any setting in a meaningful configuration blocks automatic pool setup. A project route file or explicit routing override also blocks setup.
 
@@ -76,17 +78,17 @@ The command:
 
 After init saves, inspect the pools and status. Edit the saved configuration before your first generation if you need different pools or strategies, then run `/bifrost reload`.
 
-Init updates the first existing destination in this order: project config `.pi/bifrost.json`, workspace config `bifrost.json`, then user config `~/.pi/agent/bifrost.json`. If none exists, it saves project config at `.pi/bifrost.json`. The displayed save target is the one init will update. Init preserves handwritten model entries and other configuration fields when it reconciles generated model memberships.
+Init reuses probe results from the last hour. If no recent results exist, it probes models before it proposes pools. Pass `-f` to force fresh probes. Init updates the first existing destination in this order: project config `.pi/bifrost.json`, workspace config `bifrost.json`, then user config `~/.pi/agent/bifrost.json`. If none exists, it saves project config at `.pi/bifrost.json`. The displayed save target is the one init will update. Init changes only that target file. It preserves handwritten model entries and other fields there, and leaves the other configuration layers in place.
 
-The command does not probe models by default. Pass `-f` to send probe requests. These requests can use provider credits or hit rate limits.
+Probe requests can use provider credits or reach rate limits. If no model passes, init leaves configuration unchanged.
 
 Bifrost does not ship maintainer-specific provider/model IDs as routing defaults.
 
 ### Probe usage warning
 
-When you run `/bifrost init -f` or `/bifrost probe`, Bifrost sends `1+1=` to available chat models. The primary transport caps output at 5 tokens. An empty response can trigger one minimal-session fallback request. Default concurrency is 50 and per-model timeout is 10 seconds. Requests can incur provider usage, consume credits, or trigger burst rate limits.
+When you run `/bifrost init` without recent probe results, run `/bifrost init -f`, or run `/bifrost probe`, Bifrost sends `1+1=` to available chat models. The primary transport caps output at 5 tokens. An empty response can trigger one minimal-session fallback request. Manual probes default to concurrency 50. First-use background probes default to concurrency 3. The default timeout is 10 seconds per model. The `probe.concurrency` and `probe.timeoutMs` settings apply to both paths. Requests can use provider credits or trigger rate limits.
 
-Init does not probe models unless you pass `-f`. For tight provider limits, add probe settings to your existing config before running `/bifrost probe` or `/bifrost init -f`. If you are setting up Bifrost for the first time, run `/bifrost init` without `-f` and save the starter pools first. Then add probe settings before you probe.
+For tight provider limits, add probe settings to your existing configuration before running `/bifrost probe` or `/bifrost init`. The first-use background check also uses these settings.
 
 Add this fragment to `~/.pi/agent/bifrost.json` (all projects) or `.pi/bifrost.json` (this project):
 

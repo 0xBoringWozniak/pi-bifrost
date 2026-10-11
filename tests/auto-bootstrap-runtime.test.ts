@@ -15,7 +15,7 @@ import { makeModel } from "./helpers.ts";
 type Hook = (event: any, ctx: ExtensionContext) => Promise<unknown>;
 const flushImmediate = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; classifierEnabled: boolean }) {
+function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; classifierEnabled: boolean }, deferProbe = false) {
   const previousCwd = process.cwd();
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousTypeSafeKey = process.env[TYPE_SAFE_API_KEY_ENV];
@@ -40,6 +40,21 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
   let selected: string | undefined;
   let routeDefinition: VirtualModelDefinition | undefined;
   let confirmCalls = 0;
+  let onProbeStarted!: () => void;
+  let releaseProbe!: (response: unknown) => void;
+  const probeStarted = new Promise<void>((resolve) => { onProbeStarted = resolve; });
+  const deferredProbe = new Promise<unknown>((resolve) => { releaseProbe = resolve; });
+  const successfulProbeResponse = () => ({
+    role: "assistant",
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    content: [{ type: "text", text: "2" }],
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  });
   const autoModel = { ...makeModel(BIFROST_AUTO_PROVIDER, BIFROST_AUTO_ID), api: "pi-virtual" };
   const ctx = {
     cwd,
@@ -53,6 +68,10 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
       find: (provider: string, id: string) => models.find((item) => item.provider === provider && item.id === id),
       getProviderAuthStatus: () => ({ configured: false }),
       refresh: async () => { refreshCalls += 1; return { refreshed: [], errors: new Map() }; },
+      ...(deferProbe ? { streamSimple: () => {
+        onProbeStarted();
+        return { result: () => deferredProbe };
+      } } : {}),
     },
     sessionManager: {
       getHeader: () => ({ id: "auto-bootstrap-session" }),
@@ -88,6 +107,8 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
     refreshCalls: () => refreshCalls,
     selected: () => selected,
     confirmCalls: () => confirmCalls,
+    probeStarted,
+    completeProbe: () => releaseProbe(successfulProbeResponse()),
     cleanup: () => {
       process.chdir(previousCwd);
       if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -101,7 +122,7 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
 
 describe("automatic setup through registered Pi hooks", () => {
   it("routes from first-use metadata before saving readable config and ownership in the background", async () => {
-    const harness = freshHarness();
+    const harness = freshHarness(false, undefined, true);
     try {
       assert.equal(harness.availableReads(), 0);
       assert.equal(harness.refreshCalls(), 0);
@@ -113,17 +134,22 @@ describe("automatic setup through registered Pi hooks", () => {
       assert.deepEqual(result, { action: "transform", text: "do a small task" });
       assert.equal(harness.selected(), "fixture/quick");
       assert.match(harness.notices.join("\n"), /in-memory pools/);
+      await harness.probeStarted;
       assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), false);
-      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost-probe.json")), false);
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost-probe.json")), false,
+        "the synthetic probe has not resolved while the foreground first use returns");
       assert.ok(harness.refreshCalls() <= 1, "existing first-prompt registry refresh is bounded to one call");
       harness.branch.push({ type: "message", id: "ordinary-first-prompt-append" });
+      harness.completeProbe();
+      await flushImmediate();
       await flushImmediate();
       assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), true);
       const receipt = JSON.parse(readFileSync(join(process.cwd(), ".pi", "bifrost-reconcile-ownership.json"), "utf8")) as {
         sources: Record<string, { generated: Record<string, string[]> }>;
       };
       assert.deepEqual(Object.values(receipt.sources).flatMap((source) => source.generated.quick ?? []), ["fixture/quick"]);
-      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost-probe.json")), false);
+      const probeReport = JSON.parse(readFileSync(join(process.cwd(), ".pi", "bifrost-probe.json"), "utf8")) as Array<{ status: string }>;
+      assert.deepEqual(probeReport.map((result) => result.status), ["ok"]);
       const reloaded = loadConfigForReload(process.cwd(), fileURLToPath(new URL("..", import.meta.url))).config;
       assert.equal(reloaded.default, "quick");
       assert.deepEqual(reloaded.models?.quick, ["fixture/quick"]);
@@ -132,38 +158,29 @@ describe("automatic setup through registered Pi hooks", () => {
   });
 
   it("keeps routing in memory when a meaningful project config appears before the background save", async () => {
-    const harness = freshHarness();
-    const queued: Array<() => void> = [];
-    const originalSetImmediate = globalThis.setImmediate;
-    globalThis.setImmediate = ((callback: (...args: any[]) => void, ...args: any[]) => {
-      queued.push(() => callback(...args));
-      return 0 as unknown as NodeJS.Immediate;
-    }) as typeof setImmediate;
+    const harness = freshHarness(false, undefined, true);
     try {
-      try {
-        await harness.handlers.get("input")!({
-          text: "quick do a small task",
-          source: "interactive",
-          streamingBehavior: "steer",
-        }, harness.ctx);
-      } finally {
-        globalThis.setImmediate = originalSetImmediate;
-      }
+      await harness.handlers.get("input")!({
+        text: "quick do a small task",
+        source: "interactive",
+        streamingBehavior: "steer",
+      }, harness.ctx);
+      await harness.probeStarted;
       const configPath = join(process.cwd(), ".pi", "bifrost.json");
       mkdirSync(join(process.cwd(), ".pi"), { recursive: true });
       writeFileSync(configPath, JSON.stringify({ strategy: "random" }));
-      for (const run of queued) run();
+      harness.completeProbe();
+      await flushImmediate();
       assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { strategy: "random" });
       assert.equal(harness.selected(), "fixture/quick");
       assert.match(harness.notices.join("\n"), /could not safely save.*routing continues with in-memory pools/);
     } finally {
-      globalThis.setImmediate = originalSetImmediate;
       harness.cleanup();
     }
   });
 
   it("keeps routing available when the project config directory becomes unsafe", async () => {
-    const harness = freshHarness();
+    const harness = freshHarness(false, undefined, true);
     try {
       const piDirectory = join(process.cwd(), ".pi");
       const alternateDirectory = join(process.cwd(), "alternate");
@@ -174,6 +191,8 @@ describe("automatic setup through registered Pi hooks", () => {
         source: "interactive",
         streamingBehavior: "steer",
       }, harness.ctx);
+      await harness.probeStarted;
+      harness.completeProbe();
       await flushImmediate();
       assert.equal(existsSync(join(alternateDirectory, "bifrost.json")), false);
       assert.equal(harness.selected(), "fixture/quick");
@@ -182,7 +201,7 @@ describe("automatic setup through registered Pi hooks", () => {
   });
 
   it("cancels a pending save on session teardown and never writes into a later project", async () => {
-    const harness = freshHarness();
+    const harness = freshHarness(false, undefined, true);
     const originalCwd = process.cwd();
     try {
       await harness.handlers.get("input")!({
@@ -190,7 +209,9 @@ describe("automatic setup through registered Pi hooks", () => {
         source: "interactive",
         streamingBehavior: "steer",
       }, harness.ctx);
+      await harness.probeStarted;
       await harness.handlers.get("session_shutdown")!({}, harness.ctx);
+      harness.completeProbe();
       const otherProject = join(originalCwd, "other-project");
       mkdirSync(otherProject);
       process.chdir(otherProject);
@@ -204,7 +225,7 @@ describe("automatic setup through registered Pi hooks", () => {
   });
 
   it("still bootstraps when the global config is an empty object", async () => {
-    const harness = freshHarness();
+    const harness = freshHarness(false, undefined, true);
     try {
       writeFileSync(join(process.env.PI_CODING_AGENT_DIR!, "bifrost.json"), "{}\n");
       const result = await harness.handlers.get("input")!({
@@ -215,6 +236,8 @@ describe("automatic setup through registered Pi hooks", () => {
       assert.deepEqual(result, { action: "transform", text: "do a small task" });
       assert.equal(harness.selected(), "fixture/quick");
       assert.match(harness.notices.join("\n"), /in-memory pools/);
+      await harness.probeStarted;
+      harness.completeProbe();
       await flushImmediate();
       assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), true);
       assert.equal(readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "bifrost.json"), "utf8"), "{}\n");

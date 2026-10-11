@@ -4,9 +4,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canBootstrapModels, buildBootstrapPools, hasBlockingRuntimePreferences, hasExplicitExtensionRoutingFile, hasExplicitExtensionRoutingOverride, hasUserBootstrapFiles, pathPresentOrUnsafe } from "../auto-setup.ts";
+import { canBootstrapModels, buildBootstrapPools, hasBlockingRuntimePreferences, hasExplicitExtensionRoutingFile, hasExplicitExtensionRoutingOverride, hasUserBootstrapFiles, pathPresentOrUnsafe, serializeBootstrapConfig } from "../auto-setup.ts";
 import { makeModel } from "./helpers.ts";
-import { DEFAULT_RULES } from "../config.ts";
+import { DEFAULT_RULES, type BifrostConfig } from "../config.ts";
 
 describe("automatic first-run setup", () => {
   it("only starts when no user config, route file, runtime preferences, or extension routing override exists", () => {
@@ -27,6 +27,55 @@ describe("automatic first-run setup", () => {
       default: "general",
       models: { quick: ["z-provider/quick"], general: ["a-provider/general"] },
     });
+  });
+
+  it("keeps supported extension settings but excludes inherited classifier prompt text from generated project config", () => {
+    const extensionSettings: BifrostConfig = {
+      enabled: true,
+      default: "general",
+      strategy: "first",
+      categoryStrategies: { quick: "random", general: "first", frontier: "first" },
+      rules: [{ pattern: "\\btests?\\b", model: "quick" }],
+      classifier: {
+        enabled: true,
+        backend: "prompt",
+        model: "fixture/classifier",
+        method: "auto",
+        maxTokens: 20,
+        temperature: 0,
+        fallbackToRegex: true,
+        totalTimeoutMs: 15_000,
+        typesafe: { model: "jev-test", timeoutMs: 250, maxAttempts: 3, debug: false, metrics: { enabled: true } },
+        systemPrompt: "PRIVATE_EXTENSION_PROMPT_CANARY_7f02",
+        criteria: { quick: "PRIVATE_EXTENSION_CRITERION_CANARY_91ca" },
+      },
+      cache: { enabled: true, maxEntries: 333, threshold: 0.88, ttlHours: 48, path: ".pi/custom-cache.jsonl" },
+      debug: { enabled: false, path: ".pi/custom-debug.jsonl" },
+      reliability: { enabled: true, stateVersion: 2, cooldownMinutes: 45, failureThreshold: 4, path: ".pi/custom-reliability.json" },
+      probe: { concurrency: 3, timeoutMs: 12_000 },
+      models: {},
+    };
+    (extensionSettings.classifier as Record<string, unknown>).apiKeyEnv = "BIFROST_TEST_CLASSIFIER_KEY_NAME";
+    (extensionSettings.classifier as Record<string, unknown>).unknownControl = "PRIVATE_EXTENSION_UNKNOWN_CANARY_d061";
+    (extensionSettings as BifrostConfig & Record<string, unknown>).extensionPrivateSetting = "PRIVATE_EXTENSION_UNKNOWN_ROOT_CANARY_1d9a";
+    const saved = serializeBootstrapConfig(extensionSettings, "quick", { quick: ["fixture/verified"], general: [], frontier: [] });
+    const serialized = JSON.stringify(saved);
+    for (const privateValue of ["PRIVATE_EXTENSION_PROMPT_CANARY_7f02", "PRIVATE_EXTENSION_CRITERION_CANARY_91ca",
+      "PRIVATE_EXTENSION_UNKNOWN_CANARY_d061", "PRIVATE_EXTENSION_UNKNOWN_ROOT_CANARY_1d9a"]) {
+      assert.equal(serialized.includes(privateValue), false, `${privateValue} must remain inherited from its source layer`);
+    }
+    assert.deepEqual(saved.models, { quick: ["fixture/verified"], general: [], frontier: [] });
+    assert.deepEqual(saved.classifier, {
+      enabled: true, backend: "prompt", model: "fixture/classifier", method: "auto", maxTokens: 20,
+      temperature: 0, fallbackToRegex: true, totalTimeoutMs: 15_000, apiKeyEnv: "BIFROST_TEST_CLASSIFIER_KEY_NAME",
+      typesafe: { model: "jev-test", timeoutMs: 250, maxAttempts: 3, debug: false, metrics: { enabled: true } },
+    });
+    assert.deepEqual(saved.cache, extensionSettings.cache);
+    assert.deepEqual(saved.debug, extensionSettings.debug);
+    assert.deepEqual(saved.reliability, extensionSettings.reliability);
+    assert.deepEqual(saved.probe, extensionSettings.probe);
+    assert.deepEqual(saved.categoryStrategies, extensionSettings.categoryStrategies);
+    assert.deepEqual(saved.rules, extensionSettings.rules);
   });
 
   it("allows valid enabled runtime preferences and fails closed on off or invalid preferences", () => {

@@ -435,8 +435,8 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       assertOffline(result);
       assert.equal(result.code, 0, result.stderr);
       assert.deepEqual(afterStats.stats.slice(beforeStats.stats.length).map((item) => [item.kind, item.model]), [
-        ["generation", "new"],
-        ["generation", "probe-slow"],
+        ["probe", "new"],
+        ["probe", "probe-slow"],
       ]);
       assert.equal(afterStats.catalogRequests, beforeStats.catalogRequests,
         "init probes configured models directly and does not need a provider catalog refresh");
