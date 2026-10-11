@@ -218,7 +218,7 @@ describe("legacy physical routing regression", { timeout: 240_000, concurrency: 
           enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
           models: { quick: ["fake/fast"], frontier: ["fake/strong"] },
           rules: [{ pattern: "architecture", model: "frontier" }],
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         },
       });
       const { code, stderr } = await runPi({
@@ -428,7 +428,7 @@ describe("legacy physical routing regression", { timeout: 240_000, concurrency: 
         bifrost: {
           enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
           models: { quick: ["fake/fast"] },
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         },
       });
       // Turn 1: record a session with model fake/fast active.

@@ -245,7 +245,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
                 allowanceCooldownScope: "provider",
                 ...(mode === "v2" ? { stateVersion: 2 } : {}),
               },
-              debug: { enabled: true },
+              debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
             },
           });
           const observer = writeOutcomeObserver(work);
@@ -311,7 +311,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
           enabled: true, default: "quick", strategy: "random", classifier: { enabled: false },
           models: { quick: ["fake/allowed", "fake/alternate"] },
           reliability: { stateVersion: 1 },
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         },
       });
       const rngExtension = join(work, "affinity-rng-extension.mjs");
@@ -387,7 +387,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
           models: { quick: ["fake/allowed", "fake/alternate"] },
           affinity: { mode: "off" },
           reliability: { stateVersion: 1 },
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         },
       });
       const baselineRngExtension = join(baselineWork, "affinity-rng-extension.mjs");
@@ -437,7 +437,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
             enabled: true, failureThreshold: 3, windowMinutes: 5, cooldownMinutes: 60,
             ...(mode === "v2" ? { stateVersion: 2 } : {}),
           },
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         };
         writeFixture({
           home, work, port: server.port,
@@ -633,7 +633,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
             retryOnAllowanceExhausted: false,
             ...(mode === "v2" ? { stateVersion: 2 } : {}),
           },
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         };
         writeFixture({
           home, work, port: server.port,
@@ -965,7 +965,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
           classifier: { enabled: true, backend: "prompt", model: "fake/usage-exhausted" },
           models: { quick: ["fake/healthy"] },
           reliability: { enabled: true, failureThreshold: 3, windowMinutes: 5, cooldownMinutes: 60 },
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         },
       });
       const now = Date.now();
@@ -1002,7 +1002,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
       writeFixture({
         home, work, port: server.port,
         models: [{ id: "usage-exhausted", reasoning: false }, { id: "healthy", reasoning: false }],
-        bifrost: { ...config, models: { quick: ["fake/healthy"] }, debug: { enabled: true } },
+        bifrost: { ...config, models: { quick: ["fake/healthy"] }, debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" } },
       });
       const now = Date.now();
       writeFileSync(join(work, ".pi", "bifrost-reliability.json"), JSON.stringify({
@@ -1071,7 +1071,7 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
       const result = await prepareV2AndRun({
         home, work, port: server.port,
         models: [{ id: "fail-then-ok", reasoning: false }],
-        config: { ...v2Config({ classifier: { enabled: false } }), models: { quick: ["fake/fail-then-ok"] }, debug: { enabled: true } },
+        config: { ...v2Config({ classifier: { enabled: false } }), models: { quick: ["fake/fail-then-ok"] }, debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" } },
         retry: { enabled: true, maxRetries: 1, baseDelayMs: 1, provider: { maxRetries: 0 } },
         messages: ["secret-lifecycle-prompt-sentinel"],
       });

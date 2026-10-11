@@ -5,6 +5,8 @@ const port = Number(process.env.PORT ?? 0);
 const attempts = new Map();
 const stats = [];
 let catalogRequests = 0;
+const heldProbeModels = new Set();
+const heldProbeWaiters = new Map();
 
 function json(response, status, body, headers = {}) {
   response.writeHead(status, { "content-type": "application/json", ...headers });
@@ -20,6 +22,18 @@ function sse(response, content = "ok") {
 const server = http.createServer((request, response) => {
   response.on("error", () => {});
   request.on("error", () => {});
+  if (request.method === "POST" && request.url?.startsWith("/_probe-gate/")) {
+    const url = new URL(request.url, "http://127.0.0.1");
+    const model = url.searchParams.get("model");
+    if (!model) return json(response, 400, { error: "model is required" });
+    if (url.pathname === "/_probe-gate/hold") heldProbeModels.add(model);
+    else if (url.pathname === "/_probe-gate/release") {
+      heldProbeModels.delete(model);
+      for (const release of heldProbeWaiters.get(model) ?? []) release();
+      heldProbeWaiters.delete(model);
+    } else return json(response, 404, { error: "unknown probe gate action" });
+    return json(response, 200, { model, held: heldProbeModels.has(model) });
+  }
   if (request.url === "/_stats") return json(response, 200, { attempts: Object.fromEntries(attempts), stats, catalogRequests });
   if (request.method === "GET" && request.url === "/v1/models") {
     catalogRequests++;
@@ -50,11 +64,15 @@ const server = http.createServer((request, response) => {
     const stat = { provider, model, attempt, kind: classifierRequest ? "classifier" : probeRequest ? "probe" : "generation", completed: false };
     stats.push(stat);
     response.on("finish", () => { stat.completed = true; });
+    response.on("close", () => { if (!response.writableFinished) stat.clientClosed = true; });
     if (model === "credits-exhausted") return json(response, 402, {
       error: { message: "You have no remaining credits. Purchase pre-paid credits to continue using Inference Providers. Alternatively, subscribe to PRO to get monthly included credits." },
     });
     if (model === "background-credits-exhausted" && probeRequest) return json(response, 402, {
       error: { message: "You have no remaining credits. Purchase pre-paid credits to continue using Inference Providers." },
+    });
+    if (model === "codex-like-temperature-rejects" && probeRequest && payload.temperature !== undefined) return json(response, 400, {
+      error: { message: "Unsupported parameter: temperature" },
     });
     if (model === "subscription-required") return json(response, 403, {
       type: "error",
@@ -73,6 +91,15 @@ const server = http.createServer((request, response) => {
     if (model === "probe-slow") return setTimeout(() => sse(response, "probe-slow-done"), 32_000);
     if (model === "probe-background-slow-fail" && probeRequest) {
       return setTimeout(() => json(response, 500, { error: { message: "probe-only failure" } }), 1_000);
+    }
+    if (model === "auto-selection-held-general" && probeRequest && heldProbeModels.has(model)) {
+      const waiters = heldProbeWaiters.get(model) ?? [];
+      heldProbeWaiters.set(model, waiters);
+      waiters.push(() => {
+        stat.gateReleased = true;
+        if (!response.destroyed) sse(response, "held-probe-released");
+      });
+      return;
     }
     if (model === "probe-background-slow-fail") return setTimeout(() => sse(response, "slow-generation-done"), 4_000);
     // "slow" keeps an agent run open long enough to queue steer prompts.

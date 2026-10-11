@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,7 +56,7 @@ function writePiModels({ home, port, models }) {
   for (const { provider = "fake", ...model } of models) {
     const entry = providers[provider] ??= {
       baseUrl: `http://127.0.0.1:${port}/v1`,
-      api: "openai-completions",
+      api: provider === "openai-codex" ? "openai-codex-responses" : "openai-completions",
       apiKey: provider === "fake" ? "fixture-only" : `fixture-${provider}`,
       models: [],
     };
@@ -168,6 +168,21 @@ function runAuto({ home, work, messages, model = "bifrost/auto" }) {
   });
 }
 
+function createDebugExtension(directory, logPath, enabled = true, probeTimeoutMs = 250) {
+  mkdirSync(directory, { recursive: true });
+  for (const entry of readdirSync(ROOT)) {
+    if ([".git", "node_modules", "index.ts", "bifrost.json"].includes(entry)) continue;
+    symlinkSync(join(ROOT, entry), join(directory, entry));
+  }
+  symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"));
+  copyFileSync(EXTENSION_PATH, join(directory, "index.ts"));
+  const config = JSON.parse(readFileSync(join(ROOT, "bifrost.json"), "utf8"));
+  config.debug = { enabled, path: logPath };
+  config.probe = { ...config.probe, timeoutMs: probeTimeoutMs };
+  writeFileSync(join(directory, "bifrost.json"), JSON.stringify(config));
+  return join(directory, "index.ts");
+}
+
 async function waitForFile(path, timeoutMs = 5_000, onTimeout = "") {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -178,8 +193,8 @@ async function waitForFile(path, timeoutMs = 5_000, onTimeout = "") {
   assert.fail(`file was not created: ${path}\n${details}`);
 }
 
-function startRpc({ home, work, model = "bifrost/auto" }) {
-  const child = spawn("pi", ["-e", EXTENSION_PATH, "--approve", "--mode", "rpc", "--no-session", "--no-tools", "--model", model], {
+function startRpc({ home, work, model = "bifrost/auto", extensionPath = EXTENSION_PATH }) {
+  const child = spawn("pi", ["-e", extensionPath, "--approve", "--mode", "rpc", "--no-session", "--no-tools", "--model", model], {
     cwd: work,
     stdio: ["pipe", "pipe", "pipe"],
     env: piTestEnv(home),
@@ -353,6 +368,8 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
   it("returns the first Auto response before slow probes and later saves only verified pools", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-background-home-"));
     const work = mkdtempSync(join(tmpdir(), "bifrost-background-work-"));
+    const extensionDir = mkdtempSync(join(tmpdir(), "bifrost-background-extension-"));
+    const extensionPath = createDebugExtension(extensionDir, ".pi/bifrost-debug.jsonl", false, 10_000);
     const configPath = join(work, ".pi", "bifrost.json");
     try {
       writePiModels({ home, port: server.port, models: [
@@ -360,7 +377,7 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
         { id: "probe-background-slow-fail", reasoning: false, cost: { input: 20, output: 20, cacheRead: 0, cacheWrite: 0 } },
       ] });
       const before = await fakeStats(server.port);
-      const rpc = startRpc({ home, work });
+      const rpc = startRpc({ home, work, extensionPath });
       try {
         await rpc.userTurn("quick say ready");
         const afterFirst = await fakeStats(server.port);
@@ -379,6 +396,7 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
           notifications: rpc.records.filter((record) => record.type === "extension_ui_request" && record.method === "notify").map((record) => record.message),
           stats: await fakeStats(server.port),
         }));
+        await secondTurn;
         const saved = JSON.parse(readFileSync(configPath, "utf8"));
         assert.equal(saved.default, "quick");
         assert.deepEqual(saved.models, { quick: ["fake/healthy"], general: [], frontier: [] });
@@ -389,7 +407,6 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
         assert.equal(saved.reliability.enabled, true);
         assert.equal(saved.debug.enabled, false);
 
-        await secondTurn;
         const beforeVerifiedTurn = await fakeStats(server.port);
         await rpc.userTurn("frontier say after verification");
         const after = await fakeStats(server.port);
@@ -405,6 +422,7 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
+      rmSync(extensionDir, { recursive: true, force: true });
     }
   });
 
@@ -494,25 +512,42 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     const home = mkdtempSync(join(tmpdir(), "bifrost-background-quota-home-"));
     const work = mkdtempSync(join(tmpdir(), "bifrost-background-quota-work-"));
     const configPath = join(work, ".pi", "bifrost.json");
+    const logPath = join(work, "probe-debug.jsonl");
+    const extensionDir = mkdtempSync(join(tmpdir(), "bifrost-debug-extension-"));
+    const extensionPath = createDebugExtension(extensionDir, logPath);
     try {
       writePiModels({ home, port: server.port, models: [
         { provider: "fake", id: "background-credits-exhausted", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
-        ...["sibling-one", "sibling-two", "sibling-three", "sibling-four"].map((id) => ({
+        ...["probe-background-slow-fail", "sibling-one", "sibling-two", "sibling-three", "sibling-four"].map((id) => ({
           provider: "fake", id, reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 },
         })),
+        { provider: "openai-codex", id: "gpt-fixture", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
+        { provider: "good", id: "codex-like-temperature-rejects", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
         { provider: "good", id: "healthy", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
       ] });
+      // A synthetic future-dated OAuth credential makes the native Codex
+      // provider eligible in Pi's model snapshot. Its deliberately invalid
+      // token is rejected locally by Pi before any provider request is sent.
+      writeFileSync(join(home, ".pi", "agent", "auth.json"), JSON.stringify({
+        "openai-codex": {
+          type: "oauth",
+          access: "synthetic-not-a-jwt",
+          refresh: "synthetic-refresh-token",
+          expires: Date.now() + 60 * 60 * 1000,
+        },
+      }));
       const before = await fakeStats(server.port);
-      const rpc = startRpc({ home, work });
+      const rpc = startRpc({ home, work, extensionPath });
       try {
         await rpc.userTurn("quick say ready");
         await waitForFile(configPath, 10_000, async () => JSON.stringify(await fakeStats(server.port)));
         const saved = JSON.parse(readFileSync(configPath, "utf8"));
-        assert.deepEqual(saved.models.quick, ["good/healthy"], "saved pools must omit every model from the quota-blocked provider");
+        assert.ok(saved.models.quick.includes("good/healthy"), "the successful healthy model remains in the saved quick pool");
+        assert.ok(saved.models.quick.every((model) => !model.startsWith("fake/")), "saved pools omit every model from the quota-blocked provider");
         const stats = await fakeStats(server.port);
         const added = stats.stats.slice(before.stats.length);
         const fakeProbes = added.filter((item) => item.provider === "fake" && item.kind === "probe");
-        assert.ok(fakeProbes.some((item) => item.model === "background-credits-exhausted"), "the primary candidate receives the probe");
+        assert.ok(fakeProbes.some((item) => item.model === "background-credits-exhausted"), "the fake provider receives the quota probe");
         assert.ok(fakeProbes.length <= 3, `queued fake-provider probes should stop after the initial concurrency window: ${JSON.stringify(fakeProbes)}`);
         assert.equal(fakeProbes.some((item) => ["sibling-three", "sibling-four"].includes(item.model)), false,
           `after the initial concurrency window, queued siblings must not start: ${JSON.stringify(fakeProbes)}`);
@@ -523,7 +558,29 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
       } finally {
         await rpc.close();
       }
+      const events = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const runIds = new Set(events.filter((event) => event.module === "probe").map((event) => event.runId));
+      assert.equal(runIds.size, 1, "one background probe run has one correlation ID");
+      const outcomes = events.filter((event) => event.module === "probe" && event.event === "model_result");
+      assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === "background-credits-exhausted"
+        && event.status === "error" && event.reason === "allowance_exhausted"), JSON.stringify(outcomes));
+      assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === "probe-background-slow-fail"
+        && event.status === "timeout" && event.reason === "timeout"), JSON.stringify(outcomes));
+      assert.ok(outcomes.some((event) => event.provider === "good" && event.model === "codex-like-temperature-rejects"
+        && event.status === "ok"), JSON.stringify(outcomes));
+      const codexOutcomes = outcomes.filter((event) => event.provider === "openai-codex");
+      const catalog = events.find((event) => event.module === "probe" && event.event === "catalog");
+      assert.ok(codexOutcomes.length > 0, "Pi's enabled native Codex models appear in the probe catalog");
+      assert.equal(codexOutcomes.length, catalog.providerCounts["openai-codex"]);
+      assert.ok(codexOutcomes.every((event) => event.status === "error" && event.reason === "authentication_or_access"), JSON.stringify(codexOutcomes));
+      const summary = events.find((event) => event.module === "probe" && event.event === "complete");
+      assert.equal(summary.cache, "not_written");
+      assert.equal(summary.cacheReason, "incomplete_report");
+      assert.ok(summary.ok > 0 && summary.error > 0 && summary.timeout > 0);
+      assert.equal(JSON.stringify(events).includes("no remaining credits"), false);
+      assert.equal(JSON.stringify(events).includes("probe-only failure"), false);
     } finally {
+      rmSync(extensionDir, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }
@@ -636,7 +693,7 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
           enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
           models: { quick: ["fake/healthy"] },
           reliability: { enabled: true, failureThreshold: 3, windowMinutes: 5, cooldownMinutes: 60 },
-          debug: { enabled: true },
+          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
         },
       });
       // Seed an expired-cooldown circuit: the route must CLAIM a half-open trial.

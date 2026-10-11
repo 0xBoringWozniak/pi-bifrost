@@ -3,11 +3,11 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { after, before, describe, it } from "node:test";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfigForReload } from "../../config.ts";
+import { BUNDLED_PUBLIC_INIT_DEFAULTS, loadConfigForReload } from "../../config.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PI = join(ROOT, "node_modules", ".bin", "pi");
@@ -49,6 +49,19 @@ function startFakeProvider() {
 function fixture(port, models) {
   const home = mkdtempSync(join(tmpdir(), "bifrost-init-home-"));
   const work = mkdtempSync(join(tmpdir(), "bifrost-init-work-"));
+  const extensionDir = join(home, "extension");
+  mkdirSync(extensionDir, { recursive: true });
+  for (const entry of readdirSync(ROOT)) {
+    if ([".git", "node_modules", "index.ts", "bifrost.json"].includes(entry)) continue;
+    symlinkSync(join(ROOT, entry), join(extensionDir, entry));
+  }
+  symlinkSync(join(ROOT, "node_modules"), join(extensionDir, "node_modules"));
+  copyFileSync(EXTENSION, join(extensionDir, "index.ts"));
+  writeFileSync(join(extensionDir, "bifrost.json"), JSON.stringify({
+    $schema: "./schema.json",
+    ...BUNDLED_PUBLIC_INIT_DEFAULTS,
+    models: { quick: [], general: [], frontier: [] },
+  }));
   const agent = join(home, ".pi", "agent");
   mkdirSync(agent, { recursive: true });
   mkdirSync(join(work, ".pi"), { recursive: true });
@@ -57,7 +70,7 @@ function fixture(port, models) {
     models: models.map((id) => ({ id, reasoning: false, contextWindow: 8192, maxTokens: 512 })),
   } } }));
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ retry: { enabled: false }, enabledModels: ["fake/*"] }));
-  return { home, work };
+  return { home, work, extensionPath: join(extensionDir, "index.ts") };
 }
 
 function ownership(generated) {
@@ -65,11 +78,11 @@ function ownership(generated) {
   return JSON.stringify({ version: 1, sources: { [sourceId]: { generated: { quick: generated }, tombstones: {} } } });
 }
 
-function runInit({ home, work, args, prompt = `/bifrost init ${args}` }) {
+function runInit({ home, work, args, extensionPath = EXTENSION, prompt = `/bifrost init ${args}` }) {
   const base = Object.fromEntries(["PATH", "TMPDIR", "LANG", "TERM"]
     .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
   return new Promise((resolve, reject) => {
-    const child = spawn(PI, ["-e", EXTENSION, "--approve", "--no-tools", "--no-session", "-p", prompt], {
+    const child = spawn(PI, ["-e", extensionPath, "--approve", "--no-tools", "--no-session", "-p", prompt], {
       cwd: work,
       env: { ...base, HOME: home, PI_CODING_AGENT_DIR: join(home, ".pi", "agent"), PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1",
         NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`, BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${server.address().port}`,
@@ -412,7 +425,7 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
       const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
       process.env.PI_CODING_AGENT_DIR = join(env.home, ".pi", "agent");
       try {
-        const inherited = loadConfigForReload(env.work, ROOT).config;
+        const inherited = loadConfigForReload(env.work, dirname(env.extensionPath)).config;
         assert.equal(inherited.classifier?.systemPrompt, "GLOBAL_SYSTEM_PROMPT_CANARY");
         assert.deepEqual(inherited.classifier?.criteria, { general: "GLOBAL_CRITERIA_CANARY" });
         assert.equal(inherited.classifier?.endpoint, "https://private-endpoint-canary.invalid");
@@ -431,7 +444,7 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
           criteria: { general: "GLOBAL_CRITERIA_AFTER_EDIT" },
           privateSetting: "GLOBAL_CLASSIFIER_UNKNOWN_AFTER_EDIT",
         } }));
-        assert.equal(loadConfigForReload(env.work, ROOT).config.classifier?.systemPrompt, "GLOBAL_SYSTEM_PROMPT_AFTER_EDIT");
+        assert.equal(loadConfigForReload(env.work, dirname(env.extensionPath)).config.classifier?.systemPrompt, "GLOBAL_SYSTEM_PROMPT_AFTER_EDIT");
       } finally {
         if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

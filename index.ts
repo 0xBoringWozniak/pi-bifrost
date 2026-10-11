@@ -713,17 +713,32 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     autoClassifierModel?: string;
     readonly session: object;
     readonly projectRoot: string;
-    readonly lifecycle: number;
+    lifecycle: number;
     readonly controller: AbortController;
     cancelled: boolean;
     configPersisted: boolean;
+    progress?: { done: number; total: number; passed: number };
   }
   const autoBootstrapBySession = new WeakMap<object, AutoBootstrapRecord>();
   const autoBootstrapRecords = new Set<AutoBootstrapRecord>();
   const pendingBootstrapConfigBySession = new WeakMap<object, { record: AutoBootstrapRecord; config: BifrostConfig }>();
   const autoBootstrapLifecycleBySession = new WeakMap<object, number>();
-  function advanceAutoBootstrapLifecycle(session: object): void {
-    autoBootstrapLifecycleBySession.set(session, (autoBootstrapLifecycleBySession.get(session) ?? 0) + 1);
+  function advanceAutoBootstrapLifecycle(session: object, preserveEligibleBootstrap = false, ctx?: ExtensionContext): void {
+    const record = preserveEligibleBootstrap ? autoBootstrapBySession.get(session) : undefined;
+    const previousLifecycle = autoBootstrapLifecycleBySession.get(session) ?? 0;
+    const nextLifecycle = previousLifecycle + 1;
+    autoBootstrapLifecycleBySession.set(session, nextLifecycle);
+    if (!record) return;
+    if (record.lifecycle === previousLifecycle && !record.cancelled && !record.configPersisted
+      && state.bootstrapModelsInMemory && state.config === record.config
+      && (state.configGeneration ?? 0) === record.configGeneration
+      && resolve(process.cwd()) === record.projectRoot && !record.controller.signal.aborted
+      && bootstrapContextStillEligible()) {
+      record.lifecycle = nextLifecycle;
+      debugLifecycle("bifrost", "auto_bootstrap.lifecycle_transfer", session, undefined, { reason: "user_selected_auto" });
+      return;
+    }
+    cancelAutoBootstrap(session, ctx);
   }
   const allowanceRetrySessions = new Set<WeakRef<object>>();
   const allowanceRetrySessionRefs = new WeakMap<object, WeakRef<object>>();
@@ -1058,8 +1073,9 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     return activeSource ? { modelKey: model, ...marker } : undefined;
   }
 
-  state.onConfigInstalled = (nextConfig, previousConfig, validatedReload = false) => {
-    for (const record of autoBootstrapRecords) cancelAutoBootstrap(record.session);
+  state.onConfigInstalled = (nextConfig, previousConfig, validatedReload = false, ctx) => {
+    for (const record of autoBootstrapRecords) cancelAutoBootstrap(record.session, record.session === ctx?.sessionManager ? ctx : undefined);
+    if (ctx && ctx.mode === "tui" && ctx.hasUI) ctx.ui.setWidget("bifrost-probe", []);
     void cleanupAllProviderTrials();
     providerAllowanceImportPromise = undefined;
     legacyAllowanceModelKeys.clear();
@@ -1142,7 +1158,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     return record?.originalConfig;
   };
 
-  function cancelAutoBootstrap(session: object): void {
+  function cancelAutoBootstrap(session: object, ctx?: ExtensionContext): void {
     const pending = autoBootstrapBySession.get(session);
     if (pending) {
       pending.cancelled = true;
@@ -1150,6 +1166,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       autoBootstrapRecords.delete(pending);
     }
     autoBootstrapBySession.delete(session);
+    if (ctx?.sessionManager === session) clearBifrostWidgets(ctx);
   }
 
   function installPendingBootstrapConfig(session: object): void {
@@ -1179,7 +1196,33 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         ...userFiles,
         runtimePreferences: runtimePreferencesChanged,
         extensionRoutingOverride: hasExplicitExtensionRoutingFile(join(extensionDir, "bifrost.json")),
-      });
+    });
+  }
+
+  function autoBootstrapOwnsCurrentUi(record: AutoBootstrapRecord): boolean {
+    return autoBootstrapBySession.get(record.session) === record
+      && (autoBootstrapLifecycleBySession.get(record.session) ?? 0) === record.lifecycle
+      && state.config === record.config
+      && (state.configGeneration ?? 0) === record.configGeneration
+      && resolve(process.cwd()) === record.projectRoot;
+  }
+
+  function autoBootstrapCanUpdateProgress(record: AutoBootstrapRecord): boolean {
+    return autoBootstrapOwnsCurrentUi(record) && !record.cancelled && !record.controller.signal.aborted
+      && state.bootstrapModelsInMemory === true && bootstrapContextStillEligible();
+  }
+
+  function renderAutoBootstrapProgress(ctx: ExtensionContext, record: AutoBootstrapRecord): void {
+    if (!record.progress || !autoBootstrapCanUpdateProgress(record)) return;
+    if (ctx.mode === "tui" && ctx.hasUI) {
+      const { done, total, passed } = record.progress;
+      ctx.ui.setWidget("bifrost-probe", [`Checking models: ${done}/${total}`, `  passed: ${passed}`]);
+    }
+  }
+
+  function clearAutoBootstrapProgress(ctx: ExtensionContext, record: AutoBootstrapRecord): void {
+    if (!autoBootstrapOwnsCurrentUi(record)) return;
+    if (ctx.mode === "tui" && ctx.hasUI) ctx.ui.setWidget("bifrost-probe", []);
   }
 
   function bootstrapStillEligible(): boolean {
@@ -1275,7 +1318,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       if (ownsPersistence()) {
         record.configPersisted = true;
         pendingBootstrapConfigBySession.set(session, { record, config: { ...nextConfig, models: generatedModels } });
-        log(ctx, "Bifrost saved the detected starter pools to project config at .pi/bifrost.json.");
+        log(ctx, `Bifrost saved the detected starter pools to project config at ${configPath}.`);
       }
     } catch {
       warn();
@@ -1364,11 +1407,15 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       state.invalidatePipeline();
       state.bootstrapModelsInMemory = true;
       log(ctx, `Bifrost loaded ${Object.values(pools.models).reduce((count, pool) => count + pool.length, 0)} provisional chat model(s) into in-memory pools; checking model access in the background.`);
+      record.progress = { done: 0, total: catalogModels.length, passed: 0 };
+      renderAutoBootstrapProgress(ctx, record);
       const configAfterInstall = state.config;
       const generationAfterInstall = state.configGeneration ?? 0;
       const pendingDeniedProviders = new Set<string>();
       const providerPauseWrites: Promise<void>[] = [];
       let persistenceWarningShown = false;
+      let lastStatusUpdate = 0;
+      const statusUpdateInterval = 200;
       const warnBootstrapSaveBlocked = (): void => {
         if (persistenceWarningShown || record.cancelled) return;
         persistenceWarningShown = true;
@@ -1419,6 +1466,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       const probeModels = catalogModels.filter(canProbe);
       if (probeModels.length === 0) {
         autoBootstrapRecords.delete(record);
+        clearAutoBootstrapProgress(ctx, record);
         log(ctx, "No catalog models are currently eligible for background checks; existing provider and model pauses remain in force.", "warning");
         return true;
       }
@@ -1429,6 +1477,14 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         shouldProbe: canProbe,
         signal: record.controller.signal,
         onProgress: (_done, _total, result) => {
+          if (!autoBootstrapCanUpdateProgress(record)) return;
+          const progress = record.progress!;
+          record.progress = { ...progress, done: _done, passed: progress.passed + (result.status === "ok" ? 1 : 0) };
+          const now = Date.now();
+          if (now - lastStatusUpdate > statusUpdateInterval || _done === _total) {
+            renderAutoBootstrapProgress(ctx, record);
+            lastStatusUpdate = now;
+          }
           if (result.status !== "error" || !stillOwned()) return;
           const model = catalogModels.find((candidate) => candidate.provider === result.provider && candidate.id === result.model);
           if (!model) return;
@@ -1453,6 +1509,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         },
       }).then(async ({ results, cancelled }) => {
         await Promise.all(providerPauseWrites);
+        if (autoBootstrapOwnsCurrentUi(record)) clearAutoBootstrapProgress(ctx, record);
         if (cancelled || state.config !== configAfterInstall
           || (state.configGeneration ?? 0) !== generationAfterInstall) {
           return;
@@ -1498,7 +1555,12 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         persistAutoBootstrap(ctx, session, record, verifiedConfig, verifiedModels);
         autoBootstrapRecords.delete(record);
       }).catch(() => {
-        if (stillOwned()) log(ctx, "Bifrost could not finish its background health check; provisional pools remain available and no config was saved.", "warning");
+        if (autoBootstrapOwnsCurrentUi(record)) {
+          clearAutoBootstrapProgress(ctx, record);
+          if (autoBootstrapCanUpdateProgress(record)) {
+            log(ctx, "Bifrost could not finish its background health check; provisional pools remain available and no config was saved.", "warning");
+          }
+        }
         autoBootstrapRecords.delete(record);
       });
       return true;
@@ -3102,8 +3164,8 @@ export default function bifrostExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    advanceAutoBootstrapLifecycle(ctx.sessionManager);
-    cancelAutoBootstrap(ctx.sessionManager);
+    advanceAutoBootstrapLifecycle(ctx.sessionManager, false, ctx);
+    cancelAutoBootstrap(ctx.sessionManager, ctx);
     const branch = ctx.sessionManager.getBranch();
     const branchLength = branch.length;
     const branchHeadId = branch.at(-1)?.id;
@@ -3129,8 +3191,8 @@ export default function bifrostExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_before_tree", async (_event, ctx) => {
-    advanceAutoBootstrapLifecycle(ctx.sessionManager);
-    cancelAutoBootstrap(ctx.sessionManager);
+    advanceAutoBootstrapLifecycle(ctx.sessionManager, false, ctx);
+    cancelAutoBootstrap(ctx.sessionManager, ctx);
     await cleanupProviderTrials(ctx.sessionManager);
     clearAllowanceRetry(ctx.sessionManager, "branch_changed");
     affinityStore?.reset(ctx.sessionManager);
@@ -3456,10 +3518,9 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       debug("bifrost", "model_select.restore", { model: modelKey(event.model) });
       return;
     }
-    advanceAutoBootstrapLifecycle(ctx.sessionManager);
-    cancelAutoBootstrap(ctx.sessionManager);
     // Selecting the virtual profile is an explicit request for per-prompt routing.
     if (isBifrostAuto(ctx.model)) {
+      advanceAutoBootstrapLifecycle(ctx.sessionManager, true, ctx);
       affinityStore?.reset(ctx.sessionManager);
       pendingAffinityBySession.delete(ctx.sessionManager);
       if (reliabilityV2Enabled()) {
@@ -3476,9 +3537,13 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       debug("bifrost", "model_select.virtual_auto");
       syncBifrostModeStatus(ctx, state);
       clearBifrostWidgets(ctx);
+      const bootstrap = autoBootstrapBySession.get(ctx.sessionManager);
+      if (bootstrap) renderAutoBootstrapProgress(ctx, bootstrap);
       log(ctx, "Bifrost Auto selected; routing each prompt to a physical model");
       return;
     }
+    advanceAutoBootstrapLifecycle(ctx.sessionManager, false, ctx);
+    cancelAutoBootstrap(ctx.sessionManager, ctx);
     if (!state.enabled) return;
 
     state.pinned = true;

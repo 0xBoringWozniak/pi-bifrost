@@ -89,7 +89,7 @@ export interface BifrostState {
   bootstrapModelsInMemory?: boolean;
   reliabilityV2ConfigValid?: boolean;
   reliabilityV2StateError?: string;
-  onConfigInstalled?: (config: BifrostConfig, previousConfig: BifrostConfig, validatedReload?: boolean) => void;
+  onConfigInstalled?: (config: BifrostConfig, previousConfig: BifrostConfig, validatedReload?: boolean, ctx?: ExtensionContext) => void;
   onInitStarted?: (session: object) => BifrostConfig | undefined;
   onManualControl?: (session: object, action?: "on" | "off" | "pin" | "unpin") => void;
   /** Read-only projection of the current branch-local successful Auto anchor. */
@@ -144,7 +144,7 @@ function installConfigIfTierPoliciesValid(
   state.economicPolicyValid = validateEconomicConfig(config).every((issue) => issue.severity !== "error");
   state.economicDiagnostics = reconciled.diagnostics;
   state.economicQuarantinedSourceRevisions = reconciled.quarantinedSourceRevisions;
-  state.onConfigInstalled?.(config, previousConfig, validatedReload);
+  state.onConfigInstalled?.(config, previousConfig, validatedReload, ctx);
   state.invalidatePipeline();
   return true;
 }

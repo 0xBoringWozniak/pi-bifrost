@@ -15,7 +15,7 @@ import { makeModel } from "./helpers.ts";
 type Hook = (event: any, ctx: ExtensionContext) => Promise<unknown>;
 const flushImmediate = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; classifierEnabled: boolean }, deferProbe = false) {
+function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; classifierEnabled: boolean }, deferProbe = false, blockProbe = false) {
   const previousCwd = process.cwd();
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousTypeSafeKey = process.env[TYPE_SAFE_API_KEY_ENV];
@@ -25,6 +25,13 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
   if (persistedRuntimeState) {
     mkdirSync(join(cwd, ".pi"), { recursive: true });
     writeFileSync(join(cwd, ".pi", "bifrost-state.json"), JSON.stringify(persistedRuntimeState));
+  }
+  if (blockProbe) {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "bifrost-reliability.json"), JSON.stringify({
+      version: 1,
+      models: { "fixture/quick": { failures: [Date.now()], openUntil: Date.now() + 60_000 } },
+    }));
   }
   process.chdir(cwd);
   process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -37,12 +44,20 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
   const notices: string[] = [];
   let availableReads = 0;
   let refreshCalls = 0;
+  let probeRequests = 0;
   let selected: string | undefined;
   let routeDefinition: VirtualModelDefinition | undefined;
   let confirmCalls = 0;
+  let staleContext = false;
+  const probeWidgetWrites: string[][] = [];
+  const statuses = new Map<string, string>();
   let onProbeStarted!: () => void;
+  let onProbeWidgetStarted!: () => void;
+  let onProbeWidgetVisible = () => {};
+  let probeWidgetWasVisible = false;
   let releaseProbe!: (response: unknown) => void;
   const probeStarted = new Promise<void>((resolve) => { onProbeStarted = resolve; });
+  const probeWidgetStarted = new Promise<void>((resolve) => { onProbeWidgetStarted = resolve; });
   const deferredProbe = new Promise<unknown>((resolve) => { releaseProbe = resolve; });
   const successfulProbeResponse = () => ({
     role: "assistant",
@@ -58,8 +73,14 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
   const autoModel = { ...makeModel(BIFROST_AUTO_PROVIDER, BIFROST_AUTO_ID), api: "pi-virtual" };
   const ctx = {
     cwd,
-    mode: "tui",
-    hasUI: true,
+    get mode() {
+      if (staleContext) throw new Error("stale extension context mode read");
+      return "tui";
+    },
+    get hasUI() {
+      if (staleContext) throw new Error("stale extension context UI read");
+      return true;
+    },
     signal: new AbortController().signal,
     model: auto ? autoModel : makeModel("fixture", "physical"),
     modelRegistry: {
@@ -69,6 +90,7 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
       getProviderAuthStatus: () => ({ configured: false }),
       refresh: async () => { refreshCalls += 1; return { refreshed: [], errors: new Map() }; },
       ...(deferProbe ? { streamSimple: () => {
+        probeRequests += 1;
         onProbeStarted();
         return { result: () => deferredProbe };
       } } : {}),
@@ -80,8 +102,19 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
     ui: {
       theme: { fg: (_color: string, value: string) => value },
       notify: (message: string) => notices.push(message),
-      setStatus: () => {},
-      setWidget: () => {},
+      setStatus: (id: string, text: string) => { statuses.set(id, text); },
+      setWidget: (id: string, lines: string[]) => {
+        if (id === "bifrost-probe") {
+          probeWidgetWrites.push([...lines]);
+          if (lines.length > 0) {
+            onProbeWidgetStarted();
+            if (!probeWidgetWasVisible) {
+              probeWidgetWasVisible = true;
+              onProbeWidgetVisible();
+            }
+          }
+        }
+      },
       setWorkingMessage: () => {},
       setWorkingVisible: () => {},
       confirm: async () => { confirmCalls += 1; return false; },
@@ -96,6 +129,7 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
   bifrostExtension(pi);
   return {
     ctx,
+    setContextModel: (next: Model<Api>) => { ctx.model = next; },
     handlers,
     model,
     setAvailable: (next: Model<Api>[]) => { models = next; },
@@ -105,6 +139,12 @@ function freshHarness(auto = false, persistedRuntimeState?: { enabled: boolean; 
     notices,
     availableReads: () => availableReads,
     refreshCalls: () => refreshCalls,
+    probeRequests: () => probeRequests,
+    probeWidgetWrites: () => probeWidgetWrites,
+    probeWidgetStarted,
+    onProbeWidgetVisible: (callback: () => void) => { onProbeWidgetVisible = callback; },
+    markContextStale: () => { staleContext = true; },
+    status: (id: string) => statuses.get(id),
     selected: () => selected,
     confirmCalls: () => confirmCalls,
     probeStarted,
@@ -157,6 +197,131 @@ describe("automatic setup through registered Pi hooks", () => {
     } finally { harness.cleanup(); }
   });
 
+  it("keeps an eligible background save alive when the user selects Auto", async () => {
+    const harness = freshHarness(false, undefined, true);
+    try {
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeStarted;
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), false);
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), ["Checking models: 0/1", "  passed: 0"]);
+
+      harness.setContextModel(harness.autoModel);
+      await harness.handlers.get("model_select")!({ model: harness.autoModel, source: "set" }, harness.ctx);
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), ["Checking models: 0/1", "  passed: 0"],
+        "selecting Auto clears command widgets, then restores active bootstrap progress");
+      harness.completeProbe();
+      await flushImmediate();
+      await flushImmediate();
+
+      assert.equal(harness.probeRequests(), 1, "Auto selection must retain the in-flight probe rather than restart it");
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), true);
+      const config = JSON.parse(readFileSync(join(process.cwd(), ".pi", "bifrost.json"), "utf8"));
+      assert.deepEqual(config.models.quick, ["fixture/quick"]);
+      const report = JSON.parse(readFileSync(join(process.cwd(), ".pi", "bifrost-probe.json"), "utf8"));
+      assert.deepEqual(report.map((result: { status: string }) => result.status), ["ok"]);
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), [], "the widget clears when checks finish");
+    } finally { harness.cleanup(); }
+  });
+
+  it("does not touch a torn-down UI when a cancelled background check settles", async () => {
+    const harness = freshHarness(false, undefined, true);
+    try {
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeStarted;
+      const writesBeforeShutdown = harness.probeWidgetWrites().length;
+      await harness.handlers.get("session_shutdown")!({}, harness.ctx);
+      harness.markContextStale();
+      harness.completeProbe();
+      await flushImmediate();
+      await flushImmediate();
+
+      assert.equal(harness.probeWidgetWrites().length, writesBeforeShutdown,
+        "a stale asynchronous completion must not inspect or update the destroyed UI");
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), false);
+    } finally { harness.cleanup(); }
+  });
+
+  it("clears progress when every catalog model is paused before probing", async () => {
+    const harness = freshHarness(false, undefined, true, true);
+    try {
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeWidgetStarted;
+      const routingStatus = harness.status("bifrost-state");
+      for (let i = 0; i < 5; i += 1) await flushImmediate();
+
+      assert.equal(harness.probeRequests(), 0, "open-circuit catalog entries are not probed");
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), [], "progress clears when no models pass admission");
+      assert.equal(harness.status("bifrost-state"), routingStatus, "bootstrap progress does not replace the routing status");
+    } finally { harness.cleanup(); }
+  });
+
+  it("clears progress when setup becomes ineligible before probe admission", async () => {
+    const harness = freshHarness(false, undefined, true);
+    const configPath = join(harness.ctx.cwd, ".pi", "bifrost.json");
+    try {
+      let routingStatusBefore: string | undefined;
+      harness.onProbeWidgetVisible(() => {
+        routingStatusBefore = harness.status("bifrost-state");
+        mkdirSync(join(process.cwd(), ".pi"), { recursive: true });
+        writeFileSync(configPath, JSON.stringify({ strategy: "random" }));
+      });
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeWidgetStarted;
+      for (let i = 0; i < 5; i += 1) await flushImmediate();
+
+      assert.equal(harness.probeRequests(), 0, "the newly appeared config blocks background admission");
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), [], "current-session progress clears after the eligibility abort");
+      assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { strategy: "random" });
+      assert.equal(harness.status("bifrost-state"), routingStatusBefore, "background cleanup leaves routing status intact");
+    } finally { harness.cleanup(); }
+  });
+
+  it("still cancels the in-flight save when the user pins a physical model", async () => {
+    const harness = freshHarness(false, undefined, true);
+    try {
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeStarted;
+      await harness.handlers.get("model_select")!({ model: makeModel("fixture", "physical"), source: "set" }, harness.ctx);
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), [], "manual physical selection clears bootstrap progress immediately");
+      harness.completeProbe();
+      await flushImmediate();
+      await flushImmediate();
+
+      assert.equal(harness.probeRequests(), 1);
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), false);
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost-reconcile-ownership.json")), false);
+    } finally { harness.cleanup(); }
+  });
+
+  it("does not leave a delayed status callback bound to a saved session", async () => {
+    const harness = freshHarness(false, undefined, true);
+    const originalSetTimeout = globalThis.setTimeout;
+    const delayedStatusCallbacks: Array<() => void> = [];
+    globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
+      if (timeout === 3000 && typeof handler === "function") {
+        delayedStatusCallbacks.push(() => handler(...args));
+        return {} as ReturnType<typeof setTimeout>;
+      }
+      return originalSetTimeout(handler, timeout, ...args);
+    }) as typeof globalThis.setTimeout;
+    try {
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeStarted;
+      harness.completeProbe();
+      await flushImmediate();
+      await flushImmediate();
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), true);
+      await harness.handlers.get("session_shutdown")!({}, harness.ctx);
+      harness.markContextStale();
+
+      assert.equal(delayedStatusCallbacks.length, 0, "saved background setup needs no delayed footer-status clear");
+      for (const callback of delayedStatusCallbacks) assert.doesNotThrow(callback);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      harness.cleanup();
+    }
+  });
+
   it("keeps routing in memory when a meaningful project config appears before the background save", async () => {
     const harness = freshHarness(false, undefined, true);
     try {
@@ -166,14 +331,18 @@ describe("automatic setup through registered Pi hooks", () => {
         streamingBehavior: "steer",
       }, harness.ctx);
       await harness.probeStarted;
+      const routingStatus = harness.status("bifrost-state");
+      assert.ok((harness.probeWidgetWrites().at(-1) ?? []).length > 0, "the active background check displays progress");
       const configPath = join(process.cwd(), ".pi", "bifrost.json");
       mkdirSync(join(process.cwd(), ".pi"), { recursive: true });
       writeFileSync(configPath, JSON.stringify({ strategy: "random" }));
       harness.completeProbe();
-      await flushImmediate();
+      for (let i = 0; i < 5; i += 1) await flushImmediate();
       assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { strategy: "random" });
       assert.equal(harness.selected(), "fixture/quick");
       assert.match(harness.notices.join("\n"), /could not safely save.*routing continues with in-memory pools/);
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), [], "a late config change clears progress even after it aborts the probe");
+      assert.equal(harness.status("bifrost-state"), routingStatus, "late probe completion leaves routing status intact");
     } finally {
       harness.cleanup();
     }

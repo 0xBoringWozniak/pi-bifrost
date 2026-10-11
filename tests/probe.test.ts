@@ -4,7 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runProbe, DEFAULT_PROBE_CONCURRENCY, probeOptionsFromConfig, readRecentCompleteProbeReport, validateCompleteProbeReport } from "../probe.ts";
+import { flushDebug, setupDebug } from "../debug.ts";
 import { delay } from "./helpers.ts";
+import { streamSimple as streamCodexSimple } from "@earendil-works/pi-ai/api/openai-codex-responses";
 
 describe("probe transport", () => {
   it("uses modelRegistry.streamSimple", async () => {
@@ -140,6 +142,90 @@ describe("probe transport", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it("omits unsupported temperature from the native Codex health request", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bifrost-probe-codex-temperature-"));
+    const model = {
+      provider: "openai-codex",
+      id: "gpt-fixture",
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 8_192,
+      maxTokens: 4_096,
+      cost: { input: 0.1, output: 0.1 },
+    };
+    const accountClaim = Buffer.from(JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" },
+    })).toString("base64url");
+    const syntheticJwt = `e30.${accountClaim}.synthetic-signature`;
+    const cwdBefore = process.cwd();
+    let payload: Record<string, unknown> | undefined;
+    let probeOptions: Record<string, unknown> | undefined;
+
+    try {
+      const ctx = {
+        modelRegistry: {
+          getAvailable: () => [model],
+          streamSimple: (requestModel: typeof model, context: unknown, options: Record<string, unknown>) => {
+            probeOptions = options;
+            return streamCodexSimple(requestModel as never, context as never, {
+              ...options,
+              apiKey: syntheticJwt,
+              transport: "sse",
+              maxRetries: 0,
+              onPayload: (request: unknown) => { payload = request as Record<string, unknown>; },
+              fetch: async () => {
+                if (payload?.temperature !== undefined) {
+                  return new Response(JSON.stringify({ error: { message: "Unsupported parameter: temperature" } }), {
+                    status: 400,
+                    headers: { "content-type": "application/json" },
+                  });
+                }
+                const events = [
+                  {
+                    type: "response.output_item.added",
+                    output_index: 0,
+                    item: { id: "msg_fixture", type: "message", role: "assistant", content: [] },
+                  },
+                  { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "2" },
+                  {
+                    type: "response.completed",
+                    response: {
+                      id: "resp_fixture",
+                      status: "completed",
+                      output: [{ id: "msg_fixture", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: "2", annotations: [] }] }],
+                      usage: { input_tokens: 1, output_tokens: 1 },
+                    },
+                  },
+                ];
+                const sse = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+                return new Response(sse, {
+                  headers: { "content-type": "text/event-stream" },
+                });
+              },
+            } as never);
+          },
+        },
+      } as never;
+
+      process.chdir(cwd);
+      const result = await runProbe(ctx, { timeoutMs: 2_000 });
+      assert.ok(probeOptions, "native Codex test stream was called");
+      assert.ok(payload, "native Codex request payload was built");
+      assert.equal(result.results[0]?.status, "ok", result.results[0]?.error ?? "probe did not succeed");
+      assert.equal(payload?.temperature, undefined);
+      assert.equal(payload?.model, "gpt-fixture");
+      assert.equal(probeOptions?.temperature, undefined);
+      assert.equal(probeOptions?.maxTokens, 5);
+      assert.equal(probeOptions?.cacheRetention, "none");
+      assert.ok(probeOptions?.signal instanceof AbortSignal);
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("probe with many models and slow responses", () => {
@@ -254,6 +340,114 @@ describe("probe with many models and slow responses", () => {
       const probeData = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(probePath, "utf-8")));
       assert.equal(probeData.length, MODEL_COUNT);
     } finally {
+      process.chdir(cwdBefore);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("probe debug evidence", () => {
+  it("records catalog identities, sanitized outcomes, and why an incomplete run was not cached", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bifrost-probe-debug-"));
+    const logPath = join(cwd, "probe.jsonl");
+    const cwdBefore = process.cwd();
+    const models = [
+      { provider: "openai-codex", id: "gpt-fixture", api: "openai-codex-responses", cost: { input: 1, output: 2 } },
+      { provider: "fixture", id: "limited", api: "openai-completions", cost: { input: 0, output: 0 } },
+      { provider: "fixture", id: "healthy", api: "openai-completions", cost: { input: 1, output: 1 } },
+      { provider: "fixture", id: "unsupported", api: "openai-completions", cost: { input: 1, output: 1 } },
+      { provider: "openai-codex", id: "codex-auth", api: "openai-codex-responses" },
+    ];
+    const ctx = {
+      modelRegistry: {
+        getAvailable: () => models,
+        streamSimple: (model: typeof models[number]) => ({ result: async () => model.id === "limited"
+          ? ({ stopReason: "error", errorMessage: "secret=provider-token HTTP 429 quota exceeded" })
+          : model.id === "unsupported"
+            ? ({ stopReason: "error", errorMessage: "HTTP 400: Unsupported parameter: temperature secret=provider-token" })
+            : model.id === "codex-auth"
+              ? ({ stopReason: "error", errorMessage: "Failed to extract accountId from token" })
+              : ({ stopReason: "stop", content: [{ type: "text", text: "2" }], usage: { totalTokens: 1 } }) }),
+      },
+    } as never;
+
+    try {
+      process.chdir(cwd);
+      setupDebug({ enabled: true, path: logPath }, cwd);
+      const result = await runProbe(ctx, { shouldProbe: (model) => model.id !== "gpt-fixture" });
+      await flushDebug(1_000);
+      const rows = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const outcomes = rows.filter((row) => row.event === "model_result");
+      assert.equal(new Set(rows.map((row) => row.runId)).size, 1);
+      assert.equal(result.results.length, 5);
+      assert.deepEqual(outcomes.map(({ model, status, reason }) => [model, status, reason]).sort(), [
+        ["gpt-fixture", "skipped", "not_eligible"],
+        ["healthy", "ok", null],
+        ["limited", "error", "rate_limited"],
+        ["unsupported", "error", "unsupported_parameter"],
+        ["codex-auth", "error", "authentication_or_access"],
+      ].sort());
+      assert.ok(rows.some((row) => row.event === "catalog" && row.modelCount === 5 && row.providerCounts["openai-codex"] === 2));
+      const unsupported = outcomes.find((row) => row.model === "unsupported");
+      assert.deepEqual([unsupported.reason, unsupported.httpStatus, unsupported.parameter], ["unsupported_parameter", 400, "temperature"]);
+      const terminal = rows.find((row) => row.event === "complete");
+      assert.equal(terminal.cache, "not_written");
+      assert.equal(terminal.cacheReason, "incomplete_report");
+      assert.equal(JSON.stringify(rows).includes("provider-token"), false);
+      assert.equal(existsSync(join(cwd, ".pi", "bifrost-probe.json")), false);
+    } finally {
+      setupDebug({ enabled: false, path: logPath }, cwd);
+      process.chdir(cwdBefore);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("records callback failures before preserving the original rejection", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bifrost-probe-debug-callback-"));
+    const logPath = join(cwd, "probe.jsonl");
+    const cwdBefore = process.cwd();
+    const failure = new Error("callback failure fixture");
+    try {
+      process.chdir(cwd);
+      setupDebug({ enabled: true, path: logPath }, cwd);
+      const model = { provider: "fixture", id: "one", api: "openai-completions", cost: { input: 1, output: 1 } };
+      const ctx = { modelRegistry: { getAvailable: () => [model], streamSimple: () => ({ result: async () => ({
+        stopReason: "stop", content: [{ type: "text", text: "2" }], usage: { totalTokens: 1 },
+      }) }) } } as never;
+      await assert.rejects(runProbe(ctx, { onProgress: () => { throw failure; } }), (error) => error === failure);
+      await flushDebug(1_000);
+      const rows = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.equal(rows.find((row) => row.event === "complete").cacheReason, "worker_failed");
+      assert.equal(rows.filter((row) => row.event === "model_result").length, 1);
+    } finally {
+      setupDebug({ enabled: false, path: logPath }, cwd);
+      process.chdir(cwdBefore);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("records cancellation as terminal and reports the partial result count", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bifrost-probe-debug-cancel-"));
+    const logPath = join(cwd, "probe.jsonl");
+    const cwdBefore = process.cwd();
+    const controller = new AbortController();
+    const models = [{ provider: "fixture", id: "one", api: "openai-completions" }, { provider: "fixture", id: "two", api: "openai-completions" }];
+    const ctx = { modelRegistry: { getAvailable: () => models, streamSimple: () => ({ result: () => new Promise(() => {}) }) } } as never;
+    try {
+      process.chdir(cwd);
+      setupDebug({ enabled: true, path: logPath }, cwd);
+      const pending = runProbe(ctx, { concurrency: 1, signal: controller.signal });
+      await delay(5);
+      controller.abort();
+      const result = await pending;
+      await flushDebug(1_000);
+      const rows = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.equal(result.cancelled, true);
+      assert.equal(rows.find((row) => row.event === "complete").cancelled, true);
+      assert.equal(rows.find((row) => row.event === "complete").resultCount, 1);
+      assert.equal(rows.find((row) => row.event === "complete").cacheReason, "cancelled");
+    } finally {
+      setupDebug({ enabled: false, path: logPath }, cwd);
       process.chdir(cwdBefore);
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -397,9 +591,11 @@ describe("probe concurrency and resilience", () => {
 
   it("returns results even when writing the results file fails", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "bifrost-probe-iofail-"));
+    const logPath = join(cwd, "probe.jsonl");
     const cwdBefore = process.cwd();
 
     try {
+      setupDebug({ enabled: true, path: logPath }, cwd);
       // A file named ".pi" makes mkdir/write fail deterministically.
       writeFileSync(join(cwd, ".pi"), "not a directory");
       const ctx = makeFastCtx([makeFastModel(0)]) as Parameters<typeof runProbe>[0];
@@ -407,7 +603,12 @@ describe("probe concurrency and resilience", () => {
       const result = await runProbe(ctx, {});
       assert.equal(result.results.length, 1);
       assert.equal(result.results[0]?.status, "ok");
+      await flushDebug(1_000);
+      const terminal = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)).find((row) => row.event === "complete");
+      assert.equal(terminal.cache, "error");
+      assert.equal(terminal.cacheError, "write_failed");
     } finally {
+      setupDebug({ enabled: false, path: logPath }, cwd);
       process.chdir(cwdBefore);
       rmSync(cwd, { recursive: true, force: true });
     }

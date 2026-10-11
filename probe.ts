@@ -5,11 +5,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { constants } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promptWithMinimalSession } from "./session-fallback.ts";
 import { writeJsonFile } from "./storage.ts";
 import { isVirtualModel } from "./virtual-model.ts";
+import { debug } from "./debug.ts";
 
 export interface ProbeResult {
   provider: string;
@@ -126,15 +128,88 @@ export function probeOptionsFromConfig(config?: {
   return { concurrency: config?.concurrency, timeoutMs: config?.timeoutMs };
 }
 
+function probeDebug(runId: string, event: string, meta: Record<string, unknown>) {
+  try { debug("probe", event, { runId, ...meta }); } catch { /* diagnostics must not affect probing */ }
+}
+
+const SAFE_PARAMETER_NAMES = new Set(["temperature", "max_tokens", "max_output_tokens", "max_completion_tokens", "reasoning", "service_tier"]);
+
+function failureDetails(result: ProbeResult): { reason: string; httpStatus?: number; parameter?: string } | undefined {
+  if (result.status === "ok") return undefined;
+  if (result.error === "model is no longer eligible") return { reason: "not_eligible" };
+  if (result.error?.startsWith("unsupported api:")) return { reason: "unsupported_api" };
+  if (result.error === "empty response") return { reason: "empty_response" };
+  if (result.status === "timeout") return { reason: "timeout" };
+  if (result.status === "skipped" && !result.error) return { reason: "cancelled" };
+  const error = result.error?.toLowerCase() ?? "";
+  const status = /\bHTTP(?:\/\d(?:\.\d)?)?\s+(\d{3})\b/i.exec(result.error ?? "")
+    ?? /\bstatus\s*[:=]\s*(\d{3})\b/i.exec(result.error ?? "");
+  const httpStatus = status ? Number(status[1]) : undefined;
+  if (httpStatus === 401 || httpStatus === 403 || /unauthorized|forbidden|authentication failed|no api key|failed to extract accountid from token|no account id in token/.test(error)) {
+    return { reason: "authentication_or_access", ...(httpStatus ? { httpStatus } : {}) };
+  }
+  if (/\b429\b|rate[ -]?limit/.test(error)) return { reason: "rate_limited", ...(httpStatus ? { httpStatus } : {}) };
+  if (/\b402\b|quota|credit|billing|usage limit/.test(error)) return { reason: "allowance_exhausted", ...(httpStatus ? { httpStatus } : {}) };
+  const unsupported = /(?:unsupported|unknown|unrecognized|not supported)[^\n]{0,100}?\b(temperature|max_tokens|max_output_tokens|max_completion_tokens|reasoning|service_tier)\b/i.exec(result.error ?? "");
+  if (unsupported && SAFE_PARAMETER_NAMES.has(unsupported[1]!.toLowerCase())) {
+    return { reason: "unsupported_parameter", parameter: unsupported[1]!.toLowerCase(), ...(httpStatus ? { httpStatus } : {}) };
+  }
+  return { reason: httpStatus ? "http_error" : "provider_error", ...(httpStatus ? { httpStatus } : {}) };
+}
+
+function reportProbeResult(runId: string, result: ProbeResult) {
+  probeDebug(runId, "model_result", {
+    provider: result.provider,
+    model: result.model,
+    status: result.status,
+    duration_ms: result.duration_ms,
+    transport: result.transport ?? null,
+    ...(failureDetails(result) ?? { reason: null }),
+  });
+}
+
+function reportProbeCompletion(
+  runId: string,
+  results: readonly ProbeResult[],
+  catalogCount: number,
+  outcome: { cache: "written" } | { cache: "not_written"; cacheReason: string } | { cache: "error"; cacheError: string },
+  cancelled = false,
+) {
+  const counts = { ok: 0, error: 0, timeout: 0, skipped: 0 };
+  for (const result of results) counts[result.status]++;
+  probeDebug(runId, "complete", {
+    catalogCount,
+    resultCount: results.length,
+    ...counts,
+    cancelled,
+    ...outcome,
+  });
+}
+
 export async function runProbe(
   ctx: ExtensionContext,
   options: RunProbeOptions = {},
 ): Promise<{ results: ProbeResult[]; path: string; cancelled?: true }> {
+  const runId = randomUUID();
   const outputPath = join(process.cwd(), ".pi", "bifrost-probe.json");
   const catalog = ctx.modelRegistry.getAvailable().filter((model) => !isVirtualModel(model));
   const available = (options.models ?? catalog).filter((model) => !isVirtualModel(model));
   const total = available.length;
   const results: ProbeResult[] = new Array(total);
+  const providerCounts: Record<string, number> = Object.create(null) as Record<string, number>;
+  let inputPricedModels = 0;
+  let outputPricedModels = 0;
+  for (const model of catalog) {
+    providerCounts[model.provider] = (providerCounts[model.provider] ?? 0) + 1;
+    if (Number.isFinite(model.cost?.input)) inputPricedModels++;
+    if (Number.isFinite(model.cost?.output)) outputPricedModels++;
+  }
+  probeDebug(runId, "catalog", {
+    modelCount: catalog.length,
+    providerCounts,
+    inputPricedModels,
+    outputPricedModels,
+  });
   let cursor = 0;
   let completed = 0;
 
@@ -151,6 +226,7 @@ export async function runProbe(
         ? await probeOne(ctx, model, promptWithSession, timeoutMs, signal)
         : { provider: model.provider, model: model.id, cost_input: model.cost?.input ?? 0, cost_output: model.cost?.output ?? 0, status: "skipped", duration_ms: 0, error: "model is no longer eligible" };
       completed++;
+      reportProbeResult(runId, results[i]);
       onProgress?.(completed, total, results[i]);
     }
   }
@@ -158,18 +234,33 @@ export async function runProbe(
   // Use minimum of requested concurrency and total models, but at least 1
   const effectiveConcurrency = Math.max(1, Math.min(concurrency, total));
   const workers = Array.from({ length: effectiveConcurrency }, () => worker());
-  await Promise.all(workers);
+  try {
+    await Promise.all(workers);
+  } catch (error) {
+    const partial = results.filter((result): result is ProbeResult => result !== undefined);
+    reportProbeCompletion(runId, partial, catalog.length, { cache: "not_written", cacheReason: "worker_failed" });
+    throw error;
+  }
 
-  if (signal?.aborted) return { results: results.filter((result): result is ProbeResult => result !== undefined), path: outputPath, cancelled: true };
-  if (!validateCompleteProbeReport(results, catalog)) return { results, path: outputPath };
+  if (signal?.aborted) {
+    const partial = results.filter((result): result is ProbeResult => result !== undefined);
+    reportProbeCompletion(runId, partial, catalog.length, { cache: "not_written", cacheReason: "cancelled" }, true);
+    return { results: partial, path: outputPath, cancelled: true };
+  }
+  if (!validateCompleteProbeReport(results, catalog)) {
+    reportProbeCompletion(runId, results, catalog.length, { cache: "not_written", cacheReason: "incomplete_report" });
+    return { results, path: outputPath };
+  }
   try {
     writeJsonFile(outputPath, results);
   } catch (err) {
     // Persistence is best-effort: a completed probe must still return its
     // results so callers record reliability outcomes and render the report.
     console.error(`[bifrost] failed to write probe results: ${err}`);
+    reportProbeCompletion(runId, results, catalog.length, { cache: "error", cacheError: "write_failed" });
     return { results, path: outputPath };
   }
+  reportProbeCompletion(runId, results, catalog.length, { cache: "written" });
   return { results, path: outputPath };
 }
 
@@ -216,7 +307,6 @@ async function probeOne(
         },
         {
           maxTokens: PROBE_MAX_TOKENS,
-          temperature: 0,
           signal: controller.signal,
           cacheRetention: "none",
         },

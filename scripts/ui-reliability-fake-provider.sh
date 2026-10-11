@@ -129,7 +129,7 @@ echo 'scenario 4: pass'
 echo '--- scenario 5: model picker -> bifrost/auto ---'
 rm -f "$work/.pi/bifrost-state.json" "$work/.pi/bifrost-reliability.json" "$work/.pi/bifrost-provider-reliability.json"
 cat >"$work/bifrost.json" <<'EOF'
-{"enabled":true,"default":"economical","strategy":"cheapest","classifier":{"enabled":false},"models":{"economical":["fake/healthy"]},"rules":[{"pattern":"hello","model":"economical"}],"debug":{"enabled":true}}
+{"enabled":true,"default":"economical","strategy":"cheapest","classifier":{"enabled":false},"models":{"economical":["fake/healthy"]},"rules":[{"pattern":"hello","model":"economical"}],"debug":{"enabled":true,"path":".pi/bifrost-debug.jsonl"}}
 EOF
 sid=$(start_pi)
 "$A" --session "$sid" wait 'Bifrost' --assert --timeout 15000 >/dev/null
@@ -151,7 +151,7 @@ cat >"$home/.pi/agent/models.json" <<EOF
 {"providers":{"fake":{"baseUrl":"http://127.0.0.1:$port/v1","api":"openai-completions","apiKey":"test","models":[{"id":"healthy","reasoning":false},{"id":"fast","reasoning":false},{"id":"strong","reasoning":false},{"id":"slow","reasoning":false}]}}}
 EOF
 cat >"$work/bifrost.json" <<'EOF'
-{"enabled":true,"default":"quick","strategy":"first","classifier":{"enabled":false},"reliability":{"enabled":true,"failureThreshold":1,"windowMinutes":5,"cooldownMinutes":60},"models":{"quick":["fake/fast"],"frontier":["fake/strong"],"hold":["fake/slow"]},"rules":[{"pattern":"hold","model":"hold"}],"debug":{"enabled":true}}
+{"enabled":true,"default":"quick","strategy":"first","classifier":{"enabled":false},"reliability":{"enabled":true,"failureThreshold":1,"windowMinutes":5,"cooldownMinutes":60},"models":{"quick":["fake/fast"],"frontier":["fake/strong"],"hold":["fake/slow"]},"rules":[{"pattern":"hold","model":"hold"}],"debug":{"enabled":true,"path":".pi/bifrost-debug.jsonl"}}
 EOF
 # Seed an expired-cooldown circuit for fake/fast: its steer dispatch must claim
 # and settle a half-open trial inside the shared run.
