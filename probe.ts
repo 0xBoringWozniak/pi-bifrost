@@ -105,7 +105,8 @@ export function readRecentCompleteProbeReport(
     const before = fstatSync(fd);
     if (!before.isFile() || before.size > MAX_PROBE_CACHE_BYTES) return undefined;
     const ageMs = now - before.mtimeMs;
-    if (ageMs < 0 || ageMs >= PROBE_CACHE_TTL_MS) return undefined;
+    // File timestamps can have sub-millisecond precision while Date.now() does not.
+    if (ageMs <= -1 || ageMs >= PROBE_CACHE_TTL_MS) return undefined;
     const text = readFileSync(fd, "utf8");
     const after = fstatSync(fd);
     if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size

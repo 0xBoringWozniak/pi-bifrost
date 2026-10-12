@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runProbe, DEFAULT_PROBE_CONCURRENCY, probeOptionsFromConfig, readRecentCompleteProbeReport, validateCompleteProbeReport } from "../probe.ts";
@@ -661,6 +661,8 @@ describe("probe concurrency and resilience", () => {
       const recent = new Date(Date.now() - 60_000);
       utimesSync(path, recent, recent);
       assert.deepEqual(readRecentCompleteProbeReport(path, catalog), report);
+      assert.deepEqual(readRecentCompleteProbeReport(path, catalog, statSync(path).mtimeMs - 0.5), report);
+      assert.equal(readRecentCompleteProbeReport(path, catalog, statSync(path).mtimeMs - 1), undefined);
       const future = new Date(Date.now() + 60_000);
       utimesSync(path, future, future);
       assert.equal(readRecentCompleteProbeReport(path, catalog), undefined);
