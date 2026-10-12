@@ -60,6 +60,9 @@ export async function writeTextFileAsync(path: string, text: string): Promise<vo
   // await fs.open(dir, "r").then(h => h.sync()).then(h => h.close()); 
 }
 
+/**
+ * Atomic replacement of a JSON file using writeTextFileAsync.
+ */
 export async function writeJsonFileAsync(path: string, value: unknown): Promise<void> {
   await writeTextFileAsync(path, JSON.stringify(value, null, 2));
 }

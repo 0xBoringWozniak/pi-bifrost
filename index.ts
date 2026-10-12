@@ -61,7 +61,8 @@ import {
   shouldRefreshRegistry,
 } from "./ux-status.ts";
 import { waitForRegistryRefresh } from "./registry-refresh.ts";
-import { trackCost, shutdownCostTracking, persistSessionCost } from "./cost/cost-integration.ts";
+import { trackCost, shutdownCostTracking } from "./cost/cost-integration.ts";
+import { persistSessionCost } from "./cost/cost-store.ts";
 import { setupCost } from "./cost/cost-config.ts";
 
 // ── Pipeline builder (composition root) ────────────────────────
@@ -526,15 +527,13 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     await shutdownCostTracking(ctx, process.cwd());
   });
 
-  pi.on("compaction_end", async (event, ctx) => {
-    // Log receipt of the compaction_end event with its details
-    debug("cost", "compaction_end_received", {
+  pi.on("session_compact", async (event, ctx) => {
+    // Log receipt of the session compaction event with its details
+    debug("cost", "session_compact_received", {
       reason: event.reason,
-      aborted: event.aborted,
       willRetry: event.willRetry,
-      errorMessage: event.errorMessage ?? null,
     });
-    debugLifecycle("bifrost", "cost_compaction_checkpoint", ctx.sessionManager, undefined, {});
+    debug("bifrost", "cost_compaction_checkpoint", { session: ctx.sessionManager });
     persistSessionCost(ctx.sessionManager, process.cwd()).catch((e: unknown) =>
       debug("cost", "compaction_save_error", { error: String(e) })
     );
