@@ -68,6 +68,8 @@ export interface ClassifierConfig {
   fallback?: "prompt" | "regex";
 }
 
+import { CostConfig } from "./cost/cost-config.ts";
+
 export interface BifrostConfig {
   enabled?: boolean;
   default?: string;
@@ -80,6 +82,7 @@ export interface BifrostConfig {
   debug?: DebugConfig;
   reliability?: ReliabilityConfig;
   probe?: ProbeConfig;
+  cost?: CostConfig;
 }
 
 export const DEFAULT_RULES: RouteRule[] = [
@@ -480,6 +483,7 @@ export function mergeConfig(
   merged.debug = mergeObj(base.debug, override.debug);
   merged.reliability = mergeObj(base.reliability, override.reliability);
   merged.probe = mergeObj(base.probe, override.probe);
+  merged.cost = mergeObj(base.cost, override.cost);
   return merged;
 }
 
