@@ -221,7 +221,6 @@ function issueRows(cases) {
 }
 
 function conciseIssue(item) {
-  if (item.id === "first-use-unverified-route-product-gap") return "First prompt can use an unchecked model while a healthy alternative is available.";
   return boundedText(item.detail || item.boundary || "Review this required case.", 200);
 }
 
@@ -262,11 +261,12 @@ export function renderCiReport(inputData, context = {}) {
     "## Pi-Bifrost CI",
     "",
     `> **PR confidence: ${confidenceVisual(confidence.state)}** · 🟩 ${counts.passed} passed · 🟥 ${counts.failed} failed · 🟨 ${counts.blocked} blocked · ⬜ ${counts.missing} missing · ⏳ ${counts.deferred} deferred`,
+    `> **Workflow result: ${{ success: "🟢 PASS", failure: "🔴 FAIL", cancelled: "🔴 CANCELLED", in_progress: "⏳ PENDING" }[context.conclusion] ?? "⬜ UNKNOWN"}** · Passing checks alone do not clear required acceptance cases.`,
     "",
     `SHA ${code(sha.slice(0, 7))} · Run ${code(run)} · Attempt ${code(attempt)} · ${durationText} · Profile: ${code(evidence.profile || "unknown")} · ${workflowLinks}`,
     ...(resultLine ? [resultLine] : []),
     "",
-    "### Required release gates",
+    "### Individual release checks",
     "",
     "| Required gate | Status |",
     "| --- | --- |",

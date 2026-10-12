@@ -30,6 +30,7 @@ describe("CI report", () => {
     assert.equal(rendered.confidence.state, "BLOCKED");
     assert.deepEqual(rendered.counts, { passed: 53, failed: 0, blocked: 1, missing: 0, deferred: 1 });
     assert.match(rendered.markdown, /PR confidence: 🔴 BLOCKED/);
+    assert.match(renderCiReport(fixture, { ...trustedContext, conclusion: "failure" }).markdown, /Workflow result: 🔴 FAIL/);
     assert.match(rendered.markdown, /first-use-unverified-route-product-gap/);
     assert.match(rendered.markdown, /deferred:r13:stable-versioned-api/);
     assert.match(rendered.markdown, /not establish support for every provider or a flake-free rate/);
@@ -46,6 +47,7 @@ describe("CI report", () => {
     const rendered = renderCiReport(passing, trustedContext);
     assert.equal(rendered.confidence.state, "VERIFIED CHECKS");
     assert.match(rendered.markdown, /PR confidence: 🟢 VERIFIED CHECKS/);
+    assert.match(rendered.markdown, /Workflow result: 🟢 PASS/);
     assert.match(rendered.markdown, /PR controls the workflow producer and test code/u);
 
     const wrongSha = renderCiReport(passing, { ...trustedContext, sha: "a".repeat(40) });
