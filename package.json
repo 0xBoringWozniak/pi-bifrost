@@ -61,7 +61,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "benchmark:jev": "node --experimental-strip-types scripts/jev-benchmark.ts",
-    "release": "node --experimental-strip-types scripts/release.mjs"
+    "release": "node --experimental-strip-types scripts/release.mjs",
+    "acceptance": "node scripts/acceptance.mjs",
+    "acceptance:deterministic": "node scripts/acceptance-deterministic.mjs",
+    "acceptance:verify": "node scripts/verify-release.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

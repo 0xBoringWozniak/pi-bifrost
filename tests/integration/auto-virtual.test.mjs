@@ -1,7 +1,8 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,7 +70,7 @@ function writePiModels({ home, port, models }) {
   writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ retry: { enabled: false }, enabledModels: Object.keys(providers).map((provider) => `${provider}/*`) }));
 }
 
-function piTestEnv(home) {
+function piTestEnv(home, extraEnv = {}) {
   const agentDir = join(home, ".pi", "agent");
   return {
     PATH: process.env.PATH,
@@ -77,9 +78,10 @@ function piTestEnv(home) {
     PI_CODING_AGENT_DIR: agentDir,
     PI_SKIP_VERSION_CHECK: "1",
     PI_OFFLINE: "1",
-    NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${OUTBOUND_GUARD}`.trim(),
     BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
     BIFROST_TEST_NETWORK_VIOLATIONS: join(home, "test-network-violations.log"),
+    ...extraEnv,
   };
 }
 
@@ -183,6 +185,15 @@ function createDebugExtension(directory, logPath, enabled = true, probeTimeoutMs
   return join(directory, "index.ts");
 }
 
+async function waitFor(description, condition, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`timed out waiting for ${description}`);
+}
+
 async function waitForFile(path, timeoutMs = 5_000, onTimeout = "") {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -193,38 +204,42 @@ async function waitForFile(path, timeoutMs = 5_000, onTimeout = "") {
   assert.fail(`file was not created: ${path}\n${details}`);
 }
 
-function startRpc({ home, work, model = "bifrost/auto", extensionPath = EXTENSION_PATH }) {
-  const child = spawn("pi", ["-e", extensionPath, "--approve", "--mode", "rpc", "--no-session", "--no-tools", "--model", model], {
+function startRpc({ home, work, model = "bifrost/auto", extensionPath = EXTENSION_PATH, extraExtensions = [], noTools = true, extraEnv = {} }) {
+  const args = ["-e", extensionPath, ...extraExtensions.flatMap((path) => ["-e", path]), "--approve", "--mode", "rpc", "--no-session"];
+  if (noTools) args.push("--no-tools");
+  args.push("--model", model);
+  const child = spawn("pi", args, {
     cwd: work,
     stdio: ["pipe", "pipe", "pipe"],
-    env: piTestEnv(home),
+    env: piTestEnv(home, extraEnv),
   });
   const records = [];
   let incompleteLine = "";
   let stderr = "";
-  let wake;
+  const waiters = new Set();
+  const notifyWaiters = () => { for (const wake of [...waiters]) wake(); };
   let closeInfo;
   let spawnError;
   const childClosed = new Promise((resolve) => child.once("close", (code) => {
     closeInfo = { code };
-    wake?.();
+    notifyWaiters();
     resolve(closeInfo);
   }));
-  child.once("error", (error) => { spawnError = error; wake?.(); });
-  child.stdin.on("error", (error) => { spawnError ??= error; wake?.(); });
+  child.once("error", (error) => { spawnError = error; notifyWaiters(); });
+  child.stdin.on("error", (error) => { spawnError ??= error; notifyWaiters(); });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
     const lines = `${incompleteLine}${chunk}`.split("\n");
     incompleteLine = lines.pop();
     for (const line of lines) { try { records.push(JSON.parse(line)); } catch { /* malformed output is caught by response timeout */ } }
-    wake?.();
+    notifyWaiters();
   });
-  child.stderr.on("data", (chunk) => { stderr += chunk; wake?.(); });
+  child.stderr.on("data", (chunk) => { stderr += chunk; notifyWaiters(); });
   const wait = (deadline) => new Promise((resolve) => {
-    const finish = () => { clearTimeout(timer); if (wake === finish) wake = undefined; resolve(); };
+    const finish = () => { clearTimeout(timer); waiters.delete(finish); resolve(); };
     const timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
-    wake = finish;
+    waiters.add(finish);
   });
   async function userTurn(message) {
     const id = `bootstrap-${Date.now()}-${records.length}`;
@@ -244,18 +259,142 @@ function startRpc({ home, work, model = "bifrost/auto", extensionPath = EXTENSIO
         if (started && record.type === "agent_settled") return;
       }
       assert.ifError(spawnError);
-      assert.equal(closeInfo, undefined, `Pi RPC exited before settling: ${message}`);
+      assert.equal(closeInfo, undefined, `Pi RPC exited before settling: ${message}; records=${JSON.stringify(records.map(({ type, id, success, data, error, message: item }) => ({ type, id, success, disposition: data?.disposition, role: item?.role, stopReason: item?.stopReason, error: item?.errorMessage ?? error })))}; stderr=${stderr}`);
       await wait(deadline);
     }
     throw new Error(`Pi RPC timed out: ${message}\n${stderr}`);
   }
-  async function close() {
-    child.stdin.end();
-    await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-    if (!closeInfo) { child.kill("SIGKILL"); await childClosed; }
-    assert.equal(closeInfo.code, 0, stderr);
+  async function waitForClose(timeoutMs = 15_000) {
+    const result = await Promise.race([childClosed, new Promise((resolve) => setTimeout(() => resolve(undefined), timeoutMs))]);
+    return result;
   }
-  return { userTurn, close, get stderr() { return stderr; }, get records() { return records; } };
+  async function waitForRecordCount(type, count, description, timeoutMs = 15_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (records.filter((record) => record.type === type).length >= count) return;
+      assert.ifError(spawnError);
+      assert.equal(closeInfo, undefined, `Pi RPC exited before ${description}`);
+      await wait(deadline);
+    }
+    throw new Error(`Pi RPC timed out waiting for ${description}\n${stderr}`);
+  }
+  async function waitForRecord(predicate, description, timeoutMs = 15_000) {
+    const deadline = Date.now() + timeoutMs;
+    let index = 0;
+    while (Date.now() < deadline) {
+      while (index < records.length) {
+        const record = records[index++];
+        if (predicate(record)) return record;
+      }
+      assert.ifError(spawnError);
+      assert.equal(closeInfo, undefined, `Pi RPC exited before ${description}`);
+      await wait(deadline);
+    }
+    throw new Error(`Pi RPC timed out waiting for ${description}\n${stderr}`);
+  }
+  async function request(command) {
+    const id = `acceptance-rpc-${Date.now()}-${records.length}`;
+    const deadline = Date.now() + 15_000;
+    child.stdin.write(`${JSON.stringify({ ...command, id })}\n`);
+    let index = records.length;
+    while (Date.now() < deadline) {
+      while (index < records.length) {
+        const record = records[index++];
+        if (record.id === id && record.type === "response") {
+          assert.equal(record.success, true, JSON.stringify(record));
+          return record;
+        }
+      }
+      assert.ifError(spawnError);
+      assert.equal(closeInfo, undefined, `Pi RPC exited before ${command.type}`);
+      await wait(deadline);
+    }
+    throw new Error(`Pi RPC timed out waiting for ${command.type}\n${stderr}`);
+  }
+  let closePromise;
+  function close() {
+    closePromise ??= (async () => {
+      child.stdin.end();
+      await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      if (!closeInfo) { child.kill("SIGKILL"); await childClosed; }
+      assert.equal(closeInfo.code, 0, stderr);
+    })();
+    return closePromise;
+  }
+  return { request, userTurn, waitForRecord, waitForRecordCount, waitForClose, close, get stderr() { return stderr; }, get records() { return records; } };
+}
+
+function createAcceptanceTool(directory) {
+  mkdirSync(directory, { recursive: true });
+  symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"));
+  const extension = join(directory, "acceptance-counter.ts");
+  writeFileSync(extension, `
+import { Type } from "@earendil-works/pi-ai";
+import { appendFileSync } from "node:fs";
+export default function(pi) {
+  pi.registerTool({
+    name: "acceptance_counter",
+    label: "Acceptance Counter",
+    description: "Record one synthetic test side effect.",
+    parameters: Type.Object({ marker: Type.String() }),
+    execute: async (_id, params) => {
+      appendFileSync(process.env.BIFROST_TEST_TOOL_COUNTER, JSON.stringify({ marker: params.marker }) + "\\n");
+      return { content: [{ type: "text", text: "synthetic counter recorded" }], details: {} };
+    },
+  });
+}
+`);
+  return extension;
+}
+
+async function generationGate(port, action, model) {
+  const response = await fetch(`http://127.0.0.1:${port}/_generation-gate/${action}?model=${encodeURIComponent(model)}`, { method: "POST" });
+  assert.equal(response.ok, true, `generation gate ${action} failed for ${model}`);
+}
+
+function installAutoSafetyConfig({ home, work, port, models, quick, general, healthy = "fake/healthy", stateVersion, debug = false }) {
+  writePiModels({ home, port, models });
+  writeFileSync(join(work, "bifrost.json"), JSON.stringify({
+    ...(stateVersion === 2 ? { schemaVersion: 2 } : {}),
+    enabled: true,
+    default: "quick",
+    strategy: "first",
+    categoryStrategies: { quick: "first", general: "first", frontier: "first" },
+    classifier: { enabled: false },
+    models: { quick, general: general ?? [healthy], frontier: [] },
+    ...(stateVersion === 2 ? { reliability: { stateVersion: 2, failureThreshold: 1, windowMinutes: 10, cooldownMinutes: 1 } } : {}),
+    ...(debug ? { debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" } } : {}),
+  }));
+}
+
+function readAcceptanceRouteDecisions(work) {
+  const path = join(work, ".pi", "bifrost-debug.jsonl");
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    .filter((entry) => ["input", "virtual"].includes(entry.module) && entry.event === "route_decision")
+    .map((entry) => {
+      const decision = entry.decision ?? {};
+      return {
+        outcome: decision.outcome,
+        requestedTier: decision.classification?.tier ?? decision.requested?.tier,
+        selectedTier: decision.selectedTier,
+        selected: decision.selected,
+        fallbackReason: decision.fallbackReason,
+      };
+    });
+}
+
+function emitAcceptanceObservation(event) {
+  if (process.env.BIFROST_ACCEPTANCE_EVENTS) {
+    appendFileSync(process.env.BIFROST_ACCEPTANCE_EVENTS, `${JSON.stringify(event)}\n`);
+  }
+}
+
+function categorizeSyntheticError(error) {
+  if (typeof error !== "string" || error.length === 0) return "absent";
+  if (/usage limit|usage_limit_reached|remaining credits/iu.test(error)) return "allowance";
+  if (/no (?:eligible|available|configured) model/iu.test(error)) return "no_eligible_model";
+  return "other";
 }
 
 it("rejects a pre-recorded network guard violation without an uncaught close error", async () => {
@@ -505,6 +644,270 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replay a failed Auto turn after the provider emitted output", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-partial-output-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-partial-output-work-"));
+    try {
+      installAutoSafetyConfig({
+        home,
+        work,
+        port: server.port,
+        models: [{ id: "partial-allowance", reasoning: false }, { provider: "backup", id: "healthy", reasoning: false }],
+        quick: ["fake/partial-allowance", "backup/healthy"],
+        healthy: "backup/healthy",
+        debug: true,
+      });
+      const before = await fakeStats(server.port);
+      const rpc = startRpc({ home, work });
+      try {
+        const start = rpc.records.length;
+        await rpc.userTurn("quick synthetic output-effect request");
+        const turnRecords = rpc.records.slice(start);
+        const assistantEnd = turnRecords.find((record) => record.type === "message_end" && record.message?.role === "assistant");
+        const partialDelta = turnRecords.find((record) => record.type === "message_update"
+          && record.assistantMessageEvent?.type === "text_delta" && record.assistantMessageEvent.delta?.includes("partial"));
+        const after = await fakeStats(server.port);
+        const requests = after.stats.slice(before.stats.length).filter((item) => item.kind === "generation");
+        emitAcceptanceObservation({
+          event: "unsafe_output_diagnostic",
+          assistantStopReason: assistantEnd?.message?.stopReason ?? null,
+          assistantErrorCategory: categorizeSyntheticError(assistantEnd?.message?.errorMessage),
+          partialDeltaObserved: Boolean(partialDelta),
+          requests: requests.map(({ provider, model, userMessageDigest, completed }) => ({ provider, model, userMessageDigest, completed })),
+          protocol: turnRecords.map(({ type, message, assistantMessageEvent, data }) => ({
+            type, role: message?.role, stopReason: message?.stopReason,
+            assistantEvent: assistantMessageEvent?.type, disposition: data?.disposition,
+          })),
+        });
+        assert.ok(assistantEnd, JSON.stringify(turnRecords));
+        assert.equal(assistantEnd.message.stopReason, "error", "partial provider output followed by a usage-limit error must remain a failed turn");
+        assert.match(assistantEnd.message.errorMessage, /usage limit has been reached|usage_limit_reached/iu, "the native Pi transcript must expose the allowance failure");
+        assert.ok(partialDelta, "the real Pi stream must expose partial text before the failed turn ends");
+        assert.ok(assistantEnd.message.content?.some((part) => part.type === "text" && part.text?.includes("partial output")),
+          "the persisted assistant error entry must retain the partial output");
+        assert.deepEqual(requests.map((item) => item.model), ["partial-allowance"], "the failed allowance/output-effect turn must not dispatch to an alternate");
+        await rpc.userTurn("quick synthetic separate healthy prompt");
+        const withIndependentWork = await fakeStats(server.port);
+        const separateRequests = withIndependentWork.stats.slice(after.stats.length).filter((item) => item.kind === "generation");
+        assert.deepEqual(separateRequests.map((item) => [item.provider, item.model]), [["backup", "healthy"]],
+          "the distinct-provider same-tier alternate remains eligible for a separate Auto user turn");
+        await rpc.close();
+        const routeDecisions = readAcceptanceRouteDecisions(work);
+        assert.deepEqual(routeDecisions.map((decision) => [decision.requestedTier, decision.selected]), [
+          ["quick", "fake/partial-allowance"], ["quick", "backup/healthy"],
+        ], "native route decisions must show the failing and separate healthy prompt both stayed in quick");
+        emitAcceptanceObservation({
+          event: "unsafe_output_no_replay",
+          modelRequests: requests.map((item) => ({ model: item.model, userMessageDigest: item.userMessageDigest, clientClosed: item.clientClosed === true })),
+          assistantStopReason: assistantEnd.message.stopReason,
+          partialOutputObserved: true,
+          allowanceErrorObserved: true,
+          alternateGenerationCount: 0,
+          routeDecisions,
+        });
+      } finally { await rpc.close(); }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replay an allowance failure after a synthetic tool side effect", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-tool-effect-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-tool-effect-work-"));
+    const extensionDir = mkdtempSync(join(tmpdir(), "bifrost-tool-effect-extension-"));
+    const counterPath = join(work, "tool-counter.jsonl");
+    try {
+      installAutoSafetyConfig({
+        home,
+        work,
+        port: server.port,
+        models: [{ id: "tool-then-fail", reasoning: false }, { provider: "backup", id: "healthy", reasoning: false }],
+        quick: ["fake/tool-then-fail", "backup/healthy"],
+        healthy: "backup/healthy",
+        stateVersion: 2,
+        debug: true,
+      });
+      const before = await fakeStats(server.port);
+      const rpc = startRpc({
+        home,
+        work,
+        noTools: false,
+        extraExtensions: [createAcceptanceTool(extensionDir)],
+        extraEnv: { BIFROST_TEST_TOOL_COUNTER: counterPath },
+      });
+      try {
+        const migration = await rpc.request({ type: "prompt", message: "/bifrost reliability migrate --fresh" });
+        assert.equal(migration.data?.disposition, "handled", "the explicitly opted-in v2 reliability store must be initialized before the Auto test");
+        const start = rpc.records.length;
+        await rpc.userTurn("quick synthetic tool-effect request; call acceptance_counter with marker synthetic");
+        const turnRecords = rpc.records.slice(start);
+        const assistantEnds = turnRecords.filter((record) => record.type === "message_end" && record.message?.role === "assistant");
+        const assistantEnd = assistantEnds.find((record) => record.message.stopReason === "error");
+        const toolRows = existsSync(counterPath)
+          ? readFileSync(counterPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+          : [];
+        const after = await fakeStats(server.port);
+        const requests = after.stats.slice(before.stats.length).filter((item) => item.kind === "generation");
+        emitAcceptanceObservation({
+          event: "unsafe_tool_diagnostic",
+          assistantStops: assistantEnds.map((record) => record.message.stopReason),
+          errorCategory: categorizeSyntheticError(assistantEnd?.message?.errorMessage),
+          toolCalls: toolRows.length,
+          requests: requests.map(({ provider, model, userMessageDigest, completed }) => ({ provider, model, userMessageDigest, completed })),
+          protocol: turnRecords.map(({ type, message, assistantMessageEvent, data }) => ({
+            type, role: message?.role, stopReason: message?.stopReason,
+            assistantEvent: assistantMessageEvent?.type, disposition: data?.disposition,
+          })),
+        });
+        assert.ok(assistantEnds.some((record) => record.message.stopReason === "toolUse"), "Pi must execute the provider-requested synthetic tool");
+        assert.ok(assistantEnd, "the provider failure after tool output must remain failed");
+        assert.deepEqual(toolRows, [{ marker: "synthetic" }], "the synthetic side effect must occur exactly once");
+        assert.deepEqual(requests.map((item) => item.model), ["tool-then-fail", "tool-then-fail"],
+          "the original turn may reach its selected model for the tool request and post-tool continuation only");
+        assert.equal(requests.filter((item) => item.model === "healthy").length, 0, "the original user work must not replay onto the alternate");
+        const reliabilityStatePath = join(work, ".pi", "bifrost-reliability-v2.json");
+        const reliabilityState = readFileSync(reliabilityStatePath);
+        await rpc.userTurn("quick synthetic separate healthy prompt after tool failure");
+        const withIndependentWork = await fakeStats(server.port);
+        const separateRequests = withIndependentWork.stats.slice(after.stats.length).filter((item) => item.kind === "generation");
+        assert.deepEqual(separateRequests.map((item) => [item.provider, item.model]), [["backup", "healthy"]],
+          "the distinct-provider same-tier alternate remains eligible for a separate Auto user turn");
+        await rpc.close();
+        const routeDecisions = readAcceptanceRouteDecisions(work);
+        assert.deepEqual(routeDecisions.map((decision) => [decision.requestedTier, decision.selected]), [
+          ["quick", "fake/tool-then-fail"], ["quick", "backup/healthy"],
+        ], "the v2 Auto control prompt must show the same-tier alternate is eligible after the failed tool turn");
+        emitAcceptanceObservation({
+          event: "unsafe_tool_no_replay",
+          modelRequests: requests.map((item) => ({ model: item.model, userMessageDigest: item.userMessageDigest })),
+          toolCalls: toolRows.length,
+          toolSideEffect: "synthetic marker recorded once",
+          assistantStopReason: assistantEnd.message.stopReason,
+          alternateGenerationCount: 0,
+          reliabilityStateVersion: 2,
+          reliabilityStateSha256: createHash("sha256").update(reliabilityState).digest("hex"),
+          routeDecisions,
+        });
+      } finally { await rpc.close(); }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+      rmSync(extensionDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replay an unsafe tool turn and dispatches its queued follow-up once on a distinct provider", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-queued-effect-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-queued-effect-work-"));
+    const extensionDir = mkdtempSync(join(tmpdir(), "bifrost-queued-effect-extension-"));
+    const counterPath = join(work, "tool-counter.jsonl");
+    const model = "queue-tool-then-fail";
+    const firstPrompt = "synthetic first request; call acceptance_counter with marker synthetic";
+    const queuedPrompt = "synthetic queued independent request";
+    try {
+      installAutoSafetyConfig({
+        home,
+        work,
+        port: server.port,
+        models: [{ id: model, reasoning: false }, { provider: "backup", id: "healthy", reasoning: false }],
+        quick: [`fake/${model}`, "backup/healthy"],
+        healthy: "backup/healthy",
+        debug: true,
+      });
+      await generationGate(server.port, "hold", model);
+      const before = await fakeStats(server.port);
+      const rpc = startRpc({
+        home, work, noTools: false, extraExtensions: [createAcceptanceTool(extensionDir)],
+        extraEnv: { BIFROST_TEST_TOOL_COUNTER: counterPath },
+      });
+      try {
+        const firstStart = rpc.records.length;
+        const firstTurn = rpc.userTurn(`quick ${firstPrompt}`).catch((error) => error);
+        await waitFor("the first controlled generation to reach the fake-provider gate", async () =>
+          (await fakeStats(server.port)).stats.slice(before.stats.length).some((item) => item.kind === "generation" && item.model === model && !item.completed));
+        const queued = await rpc.request({ type: "follow_up", message: `quick ${queuedPrompt}` });
+        assert.equal(queued.data?.disposition, "queued", JSON.stringify(queued));
+        await generationGate(server.port, "release", model);
+        await waitFor("the post-tool allowance response to complete", async () => {
+          const current = await fakeStats(server.port);
+          return current.stats.slice(before.stats.length).filter((item) => item.kind === "generation" && item.model === model).length === 2
+            && current.stats.slice(before.stats.length).filter((item) => item.kind === "generation" && item.model === model).every((item) => item.completed);
+        });
+        await waitFor("the independent queued prompt to generate on the healthy different-provider model", async () => {
+          const current = await fakeStats(server.port);
+          return current.stats.slice(before.stats.length).some((item) => item.kind === "generation" && item.provider === "backup" && item.model === "healthy" && item.completed);
+        });
+        await waitFor("the failed original agent turn to settle", async () => rpc.records.slice(firstStart).some((record) => record.type === "agent_settled"));
+        const stateResponse = await rpc.request({ type: "get_state" });
+        const firstTurnResult = await firstTurn;
+        const turnRecords = rpc.records.slice(firstStart);
+        const extensionFailure = turnRecords.find((record) => record.type === "extension_error");
+        const assistantError = turnRecords.find((record) => record.type === "message_end"
+          && record.message?.role === "assistant" && record.message.stopReason === "error");
+        const settled = turnRecords.some((record) => record.type === "agent_settled");
+        const after = await fakeStats(server.port);
+        const requests = after.stats.slice(before.stats.length).filter((item) => item.kind === "generation");
+        await rpc.close();
+        const routeDecisions = readAcceptanceRouteDecisions(work);
+        const firstDigest = createHash("sha256").update(firstPrompt).digest("hex");
+        const queuedDigest = createHash("sha256").update(queuedPrompt).digest("hex");
+        const originalBoundaryRequestCount = requests.filter((item) => item.userMessageDigest === firstDigest).length;
+        const queuedBoundaryRequestCount = requests.filter((item) => item.userMessageDigest === queuedDigest).length;
+        const toolRows = readFileSync(counterPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+        const event = {
+          event: "queued_work_no_replay",
+          outcome: "queued_prompt_dispatched_once_after_failed_turn",
+          queueDisposition: queued.data?.disposition,
+          originalBoundaryRequestCount,
+          queuedBoundaryRequestCount,
+          toolCalls: toolRows.length,
+          assistantStopReason: assistantError?.message?.stopReason ?? null,
+          assistantErrorObserved: Boolean(assistantError),
+          agentSettled: settled,
+          promptCompletion: firstTurnResult === undefined ? "resolved" : "rejected",
+          isStreaming: stateResponse.data?.isStreaming,
+          pendingMessageCount: stateResponse.data?.pendingMessageCount,
+          isCompacting: stateResponse.data?.isCompacting,
+          routeDecisions,
+          extensionError: extensionFailure?.error ? "present" : "absent",
+          requestStats: requests.map(({ provider, model: requestModel, userMessageDigest, completed, clientClosed, gateReleased }) => ({
+            provider, model: requestModel, userMessageDigest, completed, clientClosed: clientClosed === true, gateReleased: gateReleased === true,
+          })),
+          protocol: turnRecords.map(({ type, message, assistantMessageEvent, data, error }) => ({
+            type,
+            role: message?.role,
+            stopReason: message?.stopReason,
+            assistantEvent: assistantMessageEvent?.type,
+            disposition: data?.disposition,
+            extensionError: error ? "present" : undefined,
+          })),
+        };
+        emitAcceptanceObservation(event);
+        assert.equal(originalBoundaryRequestCount, 2,
+          "the original boundary reached one tool call and one post-tool allowance response only");
+        assert.equal(queuedBoundaryRequestCount, 1,
+          "the queued independent boundary must be dispatched once after the original failed turn");
+        assert.deepEqual(requests.filter((item) => item.userMessageDigest === queuedDigest).map((item) => [item.provider, item.model]), [["backup", "healthy"]],
+          "the queued boundary must remain eligible through the healthy distinct-provider model");
+        assert.deepEqual(toolRows, [{ marker: "synthetic" }]);
+        assert.ok(assistantError, "the native Pi transcript must expose the allowance failure after the synthetic tool result");
+        assert.ok(settled, "the original Pi agent turn must reach agent_settled before checking queued state");
+        assert.equal(firstTurnResult, undefined, "the prompt helper resolves with no value after agent_settled");
+        assert.equal(stateResponse.data?.isStreaming, false, "get_state must show the original turn is no longer streaming");
+        assert.equal(stateResponse.data?.pendingMessageCount, 0, "the queued prompt completes and leaves no pending messages");
+        assert.deepEqual(routeDecisions.map((decision) => [decision.requestedTier, decision.selected]), [
+          ["quick", "fake/queue-tool-then-fail"], ["quick", "backup/healthy"],
+        ], "the native route trace must show the original and new queued boundary stayed in quick");
+      } finally { await rpc.close(); }
+    } finally {
+      await generationGate(server.port, "release", model);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+      rmSync(extensionDir, { recursive: true, force: true });
     }
   });
 

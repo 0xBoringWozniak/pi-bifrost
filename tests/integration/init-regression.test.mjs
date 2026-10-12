@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { after, before, describe, it } from "node:test";
 import { createServer } from "node:http";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +86,8 @@ function runInit({ home, work, args, extensionPath = EXTENSION, prompt = `/bifro
       cwd: work,
       env: { ...base, HOME: home, PI_CODING_AGENT_DIR: join(home, ".pi", "agent"), PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1",
         NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`, BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${server.address().port}`,
-        BIFROST_TEST_NETWORK_VIOLATIONS: join(home, "network-violations.log") },
+        BIFROST_TEST_NETWORK_VIOLATIONS: join(home, "network-violations.log"),
+        ...(process.env.BIFROST_ACCEPTANCE_EVENTS ? { BIFROST_ACCEPTANCE_EVENTS: process.env.BIFROST_ACCEPTANCE_EVENTS } : {}) },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -239,6 +240,51 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
       const report = JSON.parse(preview.stderr.split("[bifrost-json] ").at(-1));
       assert.equal(report.source, "classifier");
       assert.equal(report.model, "fake/healthy");
+    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+  });
+
+  it("uses a complete recent probe cache on ordinary init and refreshes it on forced init", async () => {
+    requests = [];
+    const env = fixture(port, ["healthy", "credits-exhausted"]);
+    const probePath = join(env.work, ".pi", "bifrost-probe.json");
+    try {
+      writeFileSync(probePath, JSON.stringify([
+        { provider: "fake", model: "healthy", status: "ok", cost_input: 0, cost_output: 0, duration_ms: 8 },
+        { provider: "fake", model: "credits-exhausted", status: "error", error: "provider rejected probe", duration_ms: 9 },
+      ]));
+      const recent = new Date(Date.now() - 60_000);
+      utimesSync(probePath, recent, recent);
+      const cached = await runInit({ ...env, args: "--write" });
+      assert.equal(cached.code, 0, cached.stderr);
+      assert.equal(cached.violations, "");
+      assert.deepEqual(requests, [], "ordinary init must reuse a complete recent report without new provider requests");
+      const configPath = join(env.work, ".pi", "bifrost.json");
+      const cachedConfigBytes = readFileSync(configPath);
+      const cachedConfig = JSON.parse(cachedConfigBytes);
+      assert.ok(Object.values(cachedConfig.models).flat().includes("fake/healthy"));
+      assert.equal(Object.values(cachedConfig.models).flat().includes("fake/credits-exhausted"), false);
+      if (process.env.BIFROST_ACCEPTANCE_EVENTS) appendFileSync(process.env.BIFROST_ACCEPTANCE_EVENTS, `${JSON.stringify({
+        event: "init_cached_results",
+        providerRequests: requests.length,
+        savedModels: cachedConfig.models,
+        savedSha256: createHash("sha256").update(cachedConfigBytes).digest("hex"),
+      })}\n`);
+
+      requests = [];
+      const forced = await runInit({ ...env, args: "-f --write" });
+      assert.equal(forced.code, 0, forced.stderr);
+      assert.equal(forced.violations, "");
+      assert.deepEqual([...new Set(requests)], ["healthy", "credits-exhausted"], "forced init must disregard even a complete recent cache");
+      const forcedBytes = readFileSync(configPath);
+      const forcedConfig = JSON.parse(forcedBytes);
+      assert.equal(Object.values(forcedConfig.models).flat().includes("fake/credits-exhausted"), false);
+      if (process.env.BIFROST_ACCEPTANCE_EVENTS) appendFileSync(process.env.BIFROST_ACCEPTANCE_EVENTS, `${JSON.stringify({
+        event: "init_force_ignores_cache",
+        providerRequests: requests.length,
+        requestCounts: Object.fromEntries([...new Set(requests)].map((model) => [model, requests.filter((item) => item === model).length])),
+        savedModels: forcedConfig.models,
+        savedSha256: createHash("sha256").update(forcedBytes).digest("hex"),
+      })}\n`);
     } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
   });
 

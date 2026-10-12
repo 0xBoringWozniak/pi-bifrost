@@ -29,7 +29,16 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install Pillow==12.3.0
       - run: npm ci
-      - run: npm run verify:release
+      - name: Run acceptance
+        id: acceptance
+        env:
+          BIFROST_CI_REPORT: "1"
+          BIFROST_CI_REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BIFROST_CI_REPORT_RUN_ID: ${{ github.run_id }}
+          BIFROST_CI_REPORT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BIFROST_CI_REPORT_REPOSITORY: ${{ github.repository }}
+          BIFROST_CI_REPORT_SERVER_URL: ${{ github.server_url }}
+        run: npm run acceptance
       - name: Upload failure logs and UI screenshots
         if: failure()
         uses: actions/upload-artifact@v4
@@ -44,3 +53,26 @@ jobs:
           name: verification-manifest-${{ github.event.pull_request.head.sha || github.sha }}
           path: screenshots/verification/**/result.json
           if-no-files-found: ignore
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: screenshots/acceptance/**
+          if-no-files-found: ignore
+      - name: Upload candidate-bound Markdown report
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-report-${{ github.event.pull_request.head.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.acceptance.outputs.report-markdown }}
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload candidate-bound publisher data
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-report-${{ github.event.pull_request.head.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.acceptance.outputs.report-data }}
+          if-no-files-found: ignore
+          retention-days: 7

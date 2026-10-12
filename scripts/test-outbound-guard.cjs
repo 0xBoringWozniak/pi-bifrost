@@ -1,18 +1,27 @@
 // Test-only network fence for Pi child processes using fake providers.
 const net = require("node:net");
+const dgram = require("node:dgram");
 const fs = require("node:fs");
 
 const rawOrigin = process.env.BIFROST_TEST_ALLOWED_ORIGIN;
 const violationPath = process.env.BIFROST_TEST_NETWORK_VIOLATIONS;
-if (!rawOrigin) throw new Error("BIFROST_TEST_ALLOWED_ORIGIN is required by the test network guard");
 if (!violationPath) throw new Error("BIFROST_TEST_NETWORK_VIOLATIONS is required by the test network guard");
 
-const allowed = new URL(rawOrigin);
-if (allowed.protocol !== "http:" || allowed.hostname !== "127.0.0.1" || !allowed.port) {
+const allowLoopback = process.env.BIFROST_TEST_ALLOW_LOOPBACK === "1";
+if (process.env.BIFROST_TEST_ALLOW_LOOPBACK && !allowLoopback) {
+  throw new Error("BIFROST_TEST_ALLOW_LOOPBACK must be exactly 1 when set");
+}
+if (!rawOrigin && !allowLoopback) throw new Error("BIFROST_TEST_ALLOWED_ORIGIN is required by the test network guard");
+const allowed = rawOrigin ? new URL(rawOrigin) : null;
+if (allowed && (allowed.protocol !== "http:" || allowed.hostname !== "127.0.0.1" || !allowed.port)) {
   throw new Error("test network guard requires an exact 127.0.0.1 HTTP origin");
 }
+const allowedPort = allowed ? Number(allowed.port) : null;
 
-const allowedPort = Number(allowed.port);
+function isAllowed(host, port) {
+  if (allowLoopback) return host === "127.0.0.1" && Number(port) > 0;
+  return allowed && host === allowed.hostname && Number(port) === allowedPort;
+}
 function deny(message) {
   try {
     fs.appendFileSync(violationPath, message + "\n", { encoding: "utf8", mode: 0o600 });
@@ -29,15 +38,21 @@ net.Socket.prototype.connect = function (...args) {
     ? target
     : { port: target, host: args[1] };
   const host = options.host ?? options.hostname ?? "localhost";
-  if (host !== allowed.hostname || Number(options.port) !== allowedPort) {
+  if (!isAllowed(host, options.port)) {
     deny("blocked socket connection to " + host + ":" + options.port);
   }
   return connect.apply(this, args);
 };
 
+dgram.Socket.prototype.send = function (...args) {
+  const address = typeof args[2] === "string" ? args[2] : "unknown";
+  deny("blocked UDP datagram to " + address);
+};
+
 const fetch = globalThis.fetch;
 globalThis.fetch = (input, ...args) => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-  if (url.origin !== allowed.origin) deny("blocked fetch to " + url.origin);
+  const localAllowed = url.protocol === "http:" && isAllowed(url.hostname, url.port);
+  if (!localAllowed) deny("blocked fetch to " + url.origin);
   return fetch(input, ...args);
 };
