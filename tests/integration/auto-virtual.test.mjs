@@ -549,8 +549,11 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
         const beforeVerifiedTurn = await fakeStats(server.port);
         await rpc.userTurn("frontier say after verification");
         const after = await fakeStats(server.port);
-        assert.equal((beforeVerifiedTurn.attempts["probe-background-slow-fail"] ?? 0) - (before.attempts["probe-background-slow-fail"] ?? 0), 2,
-          "the slow model handled a user turn while its probe was pending");
+        assert.equal((beforeVerifiedTurn.attempts["probe-background-slow-fail"] ?? 0) - (before.attempts["probe-background-slow-fail"] ?? 0), 1,
+          "the unchecked slow model receives only its probe while a verified model is available");
+        assert.equal(beforeVerifiedTurn.stats.slice(before.stats.length)
+          .filter((item) => item.kind === "generation" && item.model === "probe-background-slow-fail").length, 0,
+        "neither user prompt is dispatched to the unchecked slow model");
         assert.equal((after.attempts["probe-background-slow-fail"] ?? 0) - (beforeVerifiedTurn.attempts["probe-background-slow-fail"] ?? 0), 0,
           "after the probe result is installed, the next turn excludes the failed model");
         assert.ok((after.attempts.healthy ?? 0) > (beforeVerifiedTurn.attempts.healthy ?? 0),
