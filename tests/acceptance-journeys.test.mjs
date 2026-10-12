@@ -163,7 +163,7 @@ describe("acceptance journey result classification", () => {
       assert.ok(result.cases.length > 1);
       assert.ok(result.cases.every((row) => row.status === "blocked"));
       assert.equal(existsSync(join(directory, "artifacts")), false, "cancellation before the first row must not create or spawn a journey");
-      assert.ok(result.cases.some((row) => row.id === "first-use-unverified-route-product-gap"));
+      assert.ok(result.cases.some((row) => row.id === "first-use-prefers-verified-sibling"));
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

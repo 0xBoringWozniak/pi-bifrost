@@ -10,7 +10,7 @@ Fresh users can route from model lists built in memory, but those lists disappea
 
 ## Decision
 
-When no meaningful configuration, route file, or explicit routing override blocks setup, Bifrost loads provisional model lists from Pi's catalog into memory before generation. It starts provider health probes in the background and does not wait for them before routing. Background probes default to three concurrent requests. The `probe.concurrency` and `probe.timeoutMs` settings apply to background and manual probes. The catalog lists available chat models; they do not prove that a provider request will succeed.
+When no meaningful configuration, route file, or explicit routing override blocks setup, Bifrost loads provisional model lists from Pi's catalog into memory before generation. It starts provider health probes in the background and does not wait for them before routing. Once a model passes its probe, first-use routing prefers verified models and excludes unchecked models until the background check finishes. Before any probe passes, the provisional pool remains available so the first prompt does not wait. Background probes default to three concurrent requests. The `probe.concurrency` and `probe.timeoutMs` settings apply to background and manual probes. The catalog lists available chat models; they do not prove that a provider request will succeed.
 
 An empty `{}` configuration file does not block setup. A configuration with one or more settings does. A route file, runtime routing preference, or explicit routing override also blocks automatic setup. When Pi runs from the extension checkout, the bundled default file does not count as a separate workspace configuration.
 

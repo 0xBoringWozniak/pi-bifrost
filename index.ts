@@ -718,6 +718,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     cancelled: boolean;
     configPersisted: boolean;
     progress?: { done: number; total: number; passed: number };
+    readonly verified: Set<string>;
   }
   const autoBootstrapBySession = new WeakMap<object, AutoBootstrapRecord>();
   const autoBootstrapRecords = new Set<AutoBootstrapRecord>();
@@ -1212,6 +1213,18 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       && state.bootstrapModelsInMemory === true && bootstrapContextStillEligible();
   }
 
+  function bootstrapVerifiedSelectionConfig(ctx: ExtensionContext): BifrostConfig | undefined {
+    const record = autoBootstrapBySession.get(ctx.sessionManager);
+    if (!record || !autoBootstrapCanUpdateProgress(record) || record.verified.size === 0) return undefined;
+    const models = Object.fromEntries(Object.entries(state.config.models ?? {}).map(([tier, pool]) => [
+      tier, Array.isArray(pool) ? pool.filter((key) => record.verified.has(key)) : [],
+    ]));
+    const defaultTier = models[state.config.default ?? ""]?.length
+      ? state.config.default
+      : Object.keys(models).find((tier) => models[tier]?.length);
+    return defaultTier ? { ...state.config, default: defaultTier, models } : undefined;
+  }
+
   function renderAutoBootstrapProgress(ctx: ExtensionContext, record: AutoBootstrapRecord): void {
     if (!record.progress || !autoBootstrapCanUpdateProgress(record)) return;
     if (ctx.mode === "tui" && ctx.hasUI) {
@@ -1342,6 +1355,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       controller: new AbortController(),
       cancelled: false,
       configPersisted: false,
+      verified: new Set(),
       promise: Promise.resolve(false),
     };
     const stillOwned = (): boolean => !record.cancelled
@@ -1478,6 +1492,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         signal: record.controller.signal,
         onProgress: (_done, _total, result) => {
           if (!autoBootstrapCanUpdateProgress(record)) return;
+          if (result.status === "ok") record.verified.add(`${result.provider}/${result.model}`);
           const progress = record.progress!;
           record.progress = { ...progress, done: _done, passed: progress.passed + (result.status === "ok" ? 1 : 0) };
           const now = Date.now();
@@ -2399,7 +2414,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     return resolveConfiguredTier(
       ctx,
       tier,
-      state.config,
+      bootstrapVerifiedSelectionConfig(ctx) ?? state.config,
       reliabilityState,
       state.config.reliability,
       undefined,
@@ -2787,8 +2802,10 @@ export default function bifrostExtension(pi: ExtensionAPI) {
             ? { kind: "classified", tier: forcedTier, source: "inline" }
             : await getPipeline(ctx).classify(prompt, signal);
           if (!signal?.aborted) reportClassifierAttempt(ctx, classification, correlationTurn, requestCorrelationId);
-          if (classification.kind === "unclassified" && hasHardEconomicAdmission(state.economicPolicy) && state.config.default) {
-            classification = { kind: "fallback", tier: state.config.default, ...(classification.classifierAttempt ? { classifierAttempt: classification.classifierAttempt } : {}) };
+          const verifiedBootstrapConfig = bootstrapVerifiedSelectionConfig(ctx);
+          if (classification.kind === "unclassified" && (hasHardEconomicAdmission(state.economicPolicy) || verifiedBootstrapConfig)
+            && (verifiedBootstrapConfig?.default ?? state.config.default)) {
+            classification = { kind: "fallback", tier: (verifiedBootstrapConfig?.default ?? state.config.default)!, ...(classification.classifierAttempt ? { classifierAttempt: classification.classifierAttempt } : {}) };
           }
           if (signal?.aborted) {
             terminalRouteCategory = "request_cancelled";
@@ -3728,8 +3745,10 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         ? { kind: "classified" as const, tier: forcedTier, source: "inline" as const }
         : await getPipeline(ctx).classify(promptText, ctx.signal);
       if (!ctx.signal?.aborted) reportClassifierAttempt(ctx, classification);
-      if (classification.kind === "unclassified" && hasHardEconomicAdmission(state.economicPolicy) && state.config.default) {
-        classification = { kind: "fallback", tier: state.config.default, ...(classification.classifierAttempt ? { classifierAttempt: classification.classifierAttempt } : {}) };
+      const verifiedBootstrapConfig = bootstrapVerifiedSelectionConfig(ctx);
+      if (classification.kind === "unclassified" && (hasHardEconomicAdmission(state.economicPolicy) || verifiedBootstrapConfig)
+        && (verifiedBootstrapConfig?.default ?? state.config.default)) {
+        classification = { kind: "fallback", tier: (verifiedBootstrapConfig?.default ?? state.config.default)!, ...(classification.classifierAttempt ? { classifierAttempt: classification.classifierAttempt } : {}) };
       }
 
       if (!state.enabled || state.pinned) return { action: "continue" };
@@ -3783,7 +3802,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
 
       const tier = classification.tier;
       routeBoundary = hasExplicitTierPolicy(state.config, tier)
-        || hasHardEconomicAdmission(state.economicPolicy);
+        || hasHardEconomicAdmission(state.economicPolicy) || !!verifiedBootstrapConfig;
       strictBoundary = routeBoundary || providerCooldownsEnabled();
       const routeStart = performance.now();
       const physicalAffinityMode = resolvePiAffinityMode(state.config.affinity?.mode, "physical");

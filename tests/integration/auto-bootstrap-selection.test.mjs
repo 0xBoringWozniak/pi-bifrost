@@ -180,6 +180,7 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
     try {
       const heldModel = "auto-selection-held-general";
       await probeGate(server.port, "hold");
+      await probeGate(server.port, "hold", "frontier-healthy");
       const before = await stats(server.port);
       const rpc = startRpc({ home, work });
       try {
@@ -192,7 +193,7 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
         assert.ok(firstTurn.stats.some((item) => item.kind === "generation" && item.completed),
           "the first real Pi turn must finish while the deliberate probe gate remains held");
         assert.ok(firstTurn.stats.some((item) => item.kind === "generation" && item.model === heldModel && item.completed),
-          "this fixture records the known first-use risk: Pi can generate with a registered model before its held probe verifies it");
+          "when every probe is pending, the first turn still uses a provisional model without waiting");
         assert.ok(firstTurn.stats.some((item) => item.kind === "probe" && item.model === heldModel && !item.completed),
           "the first turn must not wait for the held verification request");
         assert.equal(existsSync(configPath), false, "the unresolved probe cannot save a partial pool");
@@ -209,6 +210,7 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
         await rpc.request({ type: "set_model", provider: "bifrost", modelId: "auto" });
         assert.equal(existsSync(configPath), false, "partial probe results cannot be saved");
         await probeGate(server.port, "release");
+        await probeGate(server.port, "release", "frontier-healthy");
         await waitFor("the verified config and ownership save", () => existsSync(configPath) && existsSync(ownershipPath));
 
         const saved = JSON.parse(readFileSync(configPath, "utf8"));
@@ -258,6 +260,7 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
       } finally { await rpc.close(); }
     } finally {
       await probeGate(server.port, "release");
+      await probeGate(server.port, "release", "frontier-healthy");
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }
@@ -298,7 +301,7 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
     }
   });
 
-  it("surfaces an inaccessible selected first-use model without replaying onto a healthy sibling", async () => {
+  it("routes the first prompt to an already verified sibling without replay", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-inaccessible-first-use-home-"));
     const work = mkdtempSync(join(tmpdir(), "bifrost-inaccessible-first-use-work-"));
     const inaccessible = "registered-inaccessible";
@@ -321,51 +324,47 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
           const current = await stats(server.port);
           return current.stats.find((item) => item.kind === "probe" && item.model === healthy && item.completed);
         });
-        const failedTurn = await rpc.userTurn("synthetic first-use request to unavailable model");
-        const failure = failedTurn.find((record) => record.type === "message_end"
-          && record.message?.role === "assistant" && record.message.stopReason === "error");
-        assert.ok(failure, `Pi must expose the selected model's failed assistant result: ${JSON.stringify(failedTurn)}`);
-        const failureText = String(failure.message.errorMessage ?? failure.message.content?.map((item) => item.text ?? "").join(" ") ?? "");
-        assert.match(failureText, /403|forbidden|inaccessible/iu,
-          "the failed assistant result must explain that the selected registered model is inaccessible");
+        const firstTurn = await rpc.userTurn("synthetic first-use request to unavailable model");
+        assert.ok(firstTurn.some((record) => record.type === "message_end" && record.message?.role === "assistant"
+          && record.message.stopReason === "stop" && record.message.content?.some((item) => item.type === "text" && item.text?.includes("healthy"))),
+        "the first prompt must succeed through the already verified sibling");
         let afterFailure = await stats(server.port);
         const firstTurnRequests = afterFailure.stats.slice(before.stats.length);
-        assert.equal(firstTurnRequests.filter((item) => item.kind === "generation" && item.model === inaccessible).length, 1);
-        assert.equal(firstTurnRequests.filter((item) => item.kind === "generation" && item.model === healthy).length, 0,
-          "the failed original prompt must not replay onto a healthy sibling behind the user's back");
+        assert.equal(firstTurnRequests.filter((item) => item.kind === "generation" && item.model === inaccessible).length, 0,
+          "the unchecked selected model must not receive a generation request");
+        assert.equal(firstTurnRequests.filter((item) => item.kind === "generation" && item.model === healthy).length, 1,
+          "the original prompt must be dispatched once to the verified sibling");
         assert.ok(firstTurnRequests.some((item) => item.kind === "probe" && item.model === healthy && item.completed),
           "the alternative model was already proven accessible by its health probe");
         assert.ok(firstTurnRequests.some((item) => item.kind === "probe" && item.model === inaccessible && !item.completed),
-          "the selected model's verification was still pending when the first prompt failed");
+          "the selected model's verification must remain pending while the first prompt succeeds");
 
-        await rpc.request({ type: "set_model", provider: "fake", modelId: healthy });
-        await waitFor("the physical selection to cancel the held inaccessible-model probe", async () => {
-          const current = await stats(server.port);
-          return current.stats.slice(before.stats.length)
-            .find((item) => item.kind === "probe" && item.model === inaccessible && item.clientClosed);
-        });
-        const recoveredTurn = await rpc.userTurn("synthetic independent request after explicit model selection");
-        assert.ok(recoveredTurn.some((record) => record.type === "message_end" && record.message?.role === "assistant"
+        assert.equal(existsSync(configPath), false, "a pending probe cannot save partial pools");
+        await probeGate(server.port, "release", inaccessible);
+        await waitFor("the completed first-use health check", () => existsSync(configPath));
+        const saved = JSON.parse(readFileSync(configPath, "utf8"));
+        assert.deepEqual(saved.models, { quick: [], general: [], frontier: [`fake/${healthy}`] },
+          "the completed setup saves only the verified sibling");
+        const nextTurn = await rpc.userTurn("synthetic independent request after verification");
+        assert.ok(nextTurn.some((record) => record.type === "message_end" && record.message?.role === "assistant"
           && record.message.stopReason === "stop" && record.message.content?.some((item) => item.type === "text" && item.text?.includes("healthy"))),
-        "a new, distinct prompt must succeed after the user explicitly selects the healthy model");
+        "a new, distinct prompt must use the saved healthy model");
         afterFailure = await stats(server.port);
         const allRequests = afterFailure.stats.slice(before.stats.length);
-        assert.equal(allRequests.filter((item) => item.kind === "generation" && item.model === inaccessible).length, 1);
-        assert.equal(allRequests.filter((item) => item.kind === "generation" && item.model === healthy).length, 1,
-          "only the distinct prompt after explicit selection may generate with the healthy sibling");
-        assert.equal(existsSync(configPath), false, "interrupted first-use verification cannot save partial pools");
+        assert.equal(allRequests.filter((item) => item.kind === "generation" && item.model === inaccessible).length, 0);
+        assert.equal(allRequests.filter((item) => item.kind === "generation" && item.model === healthy).length, 2,
+          "the first prompt and distinct prompt after verification each generate once");
         if (process.env.BIFROST_ACCEPTANCE_EVENTS) {
           appendFileSync(process.env.BIFROST_ACCEPTANCE_EVENTS, `${JSON.stringify({
-            event: "inaccessible_model_first_turn_failure",
-            selectedModel: inaccessible,
-            failureStatus: "403",
-            assistantStopReason: failure.message.stopReason,
+            event: "first_turn_verified_sibling",
+            selectedModel: healthy,
+            assistantStopReason: "stop",
             probeWasPending: true,
             healthySiblingProbePassed: true,
             automaticReplayCount: 0,
-            failedFirstTurnGenerationCount: allRequests.filter((item) => item.kind === "generation" && item.model === inaccessible).length,
-            failedFirstTurnHealthyGenerationCount: 0,
-            explicitHealthySelectionGenerationCount: 1,
+            uncheckedModelGenerationCount: allRequests.filter((item) => item.kind === "generation" && item.model === inaccessible).length,
+            firstTurnHealthyGenerationCount: 1,
+            nextTurnHealthyGenerationCount: 1,
             savedPartialConfig: false,
           })}\n`);
         }
@@ -416,7 +415,7 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
       await rpc.userTurn("synthetic first-use save failure request");
       const whileHeld = await stats(server.port);
       assert.ok(whileHeld.stats.slice(beforeStats.stats.length).some((item) => item.kind === "generation"
-        && item.model === "auto-selection-held-general" && item.completed),
+        && item.model === "frontier-healthy" && item.completed),
       "the initial physical prompt should complete while verification is held");
       assert.equal(readFileSync(configPath, "utf8"), originalConfigBytes.toString("utf8"));
       assert.equal(existsSync(ownershipPath), false);
@@ -459,7 +458,7 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
         "only the original physical prompt should have generated at the failed-save boundary");
       failureBoundary = {
         probes: { heldGeneral: 1, frontierHealthy: 1 },
-        generations: { heldGeneral: 1, frontierHealthy: 0 },
+        generations: { heldGeneral: 0, frontierHealthy: 1 },
         preservedEmptyConfig: true,
         configSha256: createHash("sha256").update(readFileSync(configPath)).digest("hex"),
         ownershipReceiptCreated: existsSync(ownershipPath),
@@ -473,10 +472,10 @@ describe("Auto selection during first-use verification", { timeout: 120_000, con
       routingAfterSaveFailure = afterStats.stats.slice(beforeStats.stats.length)
         .some((item) => item.kind === "generation" && item.model === "frontier-healthy" && item.completed);
       assert.equal(routingAfterSaveFailure, true, "the still-valid in-memory policy should route a later Auto prompt after permissions are restored");
-      assert.equal(afterStats.stats.slice(beforeStats.stats.length).filter((item) => item.kind === "generation" && item.model === "auto-selection-held-general").length, 1,
-        "the original physical prompt must generate once");
-      assert.equal(afterStats.stats.slice(beforeStats.stats.length).filter((item) => item.kind === "generation" && item.model === "frontier-healthy").length, 1,
-        "the later Auto prompt must generate once on the healthy frontier pool");
+      assert.equal(afterStats.stats.slice(beforeStats.stats.length).filter((item) => item.kind === "generation" && item.model === "auto-selection-held-general").length, 0,
+        "the unchecked held model must not receive either prompt");
+      assert.equal(afterStats.stats.slice(beforeStats.stats.length).filter((item) => item.kind === "generation" && item.model === "frontier-healthy").length, 2,
+        "the original and later Auto prompts each generate once on the verified frontier model");
 
       if (process.env.BIFROST_ACCEPTANCE_EVENTS) {
         appendFileSync(process.env.BIFROST_ACCEPTANCE_EVENTS, `${JSON.stringify({

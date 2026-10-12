@@ -245,13 +245,13 @@ const journeys = [
     requiredEvidenceEvent: "bootstrap_matrix_cold",
   },
   {
-    id: "first-use-inaccessible-unverified-model-failure",
+    id: "first-use-prefers-verified-sibling",
     testFile: "tests/integration/auto-bootstrap-selection.test.mjs",
-    title: "surfaces an inaccessible selected first-use model without replaying onto a healthy sibling",
+    title: "routes the first prompt to an already verified sibling without replay",
     requirements: ["R03", "R04", "R05"],
     boundary: "real Pi RPC, held health probe and isolated fake-provider 403 response",
     evidenceEvents: true,
-    requiredEvidenceEvent: "inaccessible_model_first_turn_failure",
+    requiredEvidenceEvent: "first_turn_verified_sibling",
   },
   {
     id: "agent-tui-first-use-progress-picker-shutdown",
@@ -506,8 +506,6 @@ export async function runJourneys({ root, artifactDir, options = {} }) {
         cases.push({ id: pending.id, requirements: pending.requirements, boundary: pending.boundary, status: "blocked", required: true,
           attempts: [], exclusions: [], artifacts: [], detail: "Not run after the acceptance runner received an interrupt." });
       }
-      cases.push({ id: "first-use-unverified-route-product-gap", requirements: ["R04", "R05"], boundary: "real Pi RPC and isolated fake provider", status: "blocked", required: true,
-        attempts: [], exclusions: [], artifacts: [], detail: "Not assessed because the acceptance runner received an interrupt." });
       return { cases };
     }
     const result = await runAcceptanceTest({ root, artifactDir, journey });
@@ -520,28 +518,5 @@ export async function runJourneys({ root, artifactDir, options = {} }) {
       return { cases };
     }
   }
-  const firstUse = cases[0];
-  const observedFailureJourney = journeys.find((journey) => journey.id === "first-use-inaccessible-unverified-model-failure");
-  const observationPath = observedFailureJourney
-    ? join(artifactDir, "cases", observedFailureJourney.id, "observations.jsonl")
-    : "";
-  const observations = existsSync(observationPath)
-    ? readFileSync(observationPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
-    : [];
-  const inaccessibleFailure = observations.find((event) => event.event === "inaccessible_model_first_turn_failure");
-  cases.push({
-    id: "first-use-unverified-route-product-gap",
-    requirements: ["R04", "R05"],
-    boundary: "observed in real Pi RPC with a held health probe and isolated fake provider",
-    status: inaccessibleFailure ? "blocked" : cases.find((row) => row.id === "first-use-inaccessible-unverified-model-failure")?.status === "passed" ? "failed" : "blocked",
-    startedAt: cases.find((row) => row.id === "first-use-inaccessible-unverified-model-failure")?.startedAt ?? firstUse.startedAt,
-    endedAt: cases.find((row) => row.id === "first-use-inaccessible-unverified-model-failure")?.endedAt ?? firstUse.endedAt,
-    attempts: inaccessibleFailure ? [inaccessibleFailure] : [],
-    exclusions: ["Live providers and real credentials are excluded."],
-    artifacts: cases.find((row) => row.id === "first-use-inaccessible-unverified-model-failure")?.artifacts ?? firstUse.artifacts,
-    detail: inaccessibleFailure
-      ? `OBSERVED_PRODUCT_GAP: the first prompt selected registered model ${inaccessibleFailure.selectedModel} before its held probe resolved and surfaced provider ${inaccessibleFailure.failureStatus} (${inaccessibleFailure.assistantStopReason}); another registered model had already passed its probe. The original prompt was not replayed. A distinct prompt worked only after explicit physical model selection. Decide whether first-use should visibly warn or require user selection when the active physical model is unverified; the required no-wait healthy held-probe case remains passed.`
-      : "The required real-Pi failure evidence for an inaccessible selected model before probe resolution is absent; review the child journey result.",
-  });
   return { cases };
 }
