@@ -333,15 +333,19 @@ describe("acceptance runner boundary", () => {
 
   it("kills and awaits a SIGTERM-ignoring grandchild after its gate parent exits", () => {
     const acceptanceUrl = new URL("../scripts/acceptance.mjs", import.meta.url).href;
-    const childCode = "const {spawn}=require('node:child_process');const grandchild=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'});process.stdout.write(String(grandchild.pid));process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000);";
-    const script = `const {registerTerminationHandlers,runChild}=await import(${JSON.stringify(acceptanceUrl)});const remove=registerTerminationHandlers();setTimeout(()=>process.kill(process.pid,'SIGTERM'),100);const result=await runChild(process.execPath,['-e',${JSON.stringify(childCode)}],{cwd:process.cwd(),env:{PATH:process.env.PATH}});const signal=remove();const pid=Number(result.stdout);let alive=true;try{process.kill(pid,0)}catch{alive=false}process.stdout.write(JSON.stringify({status:result.status,signal,alive}));`;
+    const directory = mkdtempSync(join(tmpdir(), "bifrost-grandchild-cleanup-"));
+    temporary.push(directory);
+    const heartbeat = join(directory, "heartbeat");
+    const grandchildCode = `const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(heartbeat)},'ready');setInterval(()=>fs.appendFileSync(${JSON.stringify(heartbeat)},'.'),10);`;
+    const childCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(grandchildCode)}],{stdio:'ignore'});process.stdout.write(String(process.pid));process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000);`;
+    const script = `const fs=await import('node:fs');const {registerTerminationHandlers,runChild,processGroupExists}=await import(${JSON.stringify(acceptanceUrl)});const remove=registerTerminationHandlers();let ready=false;const deadline=Date.now()+5000;const poll=setInterval(()=>{if(fs.existsSync(${JSON.stringify(heartbeat)})){ready=true;clearInterval(poll);process.kill(process.pid,'SIGTERM')}else if(Date.now()>deadline){clearInterval(poll);process.kill(process.pid,'SIGTERM')}},10);const result=await runChild(process.execPath,['-e',${JSON.stringify(childCode)}],{cwd:process.cwd(),env:{PATH:process.env.PATH}});clearInterval(poll);const signal=remove();const before=ready?fs.readFileSync(${JSON.stringify(heartbeat)},'utf8'):'';await new Promise(resolve=>setTimeout(resolve,150));const after=ready?fs.readFileSync(${JSON.stringify(heartbeat)},'utf8'):'';const groupId=Number(result.stdout);process.stdout.write(JSON.stringify({status:result.status,signal,ready,stopped:before===after,groupGone:groupId>0&&!processGroupExists(groupId),cleanupFailed:result.processCleanupFailed}));`;
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       encoding: "utf8",
       timeout: 10_000,
       env: { PATH: process.env.PATH },
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout), { status: 143, signal: "SIGTERM", alive: false });
+    assert.deepEqual(JSON.parse(result.stdout), { status: 143, signal: "SIGTERM", ready: true, stopped: true, groupGone: true, cleanupFailed: false });
   });
 
   it("reports process-group cleanup failure after its bounded deadline", async () => {
