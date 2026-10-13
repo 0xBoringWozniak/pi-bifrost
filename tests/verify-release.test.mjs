@@ -78,12 +78,12 @@ test("clean passing verification records a successful candidate", async () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("pre-existing dirty source is tested and reported without exposing its path", async () => {
+test("pre-existing dirty source cannot pass a revision-bound release gate", async () => {
   const root = repository();
   try {
     writeFileSync(join(root, "scripts", "source.js"), "local candidate\n");
     const result = await verify(root);
-    assert.equal(result.exitCode, 0);
+    assert.equal(result.exitCode, 1);
     assert.equal(result.workingTreeCleanAtStart, false);
     assert.equal(result.workingTreeCleanAtEnd, false);
     assert.equal(result.sourceChangedDuringRun, false);

@@ -200,7 +200,9 @@ export async function runVerification({
     sourceChangedDuringRun: sourceHashAtStart !== sourceHashAtEnd,
     startedAt,
     endedAt: new Date().toISOString(),
-    exitCode: error || headSha !== headShaAtEnd || sourceHashAtStart !== sourceHashAtEnd || results.some(({ exitCode }) => exitCode !== 0) ? 1 : 0,
+    exitCode: error || !workingTreeCleanAtStart || !workingTreeCleanAtEnd
+      || headSha !== headShaAtEnd || sourceHashAtStart !== sourceHashAtEnd
+      || results.some(({ exitCode }) => exitCode !== 0) ? 1 : 0,
     ...(error ? { error } : {}),
     gates: results,
   };
