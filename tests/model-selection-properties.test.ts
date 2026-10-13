@@ -98,6 +98,13 @@ const CATALOG = fc.array(
   { maxLength: 12 },
 );
 
+/** A priced pool entry for the list-order strategies; price and context must not steer. */
+const ORDERED_ENTRY = fc.record({
+  input: fc.double({ min: 0, max: 100, noNaN: true }),
+  output: fc.double({ min: 0, max: 100, noNaN: true }),
+  contextWindow: fc.integer({ min: 1_000, max: 2_000_000 }),
+});
+
 const PATTERN_INPUT = fc.oneof(
   fc.constant<string | string[] | undefined>(undefined),
   fc.constant<string | string[] | undefined>([]),
@@ -221,20 +228,33 @@ describe("model selection properties", () => {
   describe("stable ties", () => {
     it("keeps the earliest candidate among equal combined costs", () => {
       fc.assert(
-        fc.property(TIED_COST_LIST, (specs) => {
-          const models = buildModels(specs);
-          const totals = specs.map(totalCost);
-          const winner = firstIndexOfMin(totals);
-          assert.equal(modelKey(selectModel([...models], "cheapest", RNG) as Model<Api>), modelKey(models[winner]));
-          // A tie can only be observed when the pool holds more than one model at the minimum.
-          if (totals.filter((total) => total === totals[winner]).length > 1) {
-            assert.equal(
-              models.slice(0, winner).some((model) => modelCost(model) === totals[winner]),
-              false,
-              "no earlier candidate may share the winning cost",
+        fc.property(
+          TIED_COST_LIST,
+          // Force a duplicated minimum so the tie is always exercised: the cheapest pool
+          // entry is repeated immediately after itself, and the last entry is priced so
+          // the unique minimum cannot have landed there by chance.
+          (specs) => {
+            const minimum = firstIndexOfMin(specs.map(totalCost));
+            const priced: CostSpec[] = [
+              ...specs.slice(0, minimum + 1),
+              specs[minimum],
+              ...specs.slice(minimum + 1),
+              { input: 1_000_000, output: 1_000_000 },
+            ];
+            const models = buildModels(priced);
+            const totals = priced.map(totalCost);
+            const atMinimum = totals.filter((total) => total === Math.min(...totals)).length;
+            assert.ok(atMinimum >= 2, "fixture must place at least one duplicate at the minimum");
+            assert.ok(
+              firstIndexOfMin(totals) < totals.length - 1,
+              "the cheapest candidate must not be last, or first-wins and last-wins agree",
             );
-          }
-        }),
+
+            const winner = firstIndexOfMin(totals);
+            assert.equal(modelKey(selectModel([...models], "cheapest", RNG) as Model<Api>), modelKey(models[winner]));
+            assert.equal(modelCost(selectModel([...models], "cheapest", RNG) as Model<Api>), Math.min(...totals));
+          },
+        ),
         { numRuns: 250 },
       );
     });
@@ -367,6 +387,71 @@ describe("model selection properties", () => {
     });
   });
 
+  describe("list-order strategies", () => {
+    // `docs/guide/configuration.md`: `first` is the first healthy candidate in list
+    // order, and `fastest` is an alias for `first` over the current list order — init
+    // may reorder the list from one-time probe results, but selection never re-sorts
+    // and never consults cost, context, or latency metadata.
+
+    it("selects pool[0] for first and fastest whatever the metadata", () => {
+      fc.assert(
+        fc.property(
+          fc.array(ORDERED_ENTRY, { minLength: 1, maxLength: 12 }),
+          (entries) => {
+            const models = entries.map((entry, index) =>
+              makeModel("fixture", `order-${index}`, entry.input, entry.output, entry.contextWindow));
+            assert.equal(selectModel([...models], "first", RNG), models[0]);
+            assert.equal(selectModel([...models], "fastest", RNG), models[0]);
+          },
+        ),
+        { numRuns: 250 },
+      );
+    });
+
+    it("ignores cost and context when first and fastest pick a candidate", () => {
+      fc.assert(
+        fc.property(
+          fc.array(ORDERED_ENTRY, { minLength: 2, maxLength: 12 }),
+          (entries) => {
+            // Same pool order, prices and windows inverted. A metadata-driven selector
+            // moves; a list-order selector does not.
+            const asListed = entries.map((entry, index) =>
+              makeModel("fixture", `pool-${index}`, entry.input, entry.output, entry.contextWindow));
+            const inverted = entries
+              .map((entry) => ({ ...entry }))
+              .reverse()
+              .map((entry, index) =>
+                makeModel("fixture", `pool-${index}`, 100 - entry.input, 100 - entry.output, 2_000_000 - entry.contextWindow));
+            assert.notDeepEqual(
+              asListed.map((model) => modelCost(model)),
+              inverted.map((model) => modelCost(model)),
+            );
+            for (const strategy of ["first", "fastest"] as const) {
+              assert.equal(selectModel([...asListed], strategy, RNG), asListed[0]);
+              assert.equal(selectModel([...inverted], strategy, RNG), inverted[0]);
+            }
+          },
+        ),
+        { numRuns: 250 },
+      );
+    });
+
+    it("never draws from the RNG for first or fastest", () => {
+      fc.assert(
+        fc.property(fc.integer({ min: 1, max: 16 }), (count) => {
+          const models = Array.from({ length: count }, (_, index) =>
+            makeModel("fixture", `order-${index}`, count - index, index));
+          for (const strategy of ["first", "fastest"] as const) {
+            let draws = 0;
+            assert.equal(selectModel(models, strategy, () => { draws += 1; return DRAW; }), models[0]);
+            assert.equal(draws, 0, `${strategy} must not consume a draw`);
+          }
+        }),
+        { numRuns: 200 },
+      );
+    });
+  });
+
   describe("random", () => {
     it("selects the mid-bucket candidate for any pool length and draw index", () => {
       fc.assert(
@@ -380,6 +465,45 @@ describe("model selection properties", () => {
           assert.equal(draws, count === 1 ? 0 : 1);
         }),
         { numRuns: 250 },
+      );
+    });
+
+    it("indexes the configured pool order, not a price ordering", () => {
+      // Costs vary across the pool on purpose: any implementation that re-sorts the
+      // pool before indexing still passes when every candidate is priced alike.
+      fc.assert(
+        fc.property(
+          fc.integer({ min: 2, max: 24 }),
+          fc.integer({ min: 0, max: 10_000 }),
+          (count, drawIndex) => {
+            const models = Array.from({ length: count }, (_, index) =>
+              makeModel("fixture", `ordered-${index}`, index + 1, 100 - index));
+            const bucket = drawIndex % count;
+            const draw = (bucket + 0.5) / count;
+            assert.equal(selectModel(models, "random", () => draw), models[bucket]);
+          },
+        ),
+        { numRuns: 250 },
+      );
+    });
+
+    it("indexes the configured pool order for a fixed draw over a price-graded pool", () => {
+      fc.assert(
+        fc.property(fc.array(COST_SPEC, { minLength: 2, maxLength: 24 }), (specs) => {
+          const models = buildModels(specs);
+          const totals = specs.map(totalCost);
+          // Equal prices are the only inputs a price-sort cannot reorder, so this
+          // property only claims something when every candidate is uniquely priced.
+          if (new Set(totals).size !== totals.length) return;
+          const cheapest = firstIndexOfMin(totals);
+          const draws = [0.25, 0.5, 0.75];
+          // The draws must land somewhere a price sort would have chosen differently.
+          if (draws.every((draw) => Math.floor(draw * models.length) === cheapest)) return;
+          for (const draw of draws) {
+            assert.equal(selectModel(models, "random", () => draw), models[Math.floor(draw * models.length)]);
+          }
+        }),
+        { numRuns: 200 },
       );
     });
 
