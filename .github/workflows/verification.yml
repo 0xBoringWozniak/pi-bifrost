@@ -44,3 +44,22 @@ jobs:
           name: verification-manifest-${{ github.event.pull_request.head.sha || github.sha }}
           path: screenshots/verification/**/result.json
           if-no-files-found: ignore
+
+      - name: Check out the proposed merge
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Install proposed merge dependencies
+        if: github.event_name == 'pull_request'
+        run: npm ci
+      - name: Verify the proposed merge
+        if: github.event_name == 'pull_request'
+        run: npm run verify:release
+      - name: Upload merge-result manifest
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-result-manifest-${{ github.sha }}
+          path: screenshots/verification/**/result.json
+          if-no-files-found: ignore
