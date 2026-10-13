@@ -10,7 +10,7 @@ When a user reports a failure, keep their error shape and sequence in a regressi
 
 Some contracts need a different boundary. The resolve-only API uses an installed-package consumer test. File-system faults, lease races, and exact deadline boundaries use deterministic lower-level tests as well as the Pi happy and failure paths. State this distinction in review. Do not call these tests Pi E2E.
 
-Before review, run `npm run verify:release` on a frozen candidate. Attach its result manifest to the reviewed revision. If source changes during the run, rerun the complete command on the final frozen candidate. Partial reruns do not replace a failed manifest. The reviewer checks this map against the changed behavior and checks that assertions can fail for the reported regression.
+Before review, run `npm run verify:release` on a clean, frozen candidate. Attach its result manifest to the reviewed revision. If source changes during the run, rerun the full command on the final candidate. Partial reruns do not replace a failed manifest. The reviewer checks this map against the changed behavior and checks that assertions can fail for the reported regression.
 
 ## Release feature map
 
