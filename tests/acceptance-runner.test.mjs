@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { gateDirectory, gitTruth, installedToolVersions, matchNamedTestEvent, parseArgs, sourceFingerprint, summarizeCases } from "../scripts/acceptance/core.mjs";
@@ -60,6 +60,9 @@ describe("acceptance runner boundary", () => {
       assert.equal(evidence.source.changedDuringRun, false);
       assert.equal(evidence.source.fingerprintAtStart, evidence.source.fingerprintAtEnd);
       assert.equal(evidence.cases.find((item) => item.id === "candidate-stable")?.status, "passed");
+      const faultCaseDir = join(dirname(evidencePath), "cases", "native-codex-temperature-fault-red");
+      assert.ok(existsSync(join(faultCaseDir, "fault-injected-probe.ts")));
+      assert.equal(existsSync(join(faultCaseDir, "fault-fixture")), false);
       succeeded = true;
     } finally {
       if (succeeded && evidencePath) rmSync(join(evidencePath, ".."), { recursive: true, force: true });
