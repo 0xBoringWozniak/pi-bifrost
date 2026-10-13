@@ -3623,6 +3623,8 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       strictBoundary = false;
     }
     clearBifrostWidgets(ctx);
+    const activeBootstrap = autoBootstrapBySession.get(ctx.sessionManager);
+    if (activeBootstrap) renderAutoBootstrapProgress(ctx, activeBootstrap);
     // Passive subagent observation — logged even when routing is disabled,
     // so child-session model usage stays visible in debug logs.
     if (process.env.PI_SUBAGENT_RUN_ID) {

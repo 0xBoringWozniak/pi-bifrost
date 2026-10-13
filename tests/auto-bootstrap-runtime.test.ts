@@ -223,6 +223,24 @@ describe("automatic setup through registered Pi hooks", () => {
     } finally { harness.cleanup(); }
   });
 
+  it("keeps background probe progress visible while routing a prompt", async () => {
+    const harness = freshHarness(false, undefined, true);
+    try {
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeStarted;
+      const result = await harness.handlers.get("input")!({
+        text: "quick do a small task",
+        source: "interactive",
+        streamingBehavior: "steer",
+      }, harness.ctx);
+      assert.deepEqual(result, { action: "transform", text: "do a small task" });
+      assert.deepEqual(harness.probeWidgetWrites().at(-1), ["Checking models: 0/1", "  passed: 0"]);
+      harness.completeProbe();
+      await flushImmediate();
+      await flushImmediate();
+    } finally { harness.cleanup(); }
+  });
+
   it("does not touch a torn-down UI when a cancelled background check settles", async () => {
     const harness = freshHarness(false, undefined, true);
     try {
