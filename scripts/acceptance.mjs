@@ -507,12 +507,13 @@ export async function runAcceptance(argv = process.argv.slice(2), runtime = {}) 
     dirtyPaths: gitTruth(root),
   };
   const candidateChanged = before.revision !== after.revision || before.sourceFingerprint !== after.sourceFingerprint;
+  const candidateDirty = before.dirtyPaths.length > 0 || after.dirtyPaths.length > 0;
   cases.push({
     order: cases.length + 1,
     id: "candidate-stable",
     requirements: ["R16"],
     boundary: "source-provenance",
-    status: candidateChanged ? "failed" : "passed",
+    status: candidateChanged || candidateDirty ? "failed" : "passed",
     required: true,
     startedAt,
     endedAt: new Date().toISOString(),
@@ -520,7 +521,7 @@ export async function runAcceptance(argv = process.argv.slice(2), runtime = {}) 
     attempts: 1,
     exclusions: [],
     artifacts: [],
-    ...(candidateChanged ? { detail: "Revision or source fingerprint changed during acceptance; run again on a frozen candidate." } : {}),
+    ...(candidateChanged || candidateDirty ? { detail: "Source changed or the working tree was dirty; run again on a clean, frozen candidate." } : {}),
   });
   const summary = summarizeCases(cases);
   const evidence = {

@@ -77,3 +77,24 @@ jobs:
           path: ${{ steps.acceptance.outputs.report-data }}
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Check out the proposed merge
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Install proposed merge dependencies
+        if: github.event_name == 'pull_request'
+        run: npm ci
+      - name: Run acceptance on the proposed merge
+        if: github.event_name == 'pull_request'
+        run: npm run acceptance:deterministic
+      - name: Upload merge-result evidence
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-result-evidence-${{ github.sha }}
+          path: |
+            screenshots/verification/**/result.json
+            screenshots/acceptance/**
+          if-no-files-found: ignore

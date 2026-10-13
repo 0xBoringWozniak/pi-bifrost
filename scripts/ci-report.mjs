@@ -190,6 +190,12 @@ function determineConfidence(data, context, counts) {
   if (evidence.source?.changedDuringRun || evidence.source?.revisionAtStart !== evidence.source?.revisionAtEnd || evidence.source?.fingerprintAtStart !== evidence.source?.fingerprintAtEnd) {
     return { state: "BLOCKED", reasons: ["Source revision or fingerprint changed during the run; this evidence is stale."] };
   }
+  if (!Array.isArray(evidence.source?.dirtyPathsAtStart) || !Array.isArray(evidence.source?.dirtyPathsAtEnd)) {
+    return { state: "INCOMPLETE", reasons: ["Evidence does not state whether the tested working tree was clean."] };
+  }
+  if (evidence.source.dirtyPathsAtStart.length || evidence.source.dirtyPathsAtEnd.length) {
+    return { state: "BLOCKED", reasons: ["The tested working tree was dirty; the result cannot be tied to the commit."] };
+  }
   if (context.sha.toLowerCase() !== evidence.source.revisionAtStart.toLowerCase()) {
     return { state: "BLOCKED", reasons: ["Evidence revision does not match the requested commit; this report is stale."] };
   }

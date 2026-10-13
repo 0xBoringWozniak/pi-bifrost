@@ -41,6 +41,8 @@ describe("CI report", () => {
   it("reports verified checks only when deterministic required evidence is complete and current", () => {
     const passing = structuredClone(fixture);
     passing.evidence.exitCode = 0;
+    passing.evidence.source.dirtyPathsAtStart = [];
+    passing.evidence.source.dirtyPathsAtEnd = [];
     const productGap = passing.evidence.cases.find((item) => item.id === "first-use-unverified-route-product-gap");
     productGap.status = "passed";
     productGap.detail = "Synthetic green fixture only.";
@@ -57,6 +59,14 @@ describe("CI report", () => {
     const drift = structuredClone(passing);
     drift.evidence.source.changedDuringRun = true;
     assert.equal(renderCiReport(drift, trustedContext).confidence.state, "BLOCKED");
+
+    const dirty = structuredClone(passing);
+    dirty.evidence.source.dirtyPathsAtStart = [{ index: " M", path: "index.ts" }];
+    assert.equal(renderCiReport(dirty, trustedContext).confidence.state, "BLOCKED");
+
+    const unknownCleanliness = structuredClone(passing);
+    delete unknownCleanliness.evidence.source.dirtyPathsAtStart;
+    assert.equal(renderCiReport(unknownCleanliness, trustedContext).confidence.state, "INCOMPLETE");
   });
 
   it("reports actual fingerprint comparison and profile scope", () => {
@@ -86,6 +96,8 @@ describe("CI report", () => {
 
     const missing = structuredClone(fixture);
     missing.evidence.exitCode = 0;
+    missing.evidence.source.dirtyPathsAtStart = [];
+    missing.evidence.source.dirtyPathsAtEnd = [];
     missing.evidence.cases = missing.evidence.cases.filter((item) => item.id !== "gate:unit");
     const missingReport = renderCiReport(missing, trustedContext);
     assert.equal(missingReport.confidence.state, "BLOCKED");
@@ -93,6 +105,8 @@ describe("CI report", () => {
 
     const duplicate = structuredClone(fixture);
     duplicate.evidence.exitCode = 0;
+    duplicate.evidence.source.dirtyPathsAtStart = [];
+    duplicate.evidence.source.dirtyPathsAtEnd = [];
     duplicate.evidence.cases.find((item) => item.id === "first-use-unverified-route-product-gap").status = "passed";
     duplicate.evidence.cases.push(structuredClone(duplicate.evidence.cases[0]));
     assert.match(renderCiReport(duplicate, trustedContext).confidence.reasons.join(" "), /Duplicate case identifiers/);
@@ -113,6 +127,8 @@ describe("CI report", () => {
     assert.match(renderCiReport({ schemaVersion: 99, cases: [] }, trustedContext).markdown, /MISSING/);
     const complete = structuredClone(fixture);
     complete.evidence.exitCode = 0;
+    complete.evidence.source.dirtyPathsAtStart = [];
+    complete.evidence.source.dirtyPathsAtEnd = [];
     complete.evidence.cases.find((item) => item.id === "first-use-unverified-route-product-gap").status = "passed";
     assert.equal(renderCiReport(complete, { ...trustedContext, conclusion: undefined }).confidence.state, "INCOMPLETE");
     assert.throws(() => makeReportData({ schemaVersion: 2, cases: [] }), /Unsupported acceptance evidence schema/);
@@ -120,6 +136,8 @@ describe("CI report", () => {
     const contract = structuredClone(fixture);
     contract.evidence.profile = "contract";
     contract.evidence.exitCode = 0;
+    contract.evidence.source.dirtyPathsAtStart = [];
+    contract.evidence.source.dirtyPathsAtEnd = [];
     contract.evidence.cases.find((item) => item.id === "first-use-unverified-route-product-gap").status = "passed";
     const limited = renderCiReport(contract, trustedContext);
     assert.equal(limited.confidence.state, "LIMITED");
