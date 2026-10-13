@@ -443,6 +443,7 @@ describe("probe debug evidence", () => {
       await flushDebug(1_000);
       const rows = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
       assert.equal(result.cancelled, true);
+      assert.equal(result.results[0]?.status, "skipped");
       assert.equal(rows.find((row) => row.event === "complete").cancelled, true);
       assert.equal(rows.find((row) => row.event === "complete").resultCount, 1);
       assert.equal(rows.find((row) => row.event === "complete").cacheReason, "cancelled");
@@ -695,19 +696,20 @@ describe("probe concurrency and resilience", () => {
     }
   });
 
-  it("never probes or caches virtual catalog models", async () => {
+  it("never probes or caches virtual or classifier catalog models", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "bifrost-probe-virtual-"));
     const cwdBefore = process.cwd();
     const physical = makeFastModel(0);
     const virtual = { ...makeFastModel(1), provider: "bifrost", id: "auto", api: "pi-virtual" };
+    const classifier = { ...makeFastModel(2), type: "classifier" };
     let calls = 0;
-    const ctx = makeFastCtx([physical, virtual]) as Parameters<typeof runProbe>[0];
+    const ctx = makeFastCtx([physical, virtual, classifier] as never) as Parameters<typeof runProbe>[0];
     const registry = ctx.modelRegistry as unknown as { streamSimple: (...args: unknown[]) => unknown };
     const original = registry.streamSimple;
     registry.streamSimple = (...args) => { calls++; return original(...args); };
     try {
       process.chdir(cwd);
-      const result = await runProbe(ctx, {});
+      const result = await runProbe(ctx, { models: [physical, virtual, classifier] as never });
       assert.equal(calls, 1);
       assert.deepEqual(result.results.map(({ provider, model }) => [provider, model]), [["test", "model-0"]]);
       const report = JSON.parse(readFileSync(join(cwd, ".pi", "bifrost-probe.json"), "utf8")) as Array<{ provider: string; model: string }>;

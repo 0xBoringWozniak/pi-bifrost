@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getCircuitState, type ReliabilityConfig, type ReliabilityState } from "./reliability.ts";
-import { isVirtualModel } from "./virtual-model.ts";
+import { isGenerativeModel } from "./virtual-model.ts";
 import { evaluateReserves, type EconomicSnapshot, type ReserveEvaluation, type ReservePolicy } from "./economic-signals.ts";
 import { projectBillingPreference, type BillingPreferenceProjection } from "./economic-preferences.ts";
 import { observeAffinity, type AffinityAnchor, type AffinityMode, type AffinityRouteObservation, type PiAffinityModeSource } from "./affinity.ts";
@@ -55,12 +55,12 @@ export function findOneModel(
     const [provider, ...idParts] = pattern.split("/");
     const id = idParts.join("/");
     const model = ctx.modelRegistry.find(provider, id);
-    return isVirtualModel(model) ? undefined : model;
+    return isGenerativeModel(model) ? model : undefined;
   }
 
   const lower = pattern.toLowerCase();
   const available = ctx.modelRegistry.getAvailable();
-  return available.find((m) => !isVirtualModel(m) && modelLowerMatches(m, lower));
+  return available.find((m) => isGenerativeModel(m) && modelLowerMatches(m, lower));
 }
 
 /** Lowercased id/provider for a model, computed once per model object.
@@ -113,7 +113,7 @@ export function findCandidates(
       const lower = p.toLowerCase();
       for (const m of available) {
         // Match test first — modelKey/dedup only run for actual matches.
-        if (isVirtualModel(m) || !modelLowerMatches(m, lower)) continue;
+        if (!isGenerativeModel(m) || !modelLowerMatches(m, lower)) continue;
         const key = modelKey(m);
         if (!seen.has(key)) {
           seen.add(key);

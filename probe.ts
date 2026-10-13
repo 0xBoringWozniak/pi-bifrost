@@ -10,7 +10,7 @@ import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promptWithMinimalSession } from "./session-fallback.ts";
 import { writeJsonFile } from "./storage.ts";
-import { isVirtualModel } from "./virtual-model.ts";
+import { isGenerativeModel } from "./virtual-model.ts";
 import { debug } from "./debug.ts";
 
 export interface ProbeResult {
@@ -193,8 +193,8 @@ export async function runProbe(
 ): Promise<{ results: ProbeResult[]; path: string; cancelled?: true }> {
   const runId = randomUUID();
   const outputPath = join(process.cwd(), ".pi", "bifrost-probe.json");
-  const catalog = ctx.modelRegistry.getAvailable().filter((model) => !isVirtualModel(model));
-  const available = (options.models ?? catalog).filter((model) => !isVirtualModel(model));
+  const catalog = ctx.modelRegistry.getAvailable().filter(isGenerativeModel);
+  const available = (options.models ?? catalog).filter(isGenerativeModel);
   const total = available.length;
   const results: ProbeResult[] = new Array(total);
   const providerCounts: Record<string, number> = Object.create(null) as Record<string, number>;
@@ -352,6 +352,10 @@ async function probeOne(
     }
   } catch (err) {
     base.duration_ms = +(performance.now() - start).toFixed(1);
+    if (signal?.aborted) {
+      base.status = "skipped";
+      return base;
+    }
     base.status = err instanceof DOMException && err.name === "AbortError"
       ? "timeout"
       : "error";

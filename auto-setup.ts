@@ -3,7 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ALL_STRATEGIES, DEFAULT_RULES, type BifrostConfig } from "./config.ts";
 import { guessTier } from "./routing.ts";
-import { isVirtualModel } from "./virtual-model.ts";
+import { isGenerativeModel } from "./virtual-model.ts";
 import { isClassifierBackend } from "./classifier-backends.ts";
 
 export interface AutoBootstrapFacts {
@@ -218,7 +218,7 @@ export function hasExplicitExtensionRoutingFile(path: string): boolean {
 export function buildBootstrapPools(available: readonly Model<Api>[]): BootstrapPools | undefined {
   const models: Record<string, string[]> = {};
   for (const model of [...available].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`))) {
-    if (isVirtualModel(model)) continue;
+    if (!isGenerativeModel(model)) continue;
     const tier = guessTier(model);
     if (tier) (models[tier] ??= []).push(`${model.provider}/${model.id}`);
   }

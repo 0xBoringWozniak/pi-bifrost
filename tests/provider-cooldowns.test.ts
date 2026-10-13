@@ -187,6 +187,38 @@ describe("shared provider cooldowns", () => {
     await store.releaseTrial(claim);
   });
 
+  it("accepts stale expired leases as completed trial finalization", async () => {
+    const f = fixture();
+    const store = f.make();
+    await store.pauseUsage("provider-stale", f.now());
+    f.advance(101);
+    const settled = await store.claimTrial("provider-stale", true, f.now());
+    assert.ok(settled.allowed && settled.claim);
+    f.advance(120_001);
+    await assert.doesNotReject(store.settleTrial(settled.claim));
+
+    await store.pauseUsage("provider-release", f.now());
+    f.advance(101);
+    const released = await store.claimTrial("provider-release", true, f.now());
+    assert.ok(released.allowed && released.claim);
+    f.advance(120_001);
+    await assert.doesNotReject(store.releaseTrial(released.claim));
+
+    await store.pauseUsage("provider-expired-settle", f.now());
+    f.advance(101);
+    const expiredSettle = await store.claimTrial("provider-expired-settle", true, f.now());
+    assert.ok(expiredSettle.allowed && expiredSettle.claim);
+    f.advance(24 * 60 * 60 * 1_000);
+    await assert.doesNotReject(store.settleTrial(expiredSettle.claim));
+
+    await store.pauseUsage("provider-expired-release", f.now());
+    f.advance(101);
+    const expiredRelease = await store.claimTrial("provider-expired-release", true, f.now());
+    assert.ok(expiredRelease.allowed && expiredRelease.claim);
+    f.advance(24 * 60 * 60 * 1_000);
+    await assert.doesNotReject(store.releaseTrial(expiredRelease.claim));
+  });
+
   it("does not renew a provider lease after settlement has begun", async () => {
     const f = fixture();
     const store = f.make();

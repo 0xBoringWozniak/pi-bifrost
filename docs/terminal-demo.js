@@ -49,7 +49,7 @@ if (terminal) {
     setup: {
       mode: "Setup proposal", model: "models from Pi",
       lines: [
-        ["command", "/bifrost init"], ["muted", "Refresh catalog metadata (no probes)"],
+        ["command", "/bifrost init"], ["muted", "Refresh catalog; reuse recent probes or probe models"],
         ["accent", "Short summary: save target · membership counts · classifier"],
         ["good", "Confirm once to save or reconcile pools"],
       ],

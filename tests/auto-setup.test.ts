@@ -22,6 +22,7 @@ describe("automatic first-run setup", () => {
       makeModel("z-provider", "quick", 0, 0),
       makeModel("a-provider", "general", 1, 1),
       { ...makeModel("bifrost", "auto", 0, 0), api: "pi-virtual" },
+      { ...makeModel("classifier-provider", "classifier", 0, 0), type: "classifier" } as never,
     ]);
     assert.deepEqual(result, {
       default: "general",

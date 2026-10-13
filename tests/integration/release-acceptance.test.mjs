@@ -285,6 +285,11 @@ describe("release acceptance against pinned Pi", { timeout: 300_000, concurrency
         const providerStatePath = join(work, ".pi", "bifrost-provider-reliability.json");
         assert.equal(existsSync(providerStatePath), true);
         assert.ok(readFileSync(providerStatePath, "utf8").includes("fake-a"));
+        if (mode === "v1") {
+          const modelState = JSON.parse(readFileSync(join(work, ".pi", "bifrost-reliability.json"), "utf8"));
+          assert.equal(modelState.models["fake-a/credits-exhausted"]?.lastFailureReason?.includes(":model-only"), false);
+          assert.equal(modelState.models["fake-a/credits-exhausted"]?.openUntil, undefined);
+        }
       } finally {
         rmSync(home, { recursive: true, force: true });
         rmSync(work, { recursive: true, force: true });

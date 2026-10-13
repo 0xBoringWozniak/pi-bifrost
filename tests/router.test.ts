@@ -41,6 +41,16 @@ describe("experimental resolve-only router", () => {
     assert.equal("model" in result, false);
   });
 
+  it("treats omitted and false virtual flags as the same physical model", () => {
+    const physical = model("fixture", "quick-model");
+    assert.doesNotThrow(() => createRouter(snapshot({
+      registry: {
+        knownModels: [{ ...physical, virtual: false }, model("fixture", "general-model", 0.4, 0.6)],
+        availableModels: [physical, model("fixture", "general-model", 0.4, 0.6)],
+      },
+    })));
+  });
+
   it("rejects malformed economic windows through the router snapshot boundary", () => {
     const economicPolicy: ReservePolicy = {
       mode: "policy",

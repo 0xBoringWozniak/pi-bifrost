@@ -1926,7 +1926,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         "agent_settled",
         observation.category === "billing_denied" ? "billing_denied" : "allowance_exhausted",
         undefined,
-        observation,
+        state.config.reliability?.allowanceCooldownScope === "model" ? observation : undefined,
       );
       if (!saved) {
         setAllowanceRetryStopReason(ctx, "Its cooldown could not be confirmed as saved, so no retry was sent.");

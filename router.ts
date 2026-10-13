@@ -336,8 +336,7 @@ function buildRegistry(snapshot: RouterRegistrySnapshot): InternalRegistry {
     if (!knownModel || availableKeys.has(key)) throw new Error("Inconsistent router registry snapshot.");
     if (knownModel.cost.input !== model.cost.input
       || knownModel.cost.output !== model.cost.output
-      || knownModel.contextWindow !== model.contextWindow
-      || snapshot.knownModels.find((knownEntry) => modelKey(knownEntry) === key)?.virtual !== model.virtual) {
+      || knownModel.contextWindow !== model.contextWindow) {
       throw new Error("Inconsistent router model metadata.");
     }
     availableKeys.add(key);

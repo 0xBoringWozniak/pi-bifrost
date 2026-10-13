@@ -189,7 +189,7 @@ export class ProviderCooldownStore {
         outcomeId: claim.outcomeId,
         settlement: { kind: "success" },
       }, claim.recoveredScopes);
-      if (result.status !== "settled" && result.status !== "duplicate") {
+      if (result.status !== "settled" && result.status !== "duplicate" && result.status !== "stale" && result.status !== "expired") {
         throw new ReliabilityV2StoreError("state_write_failed", "Provider cooldown trial settlement could not be confirmed.");
       }
     }).finally(() => { claim.finalized = true; });
@@ -224,7 +224,7 @@ export class ProviderCooldownStore {
         outcomeId: claim.outcomeId,
         leaseReferences: claim.leases,
       });
-      if (result.status !== "abandoned" && result.status !== "duplicate") {
+      if (result.status !== "abandoned" && result.status !== "duplicate" && result.status !== "stale" && result.status !== "expired") {
         throw new ReliabilityV2StoreError("state_write_failed", "Provider cooldown trial release could not be confirmed.");
       }
     }).finally(() => { claim.finalized = true; });
