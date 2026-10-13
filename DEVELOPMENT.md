@@ -99,7 +99,7 @@ Run the offline profile for release checks. It runs `verify:release` (unit, type
 npm run acceptance                         # deterministic by default
 npm run acceptance -- --profile deterministic
 npm run acceptance -- --profile contract  # native Pi SDK request-builder contracts
-npm run verify:release                     # the underlying six release gates only
+npm run verify:release                     # seven release gates (preflight + six checks) only
 ```
 
 `npm run acceptance:deterministic` remains as a compatibility alias. Unknown flags fail before a profile starts. A run writes ordered case outcomes and sanitized logs under `screenshots/acceptance/<runId>/`. Evidence records the starting and ending revision, source fingerprint and dirty Git paths, actual installed tool versions (separate from package ranges), duration, attempts, exclusions, and case artifacts. A source change during the run fails the candidate-stability case. Failed or required blocked cases return a nonzero exit code.

@@ -231,8 +231,8 @@ function conciseIssue(item) {
 }
 
 function fullIssue(item) {
-  const detail = boundedText(item.detail || item.boundary || "Review this case.", 2_000);
-  const paths = item.artifacts.length ? `\n\nArtifacts: ${item.artifacts.map(code).join(", ")}` : "";
+  const detail = boundedText(item.detail || item.boundary || "Review this case.", 300);
+  const paths = item.artifacts.length ? `\n\nArtifacts: ${item.artifacts.slice(0, 3).map((path) => code(boundedText(path, 200))).join(", ")}${item.artifacts.length > 3 ? `, and ${item.artifacts.length - 3} more in the workflow artifact` : ""}` : "";
   return `- **${statusEmoji(item.status)} ${escapeCell(item.id)}** — ${escapeCell(detail)}${paths}`;
 }
 
@@ -299,7 +299,7 @@ export function renderCiReport(inputData, context = {}) {
     `- Commit: ${code(sha)} · Run: ${code(run)} · Attempt: ${code(attempt)} · Workflow duration: ${durationText}`,
     `- Source revision: start ${code(evidence.source?.revisionAtStart || "unknown")}; end ${code(evidence.source?.revisionAtEnd || "unknown")}. Fingerprints: ${fingerprintRelation(evidence.source)}; changedDuringRun: ${evidence.source?.changedDuringRun ?? "unknown"}.`,
     `- ${evidence.profile === "live" ? "The opt-in live profile covers only its approved model and run; it does not establish support for every provider or a flake-free rate." : "Live providers were not run by deterministic CI. Fake-provider results cover only their named cases; they do not establish support for every provider or a flake-free rate."}`,
-    `- Deferred cases: ${deferred.length ? deferred.map((item) => `${code(item.id)} (${escapeCell(item.boundary || "scope deferred")})`).join(", ") : "none recorded"}.`,
+    `- Deferred cases: ${deferred.length ? deferred.slice(0, 5).map((item) => `${code(item.id)} (${escapeCell(item.boundary || "scope deferred")})`).join(", ") + (deferred.length > 5 ? `, and ${deferred.length - 5} more in the evidence` : "") : "none recorded"}.`,
     `- ${workflowLinks}`,
     "- This report describes recorded checks for one commit. The PR controls the workflow producer and test code, so review those changes before relying on the result. It is not a probability of correctness or a claim that all product requirements are covered.",
     "",

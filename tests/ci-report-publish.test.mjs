@@ -115,6 +115,31 @@ test("creates one candidate-bound comment for a fork PR after all release gates 
   assert.equal(value.calls.create[0].body.includes("fork-owner"), false);
 });
 
+test("keeps closing provenance when a failing report exceeds the old comment cap", async () => {
+  const value = fixture({ conclusion: "failure" });
+  value.report.evidence.cases.push(...Array.from({ length: 8 }, (_, index) => ({
+    id: `failure-${index}-${"@".repeat(180)}`,
+    status: "failed",
+    required: true,
+    detail: "@".repeat(2_000),
+    artifacts: Array(30).fill("`".repeat(1_000)),
+  })));
+  value.report.evidence.cases.push(...Array.from({ length: 400 }, (_, index) => ({
+    id: `deferred-${index}-${"@".repeat(180)}`,
+    status: "deferred",
+    required: false,
+    boundary: "@".repeat(300),
+  })));
+  const result = await publishWorkflowRun({ ...value, serverUrl: "https://github.com", reportData: value.report });
+  assert.equal(result.status, "published");
+  const body = value.calls.create[0].body;
+  assert.ok(Buffer.byteLength(body) > 10_000);
+  assert.ok(Buffer.byteLength(body) <= 65_000);
+  assert.match(body, /and 27 more in the workflow artifact/u);
+  assert.match(body, /PR controls the workflow producer and test code/u);
+  assert.ok(body.endsWith("</details>\n"));
+});
+
 test("updates only a marker comment owned by github-actions[bot]", async () => {
   const value = fixture();
   value.state.comments = [

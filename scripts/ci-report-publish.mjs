@@ -77,7 +77,8 @@ export async function publishWorkflowRun({ event, repository, serverUrl, api, re
       serverUrl,
       conclusion: event.action === "in_progress" ? "in_progress" : confirmed.run.conclusion ?? "failure",
     });
-    const body = `${COMMENT_MARKER}\n${rendered.markdown}`.slice(0, 10_000);
+    const body = `${COMMENT_MARKER}\n${rendered.markdown}`;
+    if (Buffer.byteLength(body) > 65_000) throw new Error("Rendered CI report exceeds the GitHub comment limit");
     const comments = await api.listIssueComments(repository, prNumber);
     const existing = comments.filter((comment) => comment.user?.login === "github-actions[bot]"
       && comment.user?.type === "Bot" && typeof comment.body === "string" && comment.body.includes(COMMENT_MARKER))
