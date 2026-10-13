@@ -266,7 +266,8 @@ export function renderCiReport(inputData, context = {}) {
   const report = [
     "## Pi-Bifrost CI",
     "",
-    `> **PR confidence: ${confidenceVisual(confidence.state)}** · 🟩 ${counts.passed} passed · 🟥 ${counts.failed} failed · 🟨 ${counts.blocked} blocked · ⬜ ${counts.missing} missing · ⏳ ${counts.deferred} deferred`,
+    `> **PR confidence: ${confidenceVisual(confidence.state)} (required checks only)** · 🟩 ${counts.passed} passed · 🟥 ${counts.failed} failed · 🟨 ${counts.blocked} blocked · ⬜ ${counts.missing} missing · ⏳ ${counts.deferred} deferred`,
+    `> **${scope}**`,
     `> **Workflow result: ${{ success: "🟢 PASS", failure: "🔴 FAIL", cancelled: "🔴 CANCELLED", in_progress: "⏳ PENDING" }[context.conclusion] ?? "⬜ UNKNOWN"}** · Passing checks alone do not clear required acceptance cases.`,
     "",
     `SHA ${code(sha.slice(0, 7))} · Run ${code(run)} · Attempt ${code(attempt)} · ${durationText} · Profile: ${code(evidence.profile || "unknown")} · ${workflowLinks}`,
@@ -284,8 +285,6 @@ export function renderCiReport(inputData, context = {}) {
     "### Action needed",
     "",
     ...(issues.length ? issues.slice(0, 2).map((item) => `- **${statusEmoji(item.status)} ${escapeCell(item.id)}** — ${escapeCell(conciseIssue(item))}`) : confidence.reasons.length ? confidence.reasons.slice(0, 2).map((reason) => `- ${escapeCell(reason)}`) : ["- No failed, blocked, or missing required cases were recorded." ]),
-    "",
-    scope,
     "",
     "<details>",
     "<summary>Full issues, provenance, deferred work, and evidence paths</summary>",

@@ -30,6 +30,7 @@ describe("CI report", () => {
     assert.equal(rendered.confidence.state, "BLOCKED");
     assert.deepEqual(rendered.counts, { passed: 53, failed: 0, blocked: 1, missing: 0, deferred: 1 });
     assert.match(rendered.markdown, /PR confidence: 🔴 BLOCKED/);
+    assert.match(rendered.markdown, /PR confidence: 🔴 BLOCKED \(required checks only\)[^\n]*\n> \*\*Scope: Pi \+ fake providers; live providers not tested; PRD coverage partial\.\*\*/);
     assert.match(renderCiReport(fixture, { ...trustedContext, conclusion: "failure" }).markdown, /Workflow result: 🔴 FAIL/);
     assert.match(rendered.markdown, /first-use-unverified-route-product-gap/);
     assert.match(rendered.markdown, /deferred:r13:stable-versioned-api/);
