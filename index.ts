@@ -1441,7 +1441,23 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         && (state.configGeneration ?? 0) === generationAfterInstall
         && resolve(process.cwd()) === record.projectRoot
         && !record.controller.signal.aborted;
-      const canProbe = (model: Model<Api>): boolean => {
+      const readProbeEligibilitySnapshot = (models: readonly Model<Api>[]) => {
+        try {
+          const now = Date.now();
+          const reliability = state.reliabilityV2Store
+            ? projectReliabilityV2ForRouting(state.reliabilityV2Store.readSnapshot(), reliabilityV2Config(state.config.reliability), now)
+            : state.reliabilityStore.getState();
+          const providerChecks = providerCooldownsEnabled();
+          if (providerChecks && (providerCooldownWriteFailed || !state.providerCooldownStore)) return undefined;
+          const providers = providerChecks
+            ? state.providerCooldownStore!.readMany(models.map((model) => model.provider),
+              state.config.reliability?.cooldownOnAllowanceExhausted !== false
+                && state.config.reliability?.allowanceCooldownScope !== "model", now)
+            : undefined;
+          return { now, reliability, providers };
+        } catch { return undefined; }
+      };
+      const canProbe = (model: Model<Api>, snapshot?: NonNullable<ReturnType<typeof readProbeEligibilitySnapshot>>): boolean => {
         if (!recordOwnsConfig()) {
           record.controller.abort();
           return false;
@@ -1458,26 +1474,27 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         }
         try {
           if (pendingDeniedProviders.has(model.provider)) return false;
-          const now = Date.now();
-          const reliability = state.reliabilityV2Store
+          const now = snapshot?.now ?? Date.now();
+          const reliability = snapshot?.reliability ?? (state.reliabilityV2Store
             ? projectReliabilityV2ForRouting(state.reliabilityV2Store.readSnapshot(), reliabilityV2Config(state.config.reliability), now)
-            : state.reliabilityStore.getState();
+            : state.reliabilityStore.getState());
           const circuit = getCircuitState(reliability, modelKey(model), now, state.config.reliability);
           if (circuit.open || circuit.trialActive || hasActiveAllowanceCooldown(reliability, modelKey(model), now)) return false;
           if (providerCooldownsEnabled()) {
             if (providerCooldownWriteFailed || !state.providerCooldownStore) return false;
-            const provider = state.providerCooldownStore.read(
+            const provider = snapshot ? snapshot.providers?.get(model.provider) : state.providerCooldownStore.read(
               model.provider,
               state.config.reliability?.cooldownOnAllowanceExhausted !== false
                 && state.config.reliability?.allowanceCooldownScope !== "model",
               now,
             );
-            if (provider.openUntil !== undefined || provider.trialActive || provider.recoveryPending) return false;
+            if (!provider || provider.openUntil !== undefined || provider.trialActive || provider.recoveryPending) return false;
           }
           return true;
         } catch { return false; }
       };
-      const probeModels = catalogModels.filter(canProbe);
+      const initialEligibility = readProbeEligibilitySnapshot(catalogModels);
+      const probeModels = initialEligibility ? catalogModels.filter((model) => canProbe(model, initialEligibility)) : [];
       if (probeModels.length === 0) {
         autoBootstrapRecords.delete(record);
         clearAutoBootstrapProgress(ctx, record);
@@ -1541,9 +1558,10 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           return;
         }
         const currentModels = new Map(currentCatalogModels.map((model) => [modelKey(model), model]));
+        const finalEligibility = readProbeEligibilitySnapshot(currentCatalogModels);
         const verified = new Set(results.filter((result) => result.status === "ok"
           && currentModels.has(`${result.provider}/${result.model}`)
-          && canProbe(currentModels.get(`${result.provider}/${result.model}`)!))
+          && finalEligibility && canProbe(currentModels.get(`${result.provider}/${result.model}`)!, finalEligibility))
           .map((result) => `${result.provider}/${result.model}`));
         const verifiedModels = Object.fromEntries(Object.keys(nextConfig.models ?? {}).map((tier) => [
           tier,

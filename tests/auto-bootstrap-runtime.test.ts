@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionContext, ModelRouteRequest, VirtualModelDef
 import bifrostExtension from "../index.ts";
 import { loadConfigForReload, validateConfig } from "../config.ts";
 import { TYPE_SAFE_API_KEY_ENV } from "../classifier-backends.ts";
+import { ReliabilityV2Store } from "../reliability-v2-store.ts";
 import { BIFROST_AUTO_ID, BIFROST_AUTO_PROVIDER } from "../virtual-model.ts";
 import { makeModel } from "./helpers.ts";
 
@@ -239,6 +240,39 @@ describe("automatic setup through registered Pi hooks", () => {
       await flushImmediate();
       await flushImmediate();
     } finally { harness.cleanup(); }
+  });
+
+  it("bounds durable provider reads across 100-model bootstrap scans", async () => {
+    const original = ReliabilityV2Store.prototype.readSnapshot;
+    let reads = 0;
+    ReliabilityV2Store.prototype.readSnapshot = function (...args) {
+      reads++;
+      return original.apply(this, args);
+    };
+    const harness = freshHarness(false, undefined, true);
+    try {
+      harness.setAvailable([
+        harness.model,
+        ...Array.from({ length: 99 }, (_, index) => makeModel("fixture", `other-${index}`)),
+      ]);
+      await harness.handlers.get("session_start")!({}, harness.ctx);
+      await harness.probeStarted;
+      assert.ok(reads < 10, `100-model scan made ${reads} durable reads before probes settled`);
+      harness.completeProbe();
+      await flushImmediate();
+      await flushImmediate();
+      assert.equal(existsSync(join(process.cwd(), ".pi", "bifrost.json")), true);
+      assert.ok(reads < 120, `100-model bootstrap made ${reads} durable reads including fresh probe admission`);
+    } finally {
+      try {
+        await harness.handlers.get("session_shutdown")!({}, harness.ctx);
+        harness.completeProbe();
+        await flushImmediate();
+      } finally {
+        ReliabilityV2Store.prototype.readSnapshot = original;
+        harness.cleanup();
+      }
+    }
   });
 
   it("does not touch a torn-down UI when a cancelled background check settles", async () => {
