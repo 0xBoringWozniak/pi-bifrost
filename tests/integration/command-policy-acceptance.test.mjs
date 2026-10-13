@@ -402,11 +402,14 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       assert.equal(afterStats.catalogRequests, beforeStats.catalogRequests,
         "the command boundary should not make hidden catalog requests beyond its explicit refresh operation");
     } finally {
-      const stopped = await rpc.close();
-      assert.equal(stopped.code, 0);
-      assert.equal(stopped.violations, "");
-      rmSync(env.home, { recursive: true, force: true });
-      rmSync(env.work, { recursive: true, force: true });
+      try {
+        const stopped = await rpc.close();
+        assert.equal(stopped.code, 0);
+        assert.equal(stopped.violations, "");
+      } finally {
+        rmSync(env.home, { recursive: true, force: true });
+        rmSync(env.work, { recursive: true, force: true });
+      }
     }
   });
 
@@ -539,13 +542,15 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
         "the model-scoped pause must exclude the failed model on the following turn");
       assert.equal((afterSecond.attempts.sibling ?? 0) - (afterFailure.attempts.sibling ?? 0), 1,
         "the next Auto turn should use the healthy sibling on the same provider");
-      const stopped = await rpc.close();
-      assert.equal(stopped.code, 0);
-      assert.equal(stopped.violations, "");
     } finally {
-      await rpc.close();
-      rmSync(env.home, { recursive: true, force: true });
-      rmSync(env.work, { recursive: true, force: true });
+      try {
+        const stopped = await rpc.close();
+        assert.equal(stopped.code, 0);
+        assert.equal(stopped.violations, "");
+      } finally {
+        rmSync(env.home, { recursive: true, force: true });
+        rmSync(env.work, { recursive: true, force: true });
+      }
     }
   });
 });
