@@ -51,7 +51,9 @@ function checkDependencies(dependencies, baseBranch, baseOid) {
     if (dependency?.kind === "issue") {
       if (dependency.state !== "CLOSED") return "issue dependency missing, unknown, or open";
     } else if (dependency?.kind === "pr") {
-      if (dependency.state !== "CLOSED" || !dependency.mergedAt || !Number.isFinite(Date.parse(dependency.mergedAt))
+      // `gh pr view --json state` returns "MERGED" for merged PRs; eligibility
+      // normalizes on mergedAt + integration into the current base tip.
+      if (!["MERGED", "CLOSED"].includes(dependency.state) || !dependency.mergedAt || !Number.isFinite(Date.parse(dependency.mergedAt))
         || dependency.base !== baseBranch || dependency.integrated !== true) {
         return "PR dependency not merged into the current base";
       }
@@ -149,7 +151,7 @@ function runEvidence(repo, workflowId, head) {
   if (!candidateRuns.length) return [];
   const latest = candidateRuns[0];
   const jobs = ghJson(["api", `repos/${repo}/actions/runs/${latest.id}/jobs?per_page=100`]).jobs ?? [];
-  return [{ head_sha: latest.head_sha, event: latest.event, workflow_path: WORKFLOW_PATH,
+  return [{ head_sha: latest.head_sha, event: latest.event, workflow_path: latest.path,
     conclusion: latest.conclusion, jobs: jobs.map((job) => ({ name: job.name, conclusion: job.conclusion })) }];
 }
 

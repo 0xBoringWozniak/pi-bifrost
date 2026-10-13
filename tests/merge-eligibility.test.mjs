@@ -59,13 +59,16 @@ test("rejects missing author identity and unknown draft state", () => {
 });
 
 test("requires issue reference and all declared dependencies to be integrated into v2", () => {
-  const merged = { kind: "pr", number: 35, state: "CLOSED", mergedAt: "2026-01-01T00:00:00Z", base: "v2", integrated: true };
+  // Real `gh pr view --json state` shape for a merged PR is state:"MERGED".
+  const merged = { kind: "pr", number: 35, state: "MERGED", mergedAt: "2026-01-01T00:00:00Z", base: "v2", integrated: true };
   assert.equal(evaluate({ dependencies: [merged] }).eligible, true);
+  assert.equal(evaluate({ dependencies: [{ ...merged, state: "CLOSED" }] }).eligible, true);
   for (const dependency of [
     { ...merged, state: "OPEN", mergedAt: undefined },
     { ...merged, mergedAt: undefined },
     { ...merged, base: "main" },
     { ...merged, integrated: false },
+    { ...merged, state: "WEIRD" },
     { kind: "issue", number: 37, state: "OPEN" },
     { kind: "unknown", number: 37 },
   ]) assert.equal(evaluate({ dependencies: [dependency] }).eligible, false);
