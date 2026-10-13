@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { makeReportData, renderCiReport } from "./ci-report.mjs";
+import { MAX_REPORT_BYTES, makeReportData, renderCiReport } from "./ci-report.mjs";
 
 export const COMMENT_MARKER = "<!-- bifrost-acceptance-report:v1 -->";
 const WORKFLOW_PATH = ".github/workflows/verification.yml";
 const MAX_ARCHIVE_BYTES = 1024 * 1024;
-const MAX_REPORT_BYTES = 512 * 1024;
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const isSha = (value) => typeof value === "string" && /^[a-f0-9]{40}$/i.test(value);
 const isFingerprint = (value) => typeof value === "string" && /^[a-f0-9]{64}$/i.test(value);

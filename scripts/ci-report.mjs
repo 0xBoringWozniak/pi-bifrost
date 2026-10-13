@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const REPORT_SCHEMA_VERSION = 1;
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
-const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
+export const MAX_REPORT_BYTES = 512 * 1024;
 const MAX_CASES = 500;
 const MAX_CAUSE_DEPTH = 2;
 const STATUSES = new Set(["passed", "failed", "blocked", "missing", "deferred"]);
@@ -106,7 +106,7 @@ export function makeReportData(evidence) {
     })),
   };
   const output = { schemaVersion: REPORT_SCHEMA_VERSION, evidence: safeEvidence };
-  if (Buffer.byteLength(JSON.stringify(output)) > MAX_OUTPUT_BYTES) throw new Error("Normalized report data exceeds the size limit");
+  if (Buffer.byteLength(JSON.stringify(output)) > MAX_REPORT_BYTES) throw new Error("Normalized report data exceeds the size limit");
   return output;
 }
 
@@ -313,7 +313,7 @@ export function writeCiReport({ evidence, outputDir, context = {} }) {
   mkdirSync(outputDir, { recursive: true });
   const dataPath = join(outputDir, "report-data.json");
   const markdownPath = join(outputDir, "ci-report.md");
-  writeFileSync(dataPath, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+  writeFileSync(dataPath, JSON.stringify(data), { mode: 0o600 });
   writeFileSync(markdownPath, renderCiReport(data, context).markdown, { mode: 0o600 });
   return { dataPath, markdownPath };
 }

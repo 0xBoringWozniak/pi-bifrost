@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { makeReportData, renderCiReport } from "../scripts/ci-report.mjs";
+import { MAX_REPORT_BYTES, makeReportData, renderCiReport, writeCiReport } from "../scripts/ci-report.mjs";
 import {
   COMMENT_MARKER,
   publishWorkflowRun,
@@ -124,7 +124,7 @@ test("keeps closing provenance when a failing report exceeds the old comment cap
     detail: "@".repeat(2_000),
     artifacts: Array(30).fill("`".repeat(1_000)),
   })));
-  value.report.evidence.cases.push(...Array.from({ length: 400 }, (_, index) => ({
+  value.report.evidence.cases.push(...Array.from({ length: 200 }, (_, index) => ({
     id: `deferred-${index}-${"@".repeat(180)}`,
     status: "deferred",
     required: false,
@@ -281,6 +281,32 @@ test("validates only the exact SHA, run, and attempt artifact name and report di
     mkdirSync(join(root, "2026-10-12T10-00-00-000Z"));
     writeFileSync(join(root, "2026-10-12T10-00-00-000Z", "report-data.json"), JSON.stringify(reportData()));
     assert.equal(validateReportData(readReportDataDirectory(root))?.evidence.profile, "deterministic");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every accepted report fits the publisher's file limit", () => {
+  const root = mkdtempSync(join(tmpdir(), "bifrost-report-limit-"));
+  try {
+    const evidence = reportData().evidence;
+    evidence.cases = Array.from({ length: 200 }, (_, index) => ({
+      id: `case-${index}`,
+      status: "passed",
+      detail: "x".repeat(2_000),
+    }));
+    const output = writeCiReport({ evidence, outputDir: root });
+    assert.ok(readFileSync(output.dataPath).byteLength <= MAX_REPORT_BYTES);
+    assert.ok(readReportDataDirectory(root) === undefined, "publisher input stays JSON-only");
+    rmSync(output.markdownPath);
+    assert.ok(readReportDataDirectory(root));
+
+    evidence.cases = Array.from({ length: 300 }, (_, index) => ({
+      id: `case-${index}`,
+      status: "passed",
+      detail: "x".repeat(2_000),
+    }));
+    assert.throws(() => makeReportData(evidence), /size limit/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
