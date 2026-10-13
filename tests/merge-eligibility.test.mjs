@@ -96,7 +96,10 @@ test("CLI main-module detection works when script path contains spaces", () => {
     const script = join(spacedDir, "merge eligibility.mjs");
     copyFileSync(new URL("../scripts/merge-eligibility.mjs", import.meta.url), script);
     chmodSync(script, 0o755);
-    const result = spawnSync(process.execPath, [script], { encoding: "utf8" });
+    const scrubbedEnv = { ...process.env };
+    delete scrubbedEnv.GH_TOKEN;
+    delete scrubbedEnv.GITHUB_TOKEN;
+    const result = spawnSync(process.execPath, [script], { encoding: "utf8", env: scrubbedEnv });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Usage: node scripts\/merge-eligibility\.mjs/);
   } finally {

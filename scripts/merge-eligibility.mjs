@@ -154,9 +154,9 @@ function runEvidence(repo, workflowId, head) {
 }
 
 function main() {
-  const repo = process.env.GITHUB_REPOSITORY ?? ghJson(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
   const number = process.argv[2];
   if (!/^\d+$/.test(number ?? "")) throw new Error("Usage: node scripts/merge-eligibility.mjs <pr-number>");
+  const repo = process.env.GITHUB_REPOSITORY ?? ghJson(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
   const pr = ghJson(["pr", "view", number, "--repo", repo, "--json", "headRefOid,baseRefName,baseRefOid,isDraft,body,author"]);
   const workflow = ghJson(["api", `repos/${repo}/actions/workflows/verification.yml`]);
   const baseWorkflow = ghJson(["api", `repos/${repo}/contents/${WORKFLOW_PATH}?ref=${pr.baseRefOid}`]);
