@@ -338,7 +338,6 @@ export function exportCiReportIfConfigured({ isMain, profile, evidence, artifact
   if (env.GITHUB_OUTPUT) {
     appendFileSync(env.GITHUB_OUTPUT, `report-markdown=${reportPath}\nreport-data=${dataPath}\n`, { mode: 0o600 });
   }
-  if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, readFileSync(reportPath), { mode: 0o600 });
   return outputs;
 }
 

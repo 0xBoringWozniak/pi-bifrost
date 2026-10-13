@@ -77,6 +77,13 @@ jobs:
           path: ${{ steps.acceptance.outputs.report-data }}
           if-no-files-found: ignore
           retention-days: 7
+      - name: Preserve report data across checkouts
+        if: always() && github.event_name == 'pull_request'
+        env:
+          REPORT_DATA: ${{ steps.acceptance.outputs.report-data }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bifrost-report-input"
+          if [ -f "$REPORT_DATA" ]; then cp "$REPORT_DATA" "$RUNNER_TEMP/bifrost-report-input/report-data.json"; fi
 
       - name: Check out the proposed merge
         if: github.event_name == 'pull_request'
@@ -87,10 +94,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: npm ci
       - name: Run acceptance on the proposed merge
+        id: merge-acceptance
         if: github.event_name == 'pull_request'
         run: npm run acceptance:deterministic
       - name: Upload merge-result evidence
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && (steps.merge-acceptance.outcome == 'success' || steps.merge-acceptance.outcome == 'failure')
         uses: actions/upload-artifact@v4
         with:
           name: merge-result-evidence-${{ github.sha }}
@@ -98,3 +106,43 @@ jobs:
             screenshots/verification/**/result.json
             screenshots/acceptance/**
           if-no-files-found: ignore
+
+      - name: Render final candidate report
+        if: always() && github.event_name == 'pull_request'
+        env:
+          REPORT_INPUT: ${{ runner.temp }}/bifrost-report-input/report-data.json
+          REPORT_OUTPUT: ${{ runner.temp }}/bifrost-final-report/ci-report.md
+          REPORT_SHA: ${{ github.event.pull_request.head.sha }}
+          REPORT_RUN_ID: ${{ github.run_id }}
+          REPORT_ATTEMPT: ${{ github.run_attempt }}
+          REPORT_REPOSITORY: ${{ github.repository }}
+          REPORT_SERVER_URL: ${{ github.server_url }}
+          RELEASE_RESULT: ${{ job.status }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { dirname } from 'node:path';
+          import { renderCiReport } from './scripts/ci-report.mjs';
+          let data = null;
+          try { data = JSON.parse(readFileSync(process.env.REPORT_INPUT, 'utf8')); } catch {}
+          const { markdown, confidence } = renderCiReport(data, {
+            trusted: true,
+            sha: process.env.REPORT_SHA,
+            runId: process.env.REPORT_RUN_ID,
+            attempt: process.env.REPORT_ATTEMPT,
+            repository: process.env.REPORT_REPOSITORY,
+            serverUrl: process.env.REPORT_SERVER_URL,
+            conclusion: process.env.RELEASE_RESULT,
+          });
+          mkdirSync(dirname(process.env.REPORT_OUTPUT), { recursive: true });
+          writeFileSync(process.env.REPORT_OUTPUT, markdown);
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
+          if (process.env.RELEASE_RESULT === 'success' && confidence.state !== 'VERIFIED CHECKS') process.exitCode = 1;
+          NODE
+      - name: Upload final candidate report
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-ci-report-${{ github.event.pull_request.head.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bifrost-final-report/ci-report.md
+          if-no-files-found: error

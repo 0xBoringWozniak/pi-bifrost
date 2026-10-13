@@ -249,6 +249,6 @@ describe("CI report", () => {
     const githubOutputs = readFileSync(outputFile, "utf8");
     assert.match(githubOutputs, new RegExp(`^report-markdown=${join(directory, "ci-report.md")}\\n`, "u"));
     assert.match(githubOutputs, new RegExp(`report-data=${join(directory, "report-data.json")}\\n`, "u"));
-    assert.equal(readFileSync(summaryFile, "utf8"), readFileSync(join(directory, "ci-report.md"), "utf8"));
+    assert.equal(readFileSync(summaryFile, "utf8"), "", "the final CI job owns the workflow summary");
   });
 });
