@@ -896,7 +896,7 @@ function sourcePolicyDiagnostics(value: Record<string, unknown>): string[] {
   return diagnostics;
 }
 
-function readBoundedConfigText(path: string): { readonly text?: string; readonly oversized?: true } {
+function readBoundedConfigText(path: string): { readonly text?: string; readonly oversized?: true; readonly invalidUtf8?: true } {
   const beforeOpen = statSync(path);
   if (!beforeOpen.isFile()) throw new Error("not a regular config file");
   if (beforeOpen.size > MAX_CONFIG_SOURCE_BYTES) return { oversized: true };
@@ -915,7 +915,8 @@ function readBoundedConfigText(path: string): { readonly text?: string; readonly
       chunks.push(chunk.subarray(0, count));
     }
     if (total > MAX_CONFIG_SOURCE_BYTES) return { oversized: true };
-    return { text: Buffer.concat(chunks, total).toString("utf8") };
+    try { return { text: new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total)) }; }
+    catch { return { invalidUtf8: true }; }
   } finally {
     closeSync(fd);
   }
@@ -954,6 +955,10 @@ function loadConfigLayers(
           const readResult = readBoundedConfigText(path);
           if (readResult.oversized) {
             addDiagnostic(layer, `${layer} config exceeds the ${MAX_CONFIG_SOURCE_BYTES}-byte size limit.`);
+            continue;
+          }
+          if (readResult.invalidUtf8) {
+            addDiagnostic(layer, `${layer} config is not valid UTF-8.`);
             continue;
           }
           text = readResult.text;

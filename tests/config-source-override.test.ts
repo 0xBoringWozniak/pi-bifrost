@@ -91,6 +91,23 @@ describe("config source override loading", () => {
     });
   });
 
+  it("rejects malformed UTF-8 equally in saved and prospective config", () => {
+    withConfigTree(({ cwd, extensionDir }) => {
+      const bytes = Buffer.concat([
+        Buffer.from('{"debug":{"path":"'), Buffer.from([0xff]), Buffer.from('"}}'),
+      ]);
+      const path = join(cwd, ".pi", "bifrost.json");
+      fs.mkdirSync(join(cwd, ".pi"), { recursive: true });
+      fs.writeFileSync(path, bytes);
+      const saved = loadConfigForReload(cwd, extensionDir);
+      const prospective = loadConfigWithSourceOverride(cwd, extensionDir, "project", bytes);
+      assert.deepEqual(saved.diagnostics, prospective.diagnostics);
+      assert.deepEqual(saved.diagnostics.map(({ layer, message }) => [layer, message]),
+        [["project", "project config is not valid UTF-8."]]);
+      assert.equal(saved.sourceFields.some(({ layer }) => layer === "project"), false);
+    });
+  });
+
   it("rejects an unsupported version in the selected layer before a higher layer can mask it", () => {
     withConfigTree(({ cwd, extensionDir }) => {
       writeJson(join(cwd, ".pi", "bifrost.json"), { schemaVersion: 2 });
