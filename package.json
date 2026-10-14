@@ -49,6 +49,10 @@
     "minPiVersion": "1.0.1",
     "image": "https://iamaamir.github.io/pi-bifrost/social-card.png"
   },
+  "crap": {
+    "threshold": 30,
+    "coverage": "coverage/coverage-final.json"
+  },
   "scripts": {
     "build:router": "node scripts/build-router.mjs",
     "prepack": "npm run build:router",
