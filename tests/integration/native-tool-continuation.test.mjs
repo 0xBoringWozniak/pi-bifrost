@@ -31,17 +31,19 @@ async function waitForGroupTermination(pid, timeoutMs) {
   while (Date.now() < deadline) {
     try {
       process.kill(-pid, 0);
-    } catch {
-      return;
+    } catch (error) {
+      if (error && error.code === "ESRCH") return;
+      throw error;
     }
     await delay(20);
   }
   try {
     process.kill(-pid, 0);
-    throw new Error("owned process group did not terminate: " + pid);
-  } catch {
-    return;
+  } catch (error) {
+    if (error && error.code === "ESRCH") return;
+    throw error;
   }
+  throw new Error("owned process group did not terminate: " + pid);
 }
 
 function runNode(args, options) {
@@ -149,7 +151,9 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
   const scratch = mkdtempSync(join(tmpdir(), "bifrost-native-tool-continuation-"));
   const violations = join(scratch, "network-violations.log");
   const server = createServer((_request, response) => response.end("allowed loopback fixture"));
+  writeFileSync(violations, "");
   const previousCredentials = Object.fromEntries(credentials.map((name) => [name, process.env[name]]));
+  let cleanupVerified = false;
   try {
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -213,11 +217,12 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
     const result = await runNode(["--test", "--experimental-strip-types", child], { cwd: root, env: childEnv });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(readFileSync(violations, "utf8"), "", "faux AgentSession made blocked outbound attempt");
+    cleanupVerified = true;
   } finally {
     for (const [name, value] of Object.entries(previousCredentials)) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
     await new Promise((resolve) => server.close(resolve));
-    rmSync(scratch, { recursive: true, force: true });
+    if (cleanupVerified) rmSync(scratch, { recursive: true, force: true });
   }
 });
