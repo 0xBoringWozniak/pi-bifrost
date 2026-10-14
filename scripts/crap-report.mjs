@@ -35,7 +35,8 @@
  *   "crap": {
  *     "threshold": 30,
  *     "coverage": "coverage/coverage-final.json",
- *     "failAbove": null
+ *     "failAbove": null,
+ *     "history": "docs/quality/crap-history.jsonl"
  *   }
  *
  * Precedence: CLI flag > package.json "crap" block > built-in default.
@@ -543,6 +544,14 @@ export function renderTrend(records, threshold) {
       "",
       "A revision marked * was recorded with uncommitted changes, so it does " +
         "not describe a frozen candidate.",
+    );
+  }
+  const thresholds = [...new Set(records.map((record) => record.threshold))];
+  if (thresholds.length > 1) {
+    lines.push(
+      "",
+      `These snapshots used different thresholds (${thresholds.join(", ")}), ` +
+        "so their flagged counts are not directly comparable.",
     );
   }
   return lines.join("\n");
