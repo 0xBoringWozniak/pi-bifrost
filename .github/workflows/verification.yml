@@ -40,6 +40,28 @@ jobs:
           BIFROST_CI_REPORT_REPOSITORY: ${{ github.repository }}
           BIFROST_CI_REPORT_SERVER_URL: ${{ github.server_url }}
         run: npm run acceptance
+      - name: Refresh CRAP trend history
+        if: always()
+        env:
+          CRAP_HISTORY: ${{ runner.temp }}/crap-history.jsonl
+        run: |
+          if [ -f docs/quality/crap-history.jsonl ]; then
+            cp docs/quality/crap-history.jsonl "$CRAP_HISTORY"
+          else
+            : > "$CRAP_HISTORY"
+          fi
+          npm run test:coverage
+          node scripts/crap-report.mjs --record --history "$CRAP_HISTORY"
+
+      - name: Upload CRAP trend history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crap-history-${{ github.event.pull_request.head.sha || github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/crap-history.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Upload failure logs and UI screenshots
         if: failure()
         uses: actions/upload-artifact@v4
@@ -117,6 +139,7 @@ jobs:
           REPORT_ATTEMPT: ${{ github.run_attempt }}
           REPORT_REPOSITORY: ${{ github.repository }}
           REPORT_SERVER_URL: ${{ github.server_url }}
+          CRAP_HISTORY: ${{ runner.temp }}/crap-history.jsonl
           RELEASE_RESULT: ${{ job.status }}
         run: |
           node --input-type=module <<'NODE'
@@ -133,6 +156,7 @@ jobs:
             repository: process.env.REPORT_REPOSITORY,
             serverUrl: process.env.REPORT_SERVER_URL,
             conclusion: process.env.RELEASE_RESULT,
+            crapHistoryPath: process.env.CRAP_HISTORY,
           });
           mkdirSync(dirname(process.env.REPORT_OUTPUT), { recursive: true });
           writeFileSync(process.env.REPORT_OUTPUT, markdown);
