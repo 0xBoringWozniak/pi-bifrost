@@ -7,51 +7,59 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execPath } from "node:process";
+import { processGroupExists, terminateProcessGroup } from "../../scripts/acceptance/core.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
 const PI = join(ROOT, "node_modules", ".bin", "pi");
 const EXTENSION = join(__dirname, "..", "fixtures", "child-auto-inline-extension.mjs");
+const DESCENDANT_CLI = join(__dirname, "..", "fixtures", "child-auto-descendant-cli.mjs");
 const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
 const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 const CREDENTIALS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
 
 let fakePort;
-const observedClosedChildren = new WeakSet();
-const closeWaiters = new WeakMap();
-// Upper bound for awaiting the close event. A descendant that inherits a
+const trackedChildren = new WeakMap();
+// Upper bound for awaiting the close event. A descendant that inherited a
 // child's stdio can hold the pipe open after the child itself has exited, so
 // the wait is bounded to keep a leak from hanging the suite indefinitely.
 const CLOSE_WAIT_MS = 10_000;
+// Bounds for the owned-descendant path: a child that never reaches close is
+// terminated as the leader of a process group this suite owns, and the result
+// is only true when the real close event then arrives.
+const DESCENDANT_GRACE_MS = 2_000;
+const DESCENDANT_CLEANUP_MS = 5_000;
 
-function childStreamsClosed(child) {
-  const streams = [child.stdin, child.stdout, child.stderr].filter(Boolean);
-  return streams.length === 0 || streams.every((stream) => stream.closed === true);
+// Every child this suite owns is spawned as the leader of its own process group
+// and has its close event tracked from creation. "Closed" is therefore an
+// observed event, never an inference from an exit code or from pipe state.
+function spawnOwned(command, args, options = {}) {
+  const child = spawn(command, args, { detached: process.platform !== "win32", ...options });
+  let markClosed;
+  const observed = new Promise((resolve) => { markClosed = resolve; });
+  const tracking = { isClosed: false, observed };
+  child.once("close", () => {
+    tracking.isClosed = true;
+    markClosed(true);
+  });
+  trackedChildren.set(child, tracking);
+  return child;
 }
 
-// Resolves true once close has been observed and false when the bounded wait
-// expires. Exit alone is never evidence of close: 'close' follows 'exit' only
-// after every stdio stream closes, so a still-running child is never treated
-// as closed just because its pipes ended, and an exited child with a
-// descendant-held pipe is never treated as closed either.
-function waitForChildClose(child, boundMs = CLOSE_WAIT_MS) {
-  if (observedClosedChildren.has(child)) return Promise.resolve(true);
-  const exited = child.exitCode !== null || child.signalCode !== null;
-  if (exited && childStreamsClosed(child)) return Promise.resolve(true);
-  let waiter = closeWaiters.get(child);
-  if (!waiter) {
-    waiter = new Promise((resolve) => {
-      child.once("close", () => {
-        observedClosedChildren.add(child);
-        closeWaiters.delete(child);
-        resolve(true);
-      });
-    });
-    closeWaiters.set(child, waiter);
-  }
+function closeTracking(child) {
+  const tracking = trackedChildren.get(child);
+  if (!tracking) throw new Error("child was not created by spawnOwned, so its close event is not tracked");
+  return tracking;
+}
+
+// Resolves true only when the close event has actually been observed. False
+// means the bound expired with a descendant still holding an inherited pipe.
+function waitForObservedClose(child, boundMs = CLOSE_WAIT_MS) {
+  const tracking = closeTracking(child);
+  if (tracking.isClosed) return Promise.resolve(true);
   let bound;
   return Promise.race([
-    waiter,
+    tracking.observed,
     new Promise((resolve) => { bound = setTimeout(() => resolve(false), boundMs); }),
   ]).then((observed) => {
     clearTimeout(bound);
@@ -59,14 +67,30 @@ function waitForChildClose(child, boundMs = CLOSE_WAIT_MS) {
   });
 }
 
-function stopChild(child, graceMs = 1_000) {
-  const close = waitForChildClose(child);
+// Terminates an owned child and resolves true only when its close event was
+// observed. A child whose descendants keep the inherited pipes open can never
+// reach close on its own, so the owned process group is terminated and the
+// real close event is still required before this reports success. False means
+// cleanup could not be verified, and callers must fail rather than assume.
+async function stopChild(child, graceMs = 1_000) {
+  if (closeTracking(child).isClosed) return true;
   const alreadyExited = child.exitCode !== null || child.signalCode !== null;
-  if (alreadyExited) return close;
-  const forceKill = setTimeout(() => child.kill("SIGKILL"), graceMs);
-  close.then(() => clearTimeout(forceKill));
-  child.kill("SIGTERM");
-  return close;
+  if (!alreadyExited) {
+    const forceKill = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, graceMs);
+    try { child.kill("SIGTERM"); } catch {}
+    const observed = await waitForObservedClose(child, graceMs + CLOSE_WAIT_MS);
+    clearTimeout(forceKill);
+    if (observed) return true;
+  }
+  // The child is gone or its own termination did not reach close, which means a
+  // descendant it spawned inherited the stdio. Signal only the process group
+  // this suite owns, then require the genuine close event.
+  const groupTerminated = await terminateProcessGroup(child, {
+    graceMs: DESCENDANT_GRACE_MS,
+    cleanupTimeoutMs: DESCENDANT_CLEANUP_MS,
+  });
+  if (!groupTerminated) return false;
+  return await waitForObservedClose(child, DESCENDANT_CLEANUP_MS + CLOSE_WAIT_MS);
 }
 
 function waitForFakeReady(child) {
@@ -102,7 +126,7 @@ function waitForFakeReady(child) {
 }
 
 function startFakeServer() {
-  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
+  const child = spawnOwned("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
   return waitForFakeReady(child).then(({ port }) => ({ child, port }));
 }
 
@@ -161,7 +185,7 @@ function writeFixture({ home, work, port }) {
   }));
 }
 
-function runPi({ home, work, model, prompt, child }) {
+function runPi({ home, work, model, prompt, child, command = PI, args, windowMs = 60_000, terminationGraceMs = 5_000, extraEnv = {} }) {
   const violations = join(home, "test-network-violations.log");
   writeFileSync(violations, "");
   const env = {
@@ -178,8 +202,10 @@ function runPi({ home, work, model, prompt, child }) {
   // pi-subagents 0.77.0 producer contract: only the verified child marker
   // value "1" scopes the explicit child host; absent and empty stay parent.
   if (child !== undefined) env.PI_SUBAGENT_CHILD = child;
+  Object.assign(env, extraEnv);
   return new Promise((resolve, reject) => {
-    const childProcess = spawn(PI, ["-e", EXTENSION, "--approve", "--no-session", "--no-tools", "--model", model, "-p", prompt], {
+    const resolvedArgs = args ?? ["-e", EXTENSION, "--approve", "--no-session", "--no-tools", "--model", model, "-p", prompt];
+    const childProcess = spawnOwned(command, resolvedArgs, {
       stdio: ["ignore", "pipe", "pipe"],
       cwd: work,
       env,
@@ -188,33 +214,46 @@ function runPi({ home, work, model, prompt, child }) {
     let stderr = "";
     let timedOut = false;
     let spawnError;
+    let settled = false;
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      settle(value);
+    };
     childProcess.stdout.setEncoding("utf8");
     childProcess.stderr.setEncoding("utf8");
     childProcess.stdout.on("data", (chunk) => { stdout += chunk; });
     childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
     childProcess.on("error", (error) => { spawnError = error; });
-    // Bounded termination: SIGTERM, then SIGKILL after the grace window,
-    // resolving only on close so cleanup never races a live child.
+    // Bounded termination: SIGTERM, then SIGKILL after the grace window, and
+    // if a descendant still holds the inherited pipes the owned process group
+    // is terminated. The run settles either way, so a child that can never
+    // reach close fails the run instead of leaving it pending forever.
     const timer = setTimeout(() => {
       timedOut = true;
-      void stopChild(childProcess, 5_000);
-    }, 60_000);
+      void stopChild(childProcess, terminationGraceMs).then((closed) => {
+        const detail = `Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`;
+        finish(reject, closed
+          ? new Error(detail)
+          : new Error(`${detail}; the owned process group did not reach a verified close`));
+      });
+    }, windowMs);
     childProcess.on("close", async (code) => {
-      clearTimeout(timer);
       if (spawnError) {
-        reject(spawnError);
+        finish(reject, spawnError);
         return;
       }
       if (timedOut) {
-        reject(new Error(`Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`));
+        finish(reject, new Error(`Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`));
         return;
       }
       try {
         const violationsText = readFileSync(violations, "utf8");
         assert.equal(violationsText, "", "Pi child made a blocked outbound attempt");
-        resolve({ code, stdout, stderr, violations: violationsText });
+        finish(resolve, { code, stdout, stderr, violations: violationsText });
       } catch (error) {
-        reject(error);
+        finish(reject, error);
       }
     });
   });
@@ -227,7 +266,8 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     fakePort = server.port;
   });
   after(async () => {
-    if (server) await stopChild(server.child);
+    // Cleanup is asserted, never assumed: an unverified stop is a test failure.
+    if (server) assert.equal(await stopChild(server.child), true, "fake provider must reach an observed close during cleanup");
   });
 
   it("routes Auto inline tiers in child hosts without weakening physical identity", async () => {
@@ -276,7 +316,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
   });
 
   it("waits for close when exit precedes close", async () => {
-    const child = spawn(execPath, ["-e", `
+    const child = spawnOwned(execPath, ["-e", `
       const { spawn } = require("node:child_process");
       spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 100)"], {
         stdio: ["ignore", "inherit", "ignore"],
@@ -296,30 +336,54 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       child.once("exit", resolve);
       child.once("error", reject);
     });
-    let closed = false;
-    child.once("close", () => { closed = true; });
+    assert.equal(closeTracking(child).isClosed, false, "close must not have been observed before stopChild");
     const observed = await stopChild(child);
-    assert.equal(closed, true, "stopChild must await close after exit");
+    assert.equal(closeTracking(child).isClosed, true, "stopChild must await the real close event after exit");
     assert.equal(observed, true, "stopChild must report the observed close");
   });
 
-  it("resolves an already-closed child without waiting for a close that already fired", async () => {
-    const child = spawn(execPath, ["-e", "process.exit(0)"], { stdio: ["ignore", "pipe", "ignore"] });
+  it("reports the observed close for an already-closed child", async () => {
+    const child = spawnOwned(execPath, ["-e", "process.exit(0)"], { stdio: ["ignore", "pipe", "ignore"] });
     await once(child, "close");
-    // The close event has already fired, so re-registering a listener would
-    // hang. The bounded wait proves stopChild resolves instead of waiting.
-    for (const attempt of [1, 2]) {
-      const outcome = await Promise.race([
-        stopChild(child).then(() => "closed"),
-        new Promise((resolve) => setTimeout(() => resolve("still-waiting"), 250)),
-      ]);
-      assert.equal(outcome, "closed", `already-closed child wait #${attempt} must not wait for a repeated close event`);
-    }
+    // The close event already fired. Asserting the boolean result itself keeps
+    // this fault-sensitive: mapping any outcome to one string would let a
+    // failed closure pass as success.
+    assert.equal(await stopChild(child), true, "already-closed child must report its observed close");
+    assert.equal(await stopChild(child), true, "a repeated stop must still report an observed close");
+    assert.equal(closeTracking(child).isClosed, true, "close must be observed, not inferred");
+  });
+
+  it("observes close for a child created without stdio pipes", async () => {
+    const child = spawnOwned(execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+    // Record when the real close event lands relative to the stop result. With
+    // no pipes there is no stream state to inspect, so an inferred fast path
+    // would report success before the event it claims to have observed.
+    const order = [];
+    child.once("close", () => { order.push("close"); });
+    await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => {
+        order.push("exit");
+        closeTracking(child);
+        stopChild(child).then((observed) => {
+          order.push("stopChild");
+          try {
+            assert.deepEqual(order, ["exit", "close", "stopChild"],
+              "stopChild must resolve only after the real close event, never from an inferred exit");
+            assert.equal(observed, true, "no-stdio child must report its observed close");
+            assert.equal(closeTracking(child).isClosed, true, "close must be observed, never inferred from exit");
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        }, reject);
+      });
+    });
   });
 
   it("force-kills a real SIGTERM-ignoring child, awaits close, and frees its scratch", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-term-proof-"));
-    const stubborn = spawn(execPath, ["-e",
+    const stubborn = spawnOwned(execPath, ["-e",
       "process.on('SIGTERM', () => {}); process.stdout.write('stubborn-ready\\n'); setInterval(() => {}, 1000);"],
       { stdio: ["ignore", "pipe", "ignore"], cwd: scratch });
     try {
@@ -333,10 +397,11 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         stubborn.once("error", reject);
         stubborn.once("close", () => reject(new Error("child exited before it could ignore SIGTERM")));
       });
-      await stopChild(stubborn, 300);
+      assert.equal(await stopChild(stubborn, 300), true, "force-kill must reach a verified close");
       // stopChild resolves on close, so the dead child cannot hold the scratch.
       assert.equal(stubborn.exitCode, null, "SIGTERM-ignoring child must not exit via TERM");
       assert.equal(stubborn.signalCode, "SIGKILL", "SIGTERM-ignoring child must be force-killed");
+      assert.equal(processGroupExists(stubborn.pid), false, "the owned process group must be gone");
       rmSync(scratch, { recursive: true, force: true });
       assert.equal(existsSync(scratch), false, "scratch must be removable after the forced close");
     } finally {
@@ -346,9 +411,53 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
   });
 
   it("rejects fake-provider startup when the child exits before its ready record", async () => {
-    const failing = spawn(execPath, ["-e", "process.exit(3)"], { stdio: ["ignore", "pipe", "ignore"] });
+    const failing = spawnOwned(execPath, ["-e", "process.exit(3)"], { stdio: ["ignore", "pipe", "ignore"] });
     await assert.rejects(waitForFakeReady(failing), /fake provider exited before startup/);
-    await stopChild(failing);
+    assert.equal(await stopChild(failing), true, "failed startup must still reach a verified close");
+  });
+
+  it("fails a bounded run and reaps the owned descendant holding inherited pipes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-child-descendant-home-"));
+    const pidFile = join(home, "descendant.pid");
+    try {
+      // The stand-in CLI exits while a descendant it spawned keeps the
+      // inherited stdout pipe open, so the runner's close never arrives on its
+      // own. The outer bound keeps the regression from hanging the suite.
+      const run = runPi({
+        home,
+        work: home,
+        model: "bifrost/auto",
+        prompt: "native faux dispatch marker",
+        child: "1",
+        command: execPath,
+        args: [DESCENDANT_CLI],
+        windowMs: 1_000,
+        terminationGraceMs: 200,
+        extraEnv: { BIFROST_DESCENDANT_PID_FILE: pidFile },
+      });
+      await assert.rejects(
+        Promise.race([
+          run,
+          new Promise((_, reject) => { setTimeout(() => reject(new Error("runPi stayed pending after its bounded window and owned termination")), 30_000); }),
+        ]),
+        /exceeded the bounded run window/,
+        "a run whose owned descendant holds the pipes must fail, not stay pending",
+      );
+      // The descendant must actually be gone, not merely unobserved.
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      assert.ok(Number.isInteger(pid) && pid > 0, "the fixture must record its descendant pid");
+      assert.throws(
+        () => process.kill(pid, 0),
+        (error) => error.code === "ESRCH",
+        `owned descendant ${pid} must be terminated, not left alive`,
+      );
+    } finally {
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("records forbidden fetch, socket, and UDP attempts through the same preloaded guard", async () => {
@@ -369,7 +478,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       // Without the preload (guard-removal mutation) nothing records the
       // forbidden attempts, so the record assertions below go RED.
       const probe = await new Promise((resolve, reject) => {
-        const childProcess = spawn(execPath, ["-e", `
+        const childProcess = spawnOwned(execPath, ["-e", `
           const net = require("node:net");
           const dgram = require("node:dgram");
           (async () => {
@@ -406,18 +515,31 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         });
         let stderr = "";
         let timedOut = false;
+        let settled = false;
+        const finish = (settle, value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(killer);
+          settle(value);
+        };
         childProcess.stderr.setEncoding("utf8");
         childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
-        // Bounded termination so a leaking probe cannot hang the suite.
+        // Bounded termination so a leaking probe cannot hang the suite. The
+        // stop result is consumed, so an unverifiable cleanup fails the probe
+        // instead of leaving it pending forever.
         const killer = setTimeout(() => {
           timedOut = true;
-          void stopChild(childProcess, 1_000);
+          void stopChild(childProcess, 1_000).then((closed) => {
+            const detail = `guard negative-control probe exceeded its bounded window (stderr=${stderr.length})`;
+            finish(reject, closed
+              ? new Error(detail)
+              : new Error(`${detail}; the owned process group did not reach a verified close`));
+          });
         }, 30_000);
-        childProcess.once("error", reject);
+        childProcess.once("error", (error) => { finish(reject, error); });
         childProcess.once("close", (code) => {
-          clearTimeout(killer);
-          if (timedOut) reject(new Error(`guard negative-control probe exceeded its bounded window (stderr=${stderr.length})`));
-          else resolve({ code, stderr });
+          if (timedOut) finish(reject, new Error(`guard negative-control probe exceeded its bounded window (stderr=${stderr.length})`));
+          else finish(resolve, { code, stderr });
         });
       });
       assert.equal(probe.code, 0, probe.stderr);
