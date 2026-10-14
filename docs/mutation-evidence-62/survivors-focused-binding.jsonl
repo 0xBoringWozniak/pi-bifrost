@@ -1,0 +1,487 @@
+{"file":"cache.ts","line":23,"mutator":"ArithmeticOperator","replacement":"24 / 30","source":"export const DEFAULT_TTL_HOURS = 24 * 30;"}
+{"file":"cache.ts","line":24,"mutator":"ArithmeticOperator","replacement":"DEFAULT_TTL_HOURS * 60 / 60","source":"export const DEFAULT_CACHE_TTL_MS = DEFAULT_TTL_HOURS * 60 * 60 * 1000;"}
+{"file":"cache.ts","line":24,"mutator":"ArithmeticOperator","replacement":"DEFAULT_TTL_HOURS * 60 * 60 / 1000","source":"export const DEFAULT_CACHE_TTL_MS = DEFAULT_TTL_HOURS * 60 * 60 * 1000;"}
+{"file":"cache.ts","line":24,"mutator":"ArithmeticOperator","replacement":"DEFAULT_TTL_HOURS / 60","source":"export const DEFAULT_CACHE_TTL_MS = DEFAULT_TTL_HOURS * 60 * 60 * 1000;"}
+{"file":"cache.ts","line":34,"mutator":"Regex","replacement":"/[^\\p{L}\\p{N}]/gu","source":".replace(/[^\\p{L}\\p{N}]+/gu, \" \")"}
+{"file":"cache.ts","line":52,"mutator":"ConditionalExpression","replacement":"true","source":"if (!tokens) {"}
+{"file":"cache.ts","line":54,"mutator":"CallExpression","replacement":";","source":"entryTokenCache.set(entry, tokens);"}
+{"file":"cache.ts","line":72,"mutator":"ConditionalExpression","replacement":"true","source":"if (!index) {"}
+{"file":"cache.ts","line":77,"mutator":"BooleanLiteral","replacement":"byNormalized.has(normalized)","source":"if (!byNormalized.has(normalized)) byNormalized.set(normalized, i);"}
+{"file":"cache.ts","line":77,"mutator":"CallExpression","replacement":";","source":"if (!byNormalized.has(normalized)) byNormalized.set(normalized, i);"}
+{"file":"cache.ts","line":77,"mutator":"ConditionalExpression","replacement":"false","source":"if (!byNormalized.has(normalized)) byNormalized.set(normalized, i);"}
+{"file":"cache.ts","line":80,"mutator":"CallExpression","replacement":";","source":"if (list) list.push(i);"}
+{"file":"cache.ts","line":85,"mutator":"CallExpression","replacement":";","source":"indexCache.set(entries, index);"}
+{"file":"cache.ts","line":93,"mutator":"ConditionalExpression","replacement":"false","source":"if (text === undefined) return [];"}
+{"file":"cache.ts","line":94,"mutator":"MethodExpression","replacement":"text.split(\"\\n\")","source":"const entries = text"}
+{"file":"cache.ts","line":100,"mutator":"BlockStatement","replacement":"{}","source":"} catch {"}
+{"file":"cache.ts","line":107,"mutator":"ConditionalExpression","replacement":"true","source":"const freshEntries = entries.filter((entry) => Number.isFinite(entry.lastUsed) && entry.lastUsed >= cutoff);"}
+{"file":"cache.ts","line":107,"mutator":"ConditionalExpression","replacement":"true","source":"const freshEntries = entries.filter((entry) => Number.isFinite(entry.lastUsed) && entry.lastUsed >= cutoff);"}
+{"file":"cache.ts","line":107,"mutator":"EqualityOperator","replacement":"entry.lastUsed > cutoff","source":"const freshEntries = entries.filter((entry) => Number.isFinite(entry.lastUsed) && entry.lastUsed >= cutoff);"}
+{"file":"cache.ts","line":107,"mutator":"LogicalOperator","replacement":"Number.isFinite(entry.lastUsed) || entry.lastUsed >= cutoff","source":"const freshEntries = entries.filter((entry) => Number.isFinite(entry.lastUsed) && entry.lastUsed >= cutoff);"}
+{"file":"cache.ts","line":107,"mutator":"MethodExpression","replacement":"entries","source":"const freshEntries = entries.filter((entry) => Number.isFinite(entry.lastUsed) && entry.lastUsed >= cutoff);"}
+{"file":"cache.ts","line":110,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const maxSeq = freshEntries.reduce((max: number, e: CacheEntry) => Math.max(max, e.seq ?? 0), 0);"}
+{"file":"cache.ts","line":110,"mutator":"LogicalOperator","replacement":"e.seq && 0","source":"const maxSeq = freshEntries.reduce((max: number, e: CacheEntry) => Math.max(max, e.seq ?? 0), 0);"}
+{"file":"cache.ts","line":110,"mutator":"MethodExpression","replacement":"Math.min(max, e.seq ?? 0)","source":"const maxSeq = freshEntries.reduce((max: number, e: CacheEntry) => Math.max(max, e.seq ?? 0), 0);"}
+{"file":"cache.ts","line":111,"mutator":"ArithmeticOperator","replacement":"maxSeq - 1","source":"if (maxSeq >= nextSeq) nextSeq = maxSeq + 1;"}
+{"file":"cache.ts","line":111,"mutator":"ConditionalExpression","replacement":"true","source":"if (maxSeq >= nextSeq) nextSeq = maxSeq + 1;"}
+{"file":"cache.ts","line":111,"mutator":"ConditionalExpression","replacement":"false","source":"if (maxSeq >= nextSeq) nextSeq = maxSeq + 1;"}
+{"file":"cache.ts","line":111,"mutator":"EqualityOperator","replacement":"maxSeq > nextSeq","source":"if (maxSeq >= nextSeq) nextSeq = maxSeq + 1;"}
+{"file":"cache.ts","line":111,"mutator":"EqualityOperator","replacement":"maxSeq < nextSeq","source":"if (maxSeq >= nextSeq) nextSeq = maxSeq + 1;"}
+{"file":"cache.ts","line":114,"mutator":"BlockStatement","replacement":"{}","source":"} catch (err) {"}
+{"file":"cache.ts","line":115,"mutator":"StringLiteral","replacement":"``","source":"console.error(`[bifrost] failed to load cache: ${err}`);"}
+{"file":"cache.ts","line":116,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":"return [];"}
+{"file":"cache.ts","line":120,"mutator":"BlockStatement","replacement":"{}","source":"export function saveCache(path: string, entries: CacheEntry[]) {"}
+{"file":"cache.ts","line":121,"mutator":"BlockStatement","replacement":"{}","source":"try {"}
+{"file":"cache.ts","line":122,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const lines = entries.map((e) => JSON.stringify(e)).join(\"\\n\");"}
+{"file":"cache.ts","line":122,"mutator":"StringLiteral","replacement":"\"\"","source":"const lines = entries.map((e) => JSON.stringify(e)).join(\"\\n\");"}
+{"file":"cache.ts","line":123,"mutator":"StringLiteral","replacement":"\"\"","source":"writeTextFile(path, lines ? lines + \"\\n\" : \"\");"}
+{"file":"cache.ts","line":123,"mutator":"StringLiteral","replacement":"\"Stryker was here!\"","source":"writeTextFile(path, lines ? lines + \"\\n\" : \"\");"}
+{"file":"cache.ts","line":124,"mutator":"BlockStatement","replacement":"{}","source":"} catch (err) {"}
+{"file":"cache.ts","line":125,"mutator":"StringLiteral","replacement":"``","source":"console.error(`[bifrost] failed to save cache: ${err}`);"}
+{"file":"cache.ts","line":130,"mutator":"ConditionalExpression","replacement":"false","source":"if (entries.length <= maxEntries) return entries;"}
+{"file":"cache.ts","line":130,"mutator":"EqualityOperator","replacement":"entries.length < maxEntries","source":"if (entries.length <= maxEntries) return entries;"}
+{"file":"cache.ts","line":133,"mutator":"LogicalOperator","replacement":"b.seq && 0","source":".sort((a, b) => b.lastUsed - a.lastUsed || (b.seq ?? 0) - (a.seq ?? 0))"}
+{"file":"cache.ts","line":147,"mutator":"ConditionalExpression","replacement":"false","source":"const usable = (entry: CacheEntry): boolean => entry.lastUsed >= cutoff && (semanticKey === undefined || entry.semanticKey === semanticKey);"}
+{"file":"cache.ts","line":147,"mutator":"EqualityOperator","replacement":"entry.lastUsed > cutoff","source":"const usable = (entry: CacheEntry): boolean => entry.lastUsed >= cutoff && (semanticKey === undefined || entry.semanticKey === semanticKey);"}
+{"file":"cache.ts","line":153,"mutator":"ConditionalExpression","replacement":"false","source":"if (exactIdx !== undefined && usable(entries[exactIdx]!)) return entries[exactIdx]!;"}
+{"file":"cache.ts","line":154,"mutator":"BlockStatement","replacement":"{}","source":"if (semanticKey !== undefined) {"}
+{"file":"cache.ts","line":154,"mutator":"ConditionalExpression","replacement":"false","source":"if (semanticKey !== undefined) {"}
+{"file":"cache.ts","line":154,"mutator":"ConditionalExpression","replacement":"true","source":"if (semanticKey !== undefined) {"}
+{"file":"cache.ts","line":154,"mutator":"EqualityOperator","replacement":"semanticKey === undefined","source":"if (semanticKey !== undefined) {"}
+{"file":"cache.ts","line":155,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const exact = entries.find((entry) => entry.normalized === normalized && usable(entry));"}
+{"file":"cache.ts","line":155,"mutator":"ConditionalExpression","replacement":"false","source":"const exact = entries.find((entry) => entry.normalized === normalized && usable(entry));"}
+{"file":"cache.ts","line":155,"mutator":"ConditionalExpression","replacement":"true","source":"const exact = entries.find((entry) => entry.normalized === normalized && usable(entry));"}
+{"file":"cache.ts","line":155,"mutator":"EqualityOperator","replacement":"entry.normalized !== normalized","source":"const exact = entries.find((entry) => entry.normalized === normalized && usable(entry));"}
+{"file":"cache.ts","line":156,"mutator":"ConditionalExpression","replacement":"true","source":"if (exact) return exact;"}
+{"file":"cache.ts","line":156,"mutator":"ConditionalExpression","replacement":"false","source":"if (exact) return exact;"}
+{"file":"cache.ts","line":161,"mutator":"ConditionalExpression","replacement":"false","source":"if (promptSize === 0 || entries.length === 0) return undefined;"}
+{"file":"cache.ts","line":161,"mutator":"ConditionalExpression","replacement":"false","source":"if (promptSize === 0 || entries.length === 0) return undefined;"}
+{"file":"cache.ts","line":161,"mutator":"ConditionalExpression","replacement":"false","source":"if (promptSize === 0 || entries.length === 0) return undefined;"}
+{"file":"cache.ts","line":161,"mutator":"LogicalOperator","replacement":"promptSize === 0 && entries.length === 0","source":"if (promptSize === 0 || entries.length === 0) return undefined;"}
+{"file":"cache.ts","line":171,"mutator":"LogicalOperator","replacement":"counters.get(i) && 0","source":"for (const i of list) counters.set(i, (counters.get(i) ?? 0) + 1);"}
+{"file":"cache.ts","line":179,"mutator":"ConditionalExpression","replacement":"false","source":"if (entrySize === 0) continue;"}
+{"file":"cache.ts","line":180,"mutator":"ArithmeticOperator","replacement":"Math.min(promptSize, entrySize) * Math.max(promptSize, entrySize)","source":"if (Math.min(promptSize, entrySize) / Math.max(promptSize, entrySize) < threshold) continue;"}
+{"file":"cache.ts","line":180,"mutator":"ConditionalExpression","replacement":"false","source":"if (Math.min(promptSize, entrySize) / Math.max(promptSize, entrySize) < threshold) continue;"}
+{"file":"cache.ts","line":180,"mutator":"MethodExpression","replacement":"Math.max(promptSize, entrySize)","source":"if (Math.min(promptSize, entrySize) / Math.max(promptSize, entrySize) < threshold) continue;"}
+{"file":"cache.ts","line":180,"mutator":"MethodExpression","replacement":"Math.min(promptSize, entrySize)","source":"if (Math.min(promptSize, entrySize) / Math.max(promptSize, entrySize) < threshold) continue;"}
+{"file":"cache.ts","line":182,"mutator":"ArithmeticOperator","replacement":"intersection * union","source":"const score = union === 0 ? 0 : intersection / union;"}
+{"file":"cache.ts","line":182,"mutator":"ConditionalExpression","replacement":"false","source":"const score = union === 0 ? 0 : intersection / union;"}
+{"file":"cache.ts","line":183,"mutator":"ConditionalExpression","replacement":"false","source":"if (score < threshold) continue;"}
+{"file":"cache.ts","line":185,"mutator":"ConditionalExpression","replacement":"false","source":"if (!best || score > best.score || (score === best.score && i < best.index)) {"}
+{"file":"cache.ts","line":185,"mutator":"ConditionalExpression","replacement":"false","source":"if (!best || score > best.score || (score === best.score && i < best.index)) {"}
+{"file":"cache.ts","line":185,"mutator":"ConditionalExpression","replacement":"true","source":"if (!best || score > best.score || (score === best.score && i < best.index)) {"}
+{"file":"cache.ts","line":185,"mutator":"EqualityOperator","replacement":"score !== best.score","source":"if (!best || score > best.score || (score === best.score && i < best.index)) {"}
+{"file":"cache.ts","line":185,"mutator":"EqualityOperator","replacement":"i <= best.index","source":"if (!best || score > best.score || (score === best.score && i < best.index)) {"}
+{"file":"cache.ts","line":222,"mutator":"ConditionalExpression","replacement":"true","source":"const idx = entries.findIndex((e) => e.normalized === normalized && (semanticKey === undefined || e.semanticKey === semanticKey));"}
+{"file":"cache.ts","line":222,"mutator":"ConditionalExpression","replacement":"false","source":"const idx = entries.findIndex((e) => e.normalized === normalized && (semanticKey === undefined || e.semanticKey === semanticKey));"}
+{"file":"cache.ts","line":222,"mutator":"ConditionalExpression","replacement":"false","source":"const idx = entries.findIndex((e) => e.normalized === normalized && (semanticKey === undefined || e.semanticKey === semanticKey));"}
+{"file":"cache.ts","line":222,"mutator":"EqualityOperator","replacement":"semanticKey !== undefined","source":"const idx = entries.findIndex((e) => e.normalized === normalized && (semanticKey === undefined || e.semanticKey === semanticKey));"}
+{"file":"cache.ts","line":222,"mutator":"EqualityOperator","replacement":"e.semanticKey !== semanticKey","source":"const idx = entries.findIndex((e) => e.normalized === normalized && (semanticKey === undefined || e.semanticKey === semanticKey));"}
+{"file":"cache.ts","line":222,"mutator":"LogicalOperator","replacement":"semanticKey === undefined && e.semanticKey === semanticKey","source":"const idx = entries.findIndex((e) => e.normalized === normalized && (semanticKey === undefined || e.semanticKey === semanticKey));"}
+{"file":"cache.ts","line":231,"mutator":"ArithmeticOperator","replacement":"updated[idx].hits - 1","source":"hits: updated[idx].hits + 1,"}
+{"file":"classifier-semantics.ts","line":11,"mutator":"ConditionalExpression","replacement":"false","source":"return text.length <= maxChars ? text : text.slice(0, maxChars);"}
+{"file":"classifier-semantics.ts","line":11,"mutator":"EqualityOperator","replacement":"text.length < maxChars","source":"return text.length <= maxChars ? text : text.slice(0, maxChars);"}
+{"file":"classifier-semantics.ts","line":15,"mutator":"BlockStatement","replacement":"{}","source":"export function criterionText(value: TierCriterion): string {"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"ConditionalExpression","replacement":"true","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"ConditionalExpression","replacement":"false","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"EqualityOperator","replacement":"typeof value !== \"string\"","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"StringLiteral","replacement":"\"\"","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"ArrayDeclaration","replacement":"[]","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"MethodExpression","replacement":"[value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"OptionalChaining","replacement":"value.examples.length","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"``","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"\"Stryker was here!\"","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"``","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"\"\"","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"\"Stryker was here!\"","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":18,"mutator":"StringLiteral","replacement":"\"\"","source":".filter(Boolean).join(\" \");"}
+{"file":"classifier-semantics.ts","line":22,"mutator":"BlockStatement","replacement":"{}","source":"export function finite(value: unknown): value is number {"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"ConditionalExpression","replacement":"true","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"ConditionalExpression","replacement":"false","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"ConditionalExpression","replacement":"true","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"EqualityOperator","replacement":"typeof value !== \"number\"","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"LogicalOperator","replacement":"typeof value === \"number\" || Number.isFinite(value)","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"StringLiteral","replacement":"\"\"","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":26,"mutator":"BlockStatement","replacement":"{}","source":"export function sleep(ms: number): Promise<void> {"}
+{"file":"classifier-semantics.ts","line":27,"mutator":"ArrowFunction","replacement":"() => undefined","source":"return new Promise((resolve) => setTimeout(resolve, ms));"}
+{"file":"classifier-semantics.ts","line":34,"mutator":"BlockStatement","replacement":"{}","source":"): Promise<boolean> {"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"BooleanLiteral","replacement":"true","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"ConditionalExpression","replacement":"true","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"ConditionalExpression","replacement":"false","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"OptionalChaining","replacement":"signal.aborted","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":36,"mutator":"BlockStatement","replacement":"{}","source":"return new Promise((resolve, reject) => {"}
+{"file":"classifier-semantics.ts","line":37,"mutator":"BooleanLiteral","replacement":"true","source":"let settled = false;"}
+{"file":"classifier-semantics.ts","line":38,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const cleanup = () => signal?.removeEventListener(\"abort\", abort);"}
+{"file":"classifier-semantics.ts","line":38,"mutator":"OptionalChaining","replacement":"signal.removeEventListener","source":"const cleanup = () => signal?.removeEventListener(\"abort\", abort);"}
+{"file":"classifier-semantics.ts","line":38,"mutator":"StringLiteral","replacement":"\"\"","source":"const cleanup = () => signal?.removeEventListener(\"abort\", abort);"}
+{"file":"classifier-semantics.ts","line":39,"mutator":"BlockStatement","replacement":"{}","source":"const finish = (continued: boolean) => {"}
+{"file":"classifier-semantics.ts","line":40,"mutator":"ConditionalExpression","replacement":"true","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":40,"mutator":"ConditionalExpression","replacement":"false","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":41,"mutator":"BooleanLiteral","replacement":"false","source":"settled = true;"}
+{"file":"classifier-semantics.ts","line":42,"mutator":"CallExpression","replacement":";","source":"cleanup();"}
+{"file":"classifier-semantics.ts","line":43,"mutator":"CallExpression","replacement":";","source":"resolve(continued);"}
+{"file":"classifier-semantics.ts","line":45,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const abort = () => finish(false);"}
+{"file":"classifier-semantics.ts","line":45,"mutator":"BooleanLiteral","replacement":"true","source":"const abort = () => finish(false);"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"BooleanLiteral","replacement":"false","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"ObjectLiteral","replacement":"{}","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"OptionalChaining","replacement":"signal.addEventListener","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"StringLiteral","replacement":"\"\"","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":47,"mutator":"ArrowFunction","replacement":"() => undefined","source":"delay(ms).then(() => finish(true), (error) => {"}
+{"file":"classifier-semantics.ts","line":47,"mutator":"BlockStatement","replacement":"{}","source":"delay(ms).then(() => finish(true), (error) => {"}
+{"file":"classifier-semantics.ts","line":47,"mutator":"BooleanLiteral","replacement":"false","source":"delay(ms).then(() => finish(true), (error) => {"}
+{"file":"classifier-semantics.ts","line":48,"mutator":"ConditionalExpression","replacement":"false","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":48,"mutator":"ConditionalExpression","replacement":"true","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":49,"mutator":"BooleanLiteral","replacement":"false","source":"settled = true;"}
+{"file":"classifier-semantics.ts","line":50,"mutator":"CallExpression","replacement":";","source":"cleanup();"}
+{"file":"classifier-semantics.ts","line":51,"mutator":"CallExpression","replacement":";","source":"reject(error);"}
+{"file":"classifier-semantics.ts","line":57,"mutator":"ConditionalExpression","replacement":"false","source":"if (Array.isArray(value)) return value.map(stableValue);"}
+{"file":"classifier-semantics.ts","line":87,"mutator":"BlockStatement","replacement":"{}","source":"}): DirectStagePlan {"}
+{"file":"classifier-semantics.ts","line":88,"mutator":"ConditionalExpression","replacement":"true","source":"const isDirect = input.backend === CLASSIFIER_BACKEND_IDS.typesafe"}
+{"file":"classifier-semantics.ts","line":88,"mutator":"ConditionalExpression","replacement":"false","source":"const isDirect = input.backend === CLASSIFIER_BACKEND_IDS.typesafe"}
+{"file":"classifier-semantics.ts","line":88,"mutator":"ConditionalExpression","replacement":"false","source":"const isDirect = input.backend === CLASSIFIER_BACKEND_IDS.typesafe"}
+{"file":"classifier-semantics.ts","line":88,"mutator":"EqualityOperator","replacement":"input.backend !== CLASSIFIER_BACKEND_IDS.typesafe","source":"const isDirect = input.backend === CLASSIFIER_BACKEND_IDS.typesafe"}
+{"file":"classifier-semantics.ts","line":88,"mutator":"LogicalOperator","replacement":"input.backend === CLASSIFIER_BACKEND_IDS.typesafe && input.backend === CLASSIFIER_BACKEND_IDS.piNative","source":"const isDirect = input.backend === CLASSIFIER_BACKEND_IDS.typesafe"}
+{"file":"classifier-semantics.ts","line":89,"mutator":"ConditionalExpression","replacement":"false","source":"|| input.backend === CLASSIFIER_BACKEND_IDS.piNative;"}
+{"file":"classifier-semantics.ts","line":89,"mutator":"EqualityOperator","replacement":"input.backend !== CLASSIFIER_BACKEND_IDS.piNative","source":"|| input.backend === CLASSIFIER_BACKEND_IDS.piNative;"}
+{"file":"classifier-semantics.ts","line":90,"mutator":"ConditionalExpression","replacement":"true","source":"const stagesEnabled = input.classifierEnabled && input.tierCount > 0;"}
+{"file":"classifier-semantics.ts","line":90,"mutator":"ConditionalExpression","replacement":"false","source":"const stagesEnabled = input.classifierEnabled && input.tierCount > 0;"}
+{"file":"classifier-semantics.ts","line":90,"mutator":"ConditionalExpression","replacement":"true","source":"const stagesEnabled = input.classifierEnabled && input.tierCount > 0;"}
+{"file":"classifier-semantics.ts","line":90,"mutator":"EqualityOperator","replacement":"input.tierCount >= 0","source":"const stagesEnabled = input.classifierEnabled && input.tierCount > 0;"}
+{"file":"classifier-semantics.ts","line":90,"mutator":"EqualityOperator","replacement":"input.tierCount <= 0","source":"const stagesEnabled = input.classifierEnabled && input.tierCount > 0;"}
+{"file":"classifier-semantics.ts","line":90,"mutator":"LogicalOperator","replacement":"input.classifierEnabled || input.tierCount > 0","source":"const stagesEnabled = input.classifierEnabled && input.tierCount > 0;"}
+{"file":"classifier-semantics.ts","line":91,"mutator":"ConditionalExpression","replacement":"false","source":"const useDirect = stagesEnabled && isDirect && input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":91,"mutator":"ConditionalExpression","replacement":"true","source":"const useDirect = stagesEnabled && isDirect && input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":91,"mutator":"ConditionalExpression","replacement":"true","source":"const useDirect = stagesEnabled && isDirect && input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":91,"mutator":"LogicalOperator","replacement":"stagesEnabled && isDirect || input.directConfigOk","source":"const useDirect = stagesEnabled && isDirect && input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":91,"mutator":"LogicalOperator","replacement":"stagesEnabled || isDirect","source":"const useDirect = stagesEnabled && isDirect && input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":92,"mutator":"BooleanLiteral","replacement":"input.directConfigOk","source":"const directDegraded = isDirect && input.auto && !input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":92,"mutator":"ConditionalExpression","replacement":"true","source":"const directDegraded = isDirect && input.auto && !input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":92,"mutator":"ConditionalExpression","replacement":"false","source":"const directDegraded = isDirect && input.auto && !input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":92,"mutator":"ConditionalExpression","replacement":"true","source":"const directDegraded = isDirect && input.auto && !input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":92,"mutator":"LogicalOperator","replacement":"isDirect && input.auto || !input.directConfigOk","source":"const directDegraded = isDirect && input.auto && !input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":92,"mutator":"LogicalOperator","replacement":"isDirect || input.auto","source":"const directDegraded = isDirect && input.auto && !input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":93,"mutator":"ConditionalExpression","replacement":"false","source":"const usePromptFallback = stagesEnabled"}
+{"file":"classifier-semantics.ts","line":93,"mutator":"ConditionalExpression","replacement":"true","source":"const usePromptFallback = stagesEnabled"}
+{"file":"classifier-semantics.ts","line":93,"mutator":"LogicalOperator","replacement":"stagesEnabled || input.backend === CLASSIFIER_BACKEND_IDS.prompt || isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)","source":"const usePromptFallback = stagesEnabled"}
+{"file":"classifier-semantics.ts","line":94,"mutator":"ConditionalExpression","replacement":"false","source":"&& (input.backend === CLASSIFIER_BACKEND_IDS.prompt"}
+{"file":"classifier-semantics.ts","line":94,"mutator":"ConditionalExpression","replacement":"true","source":"&& (input.backend === CLASSIFIER_BACKEND_IDS.prompt"}
+{"file":"classifier-semantics.ts","line":94,"mutator":"EqualityOperator","replacement":"input.backend !== CLASSIFIER_BACKEND_IDS.prompt","source":"&& (input.backend === CLASSIFIER_BACKEND_IDS.prompt"}
+{"file":"classifier-semantics.ts","line":94,"mutator":"LogicalOperator","replacement":"input.backend === CLASSIFIER_BACKEND_IDS.prompt && isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)","source":"&& (input.backend === CLASSIFIER_BACKEND_IDS.prompt"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"ConditionalExpression","replacement":"false","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"ConditionalExpression","replacement":"true","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"ConditionalExpression","replacement":"true","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"ConditionalExpression","replacement":"true","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"EqualityOperator","replacement":"input.fallback === \"regex\"","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"LogicalOperator","replacement":"isDirect && input.fallback !== \"regex\" || input.directConfigOk || input.auto","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"LogicalOperator","replacement":"isDirect || input.fallback !== \"regex\"","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"LogicalOperator","replacement":"input.directConfigOk && input.auto","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":95,"mutator":"StringLiteral","replacement":"\"\"","source":"|| (isDirect && input.fallback !== \"regex\" && (input.directConfigOk || input.auto)));"}
+{"file":"classifier-semantics.ts","line":96,"mutator":"ObjectLiteral","replacement":"{}","source":"return { useDirect, usePromptFallback, directDegraded };"}
+{"file":"classifier-semantics.ts","line":102,"mutator":"OptionalChaining","replacement":"config.classifier.piNative","source":"&& !(effectiveBackend === CLASSIFIER_BACKEND_IDS.piNative && !config.classifier?.piNative?.model);"}
+{"file":"classifier-semantics.ts","line":121,"mutator":"OptionalChaining","replacement":"classifier.backend","source":"backend: runtime.effectiveBackend ?? classifier?.backend ?? CLASSIFIER_BACKEND_IDS.prompt,"}
+{"file":"classifier-semantics.ts","line":122,"mutator":"OptionalChaining","replacement":"classifier.model","source":"model: classifier?.model,"}
+{"file":"classifier-semantics.ts","line":123,"mutator":"OptionalChaining","replacement":"classifier.piNative","source":"piNativeModel: runtime.piNativeModel ?? classifier?.piNative?.model,"}
+{"file":"classifier-semantics.ts","line":124,"mutator":"OptionalChaining","replacement":"classifier.endpoint","source":"endpoint: classifier?.endpoint,"}
+{"file":"classifier-semantics.ts","line":125,"mutator":"OptionalChaining","replacement":"classifier.method","source":"method: classifier?.method,"}
+{"file":"classifier-semantics.ts","line":126,"mutator":"OptionalChaining","replacement":"classifier.systemPrompt","source":"systemPrompt: classifier?.systemPrompt,"}
+{"file":"classifier-semantics.ts","line":127,"mutator":"OptionalChaining","replacement":"classifier.maxTokens","source":"maxTokens: classifier?.maxTokens,"}
+{"file":"classifier-semantics.ts","line":128,"mutator":"OptionalChaining","replacement":"classifier.temperature","source":"temperature: classifier?.temperature,"}
+{"file":"classifier-semantics.ts","line":129,"mutator":"OptionalChaining","replacement":"classifier.fallbackToRegex","source":"fallbackToRegex: classifier?.fallbackToRegex,"}
+{"file":"classifier-semantics.ts","line":130,"mutator":"LogicalOperator","replacement":"classifier?.typesafe?.model && TYPE_SAFE_MODEL","source":"typesafeModel: classifier?.typesafe?.model ?? TYPE_SAFE_MODEL,"}
+{"file":"classifier-semantics.ts","line":130,"mutator":"OptionalChaining","replacement":"classifier.typesafe","source":"typesafeModel: classifier?.typesafe?.model ?? TYPE_SAFE_MODEL,"}
+{"file":"classifier-semantics.ts","line":131,"mutator":"OptionalChaining","replacement":"classifier.criteria","source":"criteria: classifier?.criteria,"}
+{"file":"classifier-semantics.ts","line":132,"mutator":"LogicalOperator","replacement":"classifier?.minConfidence && 0.8","source":"minConfidence: classifier?.minConfidence ?? 0.8,"}
+{"file":"classifier-semantics.ts","line":132,"mutator":"OptionalChaining","replacement":"classifier.minConfidence","source":"minConfidence: classifier?.minConfidence ?? 0.8,"}
+{"file":"classifier-semantics.ts","line":133,"mutator":"OptionalChaining","replacement":"classifier.fallback","source":"fallback: classifier?.fallback,"}
+{"file":"classifier-semantics.ts","line":134,"mutator":"BooleanLiteral","replacement":"true","source":"typesafeCredentialAvailable: runtime.typesafeCredentialAvailable ?? false,"}
+{"file":"reliability.ts","line":51,"mutator":"StringLiteral","replacement":"\"\"","source":"allowanceCooldownScope: \"provider\","}
+{"file":"reliability.ts","line":52,"mutator":"BooleanLiteral","replacement":"false","source":"retryOnAllowanceExhausted: true,"}
+{"file":"reliability.ts","line":60,"mutator":"OptionalChaining","replacement":"config.enabled","source":"enabled: config?.enabled ?? DEFAULT_RELIABILITY.enabled,"}
+{"file":"reliability.ts","line":61,"mutator":"OptionalChaining","replacement":"config.cooldownOnAllowanceExhausted","source":"cooldownOnAllowanceExhausted: config?.cooldownOnAllowanceExhausted ?? DEFAULT_RELIABILITY.cooldownOnAllowanceExhausted,"}
+{"file":"reliability.ts","line":62,"mutator":"LogicalOperator","replacement":"config?.allowanceCooldownScope && DEFAULT_RELIABILITY.allowanceCooldownScope","source":"allowanceCooldownScope: config?.allowanceCooldownScope ?? DEFAULT_RELIABILITY.allowanceCooldownScope,"}
+{"file":"reliability.ts","line":62,"mutator":"OptionalChaining","replacement":"config.allowanceCooldownScope","source":"allowanceCooldownScope: config?.allowanceCooldownScope ?? DEFAULT_RELIABILITY.allowanceCooldownScope,"}
+{"file":"reliability.ts","line":63,"mutator":"LogicalOperator","replacement":"config?.retryOnAllowanceExhausted && DEFAULT_RELIABILITY.retryOnAllowanceExhausted","source":"retryOnAllowanceExhausted: config?.retryOnAllowanceExhausted ?? DEFAULT_RELIABILITY.retryOnAllowanceExhausted,"}
+{"file":"reliability.ts","line":63,"mutator":"OptionalChaining","replacement":"config.retryOnAllowanceExhausted","source":"retryOnAllowanceExhausted: config?.retryOnAllowanceExhausted ?? DEFAULT_RELIABILITY.retryOnAllowanceExhausted,"}
+{"file":"reliability.ts","line":64,"mutator":"OptionalChaining","replacement":"config.failureThreshold","source":"failureThreshold: config?.failureThreshold ?? DEFAULT_RELIABILITY.failureThreshold,"}
+{"file":"reliability.ts","line":65,"mutator":"LogicalOperator","replacement":"config?.windowMinutes && DEFAULT_RELIABILITY.windowMinutes","source":"windowMinutes: config?.windowMinutes ?? DEFAULT_RELIABILITY.windowMinutes,"}
+{"file":"reliability.ts","line":65,"mutator":"OptionalChaining","replacement":"config.windowMinutes","source":"windowMinutes: config?.windowMinutes ?? DEFAULT_RELIABILITY.windowMinutes,"}
+{"file":"reliability.ts","line":66,"mutator":"LogicalOperator","replacement":"config?.cooldownMinutes && DEFAULT_RELIABILITY.cooldownMinutes","source":"cooldownMinutes: config?.cooldownMinutes ?? DEFAULT_RELIABILITY.cooldownMinutes,"}
+{"file":"reliability.ts","line":66,"mutator":"OptionalChaining","replacement":"config.cooldownMinutes","source":"cooldownMinutes: config?.cooldownMinutes ?? DEFAULT_RELIABILITY.cooldownMinutes,"}
+{"file":"reliability.ts","line":67,"mutator":"OptionalChaining","replacement":"config.path","source":"path: config?.path,"}
+{"file":"reliability.ts","line":75,"mutator":"ConditionalExpression","replacement":"true","source":"&& typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil) && record.openUntil > now"}
+{"file":"reliability.ts","line":75,"mutator":"ConditionalExpression","replacement":"true","source":"&& typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil) && record.openUntil > now"}
+{"file":"reliability.ts","line":75,"mutator":"EqualityOperator","replacement":"record.openUntil >= now","source":"&& typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil) && record.openUntil > now"}
+{"file":"reliability.ts","line":77,"mutator":"ConditionalExpression","replacement":"false","source":"|| record.lastFailureReason === \"allowance_exhausted:text_heuristic:model-only\""}
+{"file":"reliability.ts","line":77,"mutator":"StringLiteral","replacement":"\"\"","source":"|| record.lastFailureReason === \"allowance_exhausted:text_heuristic:model-only\""}
+{"file":"reliability.ts","line":79,"mutator":"ConditionalExpression","replacement":"false","source":"|| record.lastFailureReason === \"billing_denied:structured:model-only\""}
+{"file":"reliability.ts","line":79,"mutator":"StringLiteral","replacement":"\"\"","source":"|| record.lastFailureReason === \"billing_denied:structured:model-only\""}
+{"file":"reliability.ts","line":80,"mutator":"ConditionalExpression","replacement":"false","source":"|| record.lastFailureReason === \"billing_denied:text_heuristic:model-only\");"}
+{"file":"reliability.ts","line":80,"mutator":"StringLiteral","replacement":"\"\"","source":"|| record.lastFailureReason === \"billing_denied:text_heuristic:model-only\");"}
+{"file":"reliability.ts","line":88,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":"if (!Array.isArray(failures)) return [];"}
+{"file":"reliability.ts","line":88,"mutator":"ConditionalExpression","replacement":"false","source":"if (!Array.isArray(failures)) return [];"}
+{"file":"reliability.ts","line":90,"mutator":"ConditionalExpression","replacement":"true","source":"return failures.filter((ts): ts is number => typeof ts === \"number\" && Number.isFinite(ts) && ts >= cutoff);"}
+{"file":"reliability.ts","line":90,"mutator":"ConditionalExpression","replacement":"true","source":"return failures.filter((ts): ts is number => typeof ts === \"number\" && Number.isFinite(ts) && ts >= cutoff);"}
+{"file":"reliability.ts","line":90,"mutator":"EqualityOperator","replacement":"ts > cutoff","source":"return failures.filter((ts): ts is number => typeof ts === \"number\" && Number.isFinite(ts) && ts >= cutoff);"}
+{"file":"reliability.ts","line":90,"mutator":"LogicalOperator","replacement":"typeof ts === \"number\" || Number.isFinite(ts)","source":"return failures.filter((ts): ts is number => typeof ts === \"number\" && Number.isFinite(ts) && ts >= cutoff);"}
+{"file":"reliability.ts","line":94,"mutator":"ConditionalExpression","replacement":"false","source":"if (!raw || typeof raw !== \"object\") return undefined;"}
+{"file":"reliability.ts","line":94,"mutator":"ConditionalExpression","replacement":"false","source":"if (!raw || typeof raw !== \"object\") return undefined;"}
+{"file":"reliability.ts","line":94,"mutator":"LogicalOperator","replacement":"!raw && typeof raw !== \"object\"","source":"if (!raw || typeof raw !== \"object\") return undefined;"}
+{"file":"reliability.ts","line":97,"mutator":"ConditionalExpression","replacement":"false","source":"const openUntil = typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil)"}
+{"file":"reliability.ts","line":97,"mutator":"ConditionalExpression","replacement":"true","source":"const openUntil = typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil)"}
+{"file":"reliability.ts","line":97,"mutator":"EqualityOperator","replacement":"typeof record.openUntil !== \"number\"","source":"const openUntil = typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil)"}
+{"file":"reliability.ts","line":97,"mutator":"LogicalOperator","replacement":"typeof record.openUntil === \"number\" || Number.isFinite(record.openUntil)","source":"const openUntil = typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil)"}
+{"file":"reliability.ts","line":97,"mutator":"StringLiteral","replacement":"\"\"","source":"const openUntil = typeof record.openUntil === \"number\" && Number.isFinite(record.openUntil)"}
+{"file":"reliability.ts","line":100,"mutator":"ConditionalExpression","replacement":"true","source":"const lastFailureAt = typeof record.lastFailureAt === \"number\" && Number.isFinite(record.lastFailureAt)"}
+{"file":"reliability.ts","line":100,"mutator":"ConditionalExpression","replacement":"false","source":"const lastFailureAt = typeof record.lastFailureAt === \"number\" && Number.isFinite(record.lastFailureAt)"}
+{"file":"reliability.ts","line":100,"mutator":"ConditionalExpression","replacement":"true","source":"const lastFailureAt = typeof record.lastFailureAt === \"number\" && Number.isFinite(record.lastFailureAt)"}
+{"file":"reliability.ts","line":100,"mutator":"EqualityOperator","replacement":"typeof record.lastFailureAt !== \"number\"","source":"const lastFailureAt = typeof record.lastFailureAt === \"number\" && Number.isFinite(record.lastFailureAt)"}
+{"file":"reliability.ts","line":100,"mutator":"LogicalOperator","replacement":"typeof record.lastFailureAt === \"number\" || Number.isFinite(record.lastFailureAt)","source":"const lastFailureAt = typeof record.lastFailureAt === \"number\" && Number.isFinite(record.lastFailureAt)"}
+{"file":"reliability.ts","line":100,"mutator":"StringLiteral","replacement":"\"\"","source":"const lastFailureAt = typeof record.lastFailureAt === \"number\" && Number.isFinite(record.lastFailureAt)"}
+{"file":"reliability.ts","line":103,"mutator":"ConditionalExpression","replacement":"true","source":"const lastSuccessAt = typeof record.lastSuccessAt === \"number\" && Number.isFinite(record.lastSuccessAt)"}
+{"file":"reliability.ts","line":103,"mutator":"ConditionalExpression","replacement":"false","source":"const lastSuccessAt = typeof record.lastSuccessAt === \"number\" && Number.isFinite(record.lastSuccessAt)"}
+{"file":"reliability.ts","line":103,"mutator":"ConditionalExpression","replacement":"true","source":"const lastSuccessAt = typeof record.lastSuccessAt === \"number\" && Number.isFinite(record.lastSuccessAt)"}
+{"file":"reliability.ts","line":103,"mutator":"EqualityOperator","replacement":"typeof record.lastSuccessAt !== \"number\"","source":"const lastSuccessAt = typeof record.lastSuccessAt === \"number\" && Number.isFinite(record.lastSuccessAt)"}
+{"file":"reliability.ts","line":103,"mutator":"LogicalOperator","replacement":"typeof record.lastSuccessAt === \"number\" || Number.isFinite(record.lastSuccessAt)","source":"const lastSuccessAt = typeof record.lastSuccessAt === \"number\" && Number.isFinite(record.lastSuccessAt)"}
+{"file":"reliability.ts","line":103,"mutator":"StringLiteral","replacement":"\"\"","source":"const lastSuccessAt = typeof record.lastSuccessAt === \"number\" && Number.isFinite(record.lastSuccessAt)"}
+{"file":"reliability.ts","line":110,"mutator":"ConditionalExpression","replacement":"false","source":"trialActive: typeof record.trialActive === \"boolean\" ? record.trialActive : undefined,"}
+{"file":"reliability.ts","line":110,"mutator":"ConditionalExpression","replacement":"true","source":"trialActive: typeof record.trialActive === \"boolean\" ? record.trialActive : undefined,"}
+{"file":"reliability.ts","line":110,"mutator":"EqualityOperator","replacement":"typeof record.trialActive !== \"boolean\"","source":"trialActive: typeof record.trialActive === \"boolean\" ? record.trialActive : undefined,"}
+{"file":"reliability.ts","line":110,"mutator":"StringLiteral","replacement":"\"\"","source":"trialActive: typeof record.trialActive === \"boolean\" ? record.trialActive : undefined,"}
+{"file":"reliability.ts","line":111,"mutator":"ConditionalExpression","replacement":"false","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"ConditionalExpression","replacement":"true","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"ConditionalExpression","replacement":"true","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"ConditionalExpression","replacement":"true","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"ConditionalExpression","replacement":"true","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"EqualityOperator","replacement":"typeof record.cooldownMultiplier !== \"number\"","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"EqualityOperator","replacement":"record.cooldownMultiplier >= 0","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"EqualityOperator","replacement":"record.cooldownMultiplier <= 0","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"LogicalOperator","replacement":"typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) || record.cooldownMultiplier > 0","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"LogicalOperator","replacement":"typeof record.cooldownMultiplier === \"number\" || Number.isFinite(record.cooldownMultiplier)","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":111,"mutator":"StringLiteral","replacement":"\"\"","source":"cooldownMultiplier: typeof record.cooldownMultiplier === \"number\" && Number.isFinite(record.cooldownMultiplier) && record.cooldownMultiplier"}
+{"file":"reliability.ts","line":113,"mutator":"ConditionalExpression","replacement":"true","source":"lastFailureSource: typeof record.lastFailureSource === \"string\" ? record.lastFailureSource : undefined,"}
+{"file":"reliability.ts","line":114,"mutator":"ConditionalExpression","replacement":"true","source":"lastFailureReason: typeof record.lastFailureReason === \"string\" ? record.lastFailureReason : undefined,"}
+{"file":"reliability.ts","line":116,"mutator":"ConditionalExpression","replacement":"true","source":"lastSuccessSource: typeof record.lastSuccessSource === \"string\" ? record.lastSuccessSource : undefined,"}
+{"file":"reliability.ts","line":116,"mutator":"ConditionalExpression","replacement":"false","source":"lastSuccessSource: typeof record.lastSuccessSource === \"string\" ? record.lastSuccessSource : undefined,"}
+{"file":"reliability.ts","line":116,"mutator":"EqualityOperator","replacement":"typeof record.lastSuccessSource !== \"string\"","source":"lastSuccessSource: typeof record.lastSuccessSource === \"string\" ? record.lastSuccessSource : undefined,"}
+{"file":"reliability.ts","line":116,"mutator":"StringLiteral","replacement":"\"\"","source":"lastSuccessSource: typeof record.lastSuccessSource === \"string\" ? record.lastSuccessSource : undefined,"}
+{"file":"reliability.ts","line":128,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":"const failures = pruneFailures(record?.failures ?? [], now, resolved.windowMinutes);"}
+{"file":"reliability.ts","line":131,"mutator":"EqualityOperator","replacement":"openUntil >= now","source":"open: !!openUntil && openUntil > now,"}
+{"file":"reliability.ts","line":132,"mutator":"EqualityOperator","replacement":"openUntil < now","source":"halfOpen: !!openUntil && openUntil <= now && !record?.trialActive,"}
+{"file":"reliability.ts","line":132,"mutator":"OptionalChaining","replacement":"record.trialActive","source":"halfOpen: !!openUntil && openUntil <= now && !record?.trialActive,"}
+{"file":"reliability.ts","line":151,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":"const current = state.models[model] ?? { failures: [] };"}
+{"file":"reliability.ts","line":151,"mutator":"ObjectLiteral","replacement":"{}","source":"const current = state.models[model] ?? { failures: [] };"}
+{"file":"reliability.ts","line":152,"mutator":"ObjectLiteral","replacement":"{}","source":"const normalizedObservation = observation && isNormalizedFailureObservation(observation, { now })"}
+{"file":"reliability.ts","line":157,"mutator":"ConditionalExpression","replacement":"true","source":"&& normalizedObservation.modelKey === model"}
+{"file":"reliability.ts","line":158,"mutator":"ConditionalExpression","replacement":"true","source":"&& normalizedObservation.scope.kind === \"model\""}
+{"file":"reliability.ts","line":159,"mutator":"ConditionalExpression","replacement":"true","source":"&& normalizedObservation.scope.modelKey === model"}
+{"file":"reliability.ts","line":172,"mutator":"ArithmeticOperator","replacement":"now - cooldownMs","source":"? preserveActiveAllowanceMarker ? Math.max(current.openUntil ?? 0, now + cooldownMs) : now + cooldownMs"}
+{"file":"reliability.ts","line":200,"mutator":"ConditionalExpression","replacement":"false","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"ConditionalExpression","replacement":"false","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"ConditionalExpression","replacement":"false","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"ConditionalExpression","replacement":"false","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"ConditionalExpression","replacement":"false","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"EqualityOperator","replacement":"retryAt < now","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"LogicalOperator","replacement":"(retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now) && retryAt - now > MAX_ALLOWANCE_RETRY_HINT_MS","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"LogicalOperator","replacement":"(retryAt === undefined || !Number.isSafeInteger(retryAt)) && retryAt <= now","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":200,"mutator":"LogicalOperator","replacement":"retryAt === undefined && !Number.isSafeInteger(retryAt)","source":"if (retryAt === undefined || !Number.isSafeInteger(retryAt) || retryAt <= now"}
+{"file":"reliability.ts","line":201,"mutator":"ArithmeticOperator","replacement":"retryAt + now","source":"|| retryAt - now > MAX_ALLOWANCE_RETRY_HINT_MS) return undefined;"}
+{"file":"reliability.ts","line":201,"mutator":"ConditionalExpression","replacement":"false","source":"|| retryAt - now > MAX_ALLOWANCE_RETRY_HINT_MS) return undefined;"}
+{"file":"reliability.ts","line":201,"mutator":"EqualityOperator","replacement":"retryAt - now >= MAX_ALLOWANCE_RETRY_HINT_MS","source":"|| retryAt - now > MAX_ALLOWANCE_RETRY_HINT_MS) return undefined;"}
+{"file":"reliability.ts","line":212,"mutator":"BlockStatement","replacement":"{}","source":"if (!current) {"}
+{"file":"reliability.ts","line":212,"mutator":"BooleanLiteral","replacement":"current","source":"if (!current) {"}
+{"file":"reliability.ts","line":212,"mutator":"ConditionalExpression","replacement":"false","source":"if (!current) {"}
+{"file":"reliability.ts","line":212,"mutator":"ConditionalExpression","replacement":"true","source":"if (!current) {"}
+{"file":"reliability.ts","line":213,"mutator":"ObjectLiteral","replacement":"{}","source":"return {"}
+{"file":"reliability.ts","line":215,"mutator":"ObjectLiteral","replacement":"{}","source":"models: {"}
+{"file":"reliability.ts","line":217,"mutator":"ObjectLiteral","replacement":"{}","source":"[model]: {"}
+{"file":"reliability.ts","line":218,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":"failures: [],"}
+{"file":"reliability.ts","line":228,"mutator":"ObjectLiteral","replacement":"{}","source":"models: {"}
+{"file":"reliability.ts","line":230,"mutator":"ObjectLiteral","replacement":"{}","source":"[model]: {"}
+{"file":"reliability.ts","line":232,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":"failures: [],"}
+{"file":"reliability.ts","line":248,"mutator":"ConditionalExpression","replacement":"false","source":"if (!current || current.trialActive) return state;"}
+{"file":"reliability.ts","line":248,"mutator":"LogicalOperator","replacement":"!current && current.trialActive","source":"if (!current || current.trialActive) return state;"}
+{"file":"reliability.ts","line":287,"mutator":"BlockStatement","replacement":"{}","source":"): ReliabilityState {"}
+{"file":"reliability.ts","line":288,"mutator":"ConditionalExpression","replacement":"true","source":"if (ok) return state;"}
+{"file":"reliability.ts","line":288,"mutator":"ConditionalExpression","replacement":"false","source":"if (ok) return state;"}
+{"file":"reliability.ts","line":289,"mutator":"StringLiteral","replacement":"\"\"","source":"return recordModelFailure(state, modelKey, config, now, \"setModel\", reason);"}
+{"file":"reliability.ts","line":299,"mutator":"BlockStatement","replacement":"{}","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":299,"mutator":"ConditionalExpression","replacement":"false","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":299,"mutator":"ConditionalExpression","replacement":"false","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":299,"mutator":"ConditionalExpression","replacement":"false","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":299,"mutator":"ConditionalExpression","replacement":"false","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":299,"mutator":"LogicalOperator","replacement":"(parsed?.version !== 1 || typeof parsed.models !== \"object\") && !parsed.models","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":299,"mutator":"LogicalOperator","replacement":"parsed?.version !== 1 && typeof parsed.models !== \"object\"","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":299,"mutator":"OptionalChaining","replacement":"parsed.version","source":"if (parsed?.version !== 1 || typeof parsed.models !== \"object\" || !parsed.models) {"}
+{"file":"reliability.ts","line":305,"mutator":"ConditionalExpression","replacement":"true","source":"if (normalized) models[key] = normalized;"}
+{"file":"reliability.ts","line":309,"mutator":"StringLiteral","replacement":"``","source":"console.error(`[bifrost] failed to load reliability state: ${err}`);"}
+{"file":"reliability.ts","line":318,"mutator":"BlockStatement","replacement":"{}","source":"if (!reliabilitySourceFenceOwned(owner)) {"}
+{"file":"reliability.ts","line":318,"mutator":"ConditionalExpression","replacement":"false","source":"if (!reliabilitySourceFenceOwned(owner)) {"}
+{"file":"reliability.ts","line":319,"mutator":"StringLiteral","replacement":"\"\"","source":"console.error(\"[bifrost] reliability source lock ownership changed before save; no state was written, and the lock was left untouched.\");"}
+{"file":"reliability.ts","line":320,"mutator":"BooleanLiteral","replacement":"true","source":"return false;"}
+{"file":"reliability.ts","line":323,"mutator":"BooleanLiteral","replacement":"false","source":"return true;"}
+{"file":"reliability.ts","line":324,"mutator":"BlockStatement","replacement":"{}","source":"} catch (error) {"}
+{"file":"reliability.ts","line":325,"mutator":"ConditionalExpression","replacement":"false","source":"console.error(error instanceof ReliabilitySourceFenceError && error.code === \"contended\""}
+{"file":"reliability.ts","line":325,"mutator":"ConditionalExpression","replacement":"true","source":"console.error(error instanceof ReliabilitySourceFenceError && error.code === \"contended\""}
+{"file":"reliability.ts","line":325,"mutator":"ConditionalExpression","replacement":"true","source":"console.error(error instanceof ReliabilitySourceFenceError && error.code === \"contended\""}
+{"file":"reliability.ts","line":325,"mutator":"EqualityOperator","replacement":"error.code !== \"contended\"","source":"console.error(error instanceof ReliabilitySourceFenceError && error.code === \"contended\""}
+{"file":"reliability.ts","line":325,"mutator":"LogicalOperator","replacement":"error instanceof ReliabilitySourceFenceError || error.code === \"contended\"","source":"console.error(error instanceof ReliabilitySourceFenceError && error.code === \"contended\""}
+{"file":"reliability.ts","line":325,"mutator":"StringLiteral","replacement":"\"\"","source":"console.error(error instanceof ReliabilitySourceFenceError && error.code === \"contended\""}
+{"file":"reliability.ts","line":326,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"[bifrost] reliability state write skipped because a source lock exists. Stop other writers; if the lock remains, follow the reliability l"}
+{"file":"reliability.ts","line":327,"mutator":"StringLiteral","replacement":"\"\"","source":": \"[bifrost] reliability state could not be saved; check the state file and retry.\");"}
+{"file":"reliability.ts","line":328,"mutator":"BooleanLiteral","replacement":"true","source":"return false;"}
+{"file":"reliability.ts","line":329,"mutator":"BlockStatement","replacement":"{}","source":"} finally {"}
+{"file":"reliability.ts","line":330,"mutator":"BlockStatement","replacement":"{}","source":"if (owner) {"}
+{"file":"reliability.ts","line":330,"mutator":"ConditionalExpression","replacement":"true","source":"if (owner) {"}
+{"file":"reliability.ts","line":330,"mutator":"ConditionalExpression","replacement":"false","source":"if (owner) {"}
+{"file":"reliability.ts","line":331,"mutator":"BlockStatement","replacement":"{}","source":"try { releaseReliabilitySourceFence(owner); }"}
+{"file":"reliability.ts","line":331,"mutator":"CallExpression","replacement":";","source":"try { releaseReliabilitySourceFence(owner); }"}
+{"file":"reliability.ts","line":332,"mutator":"BlockStatement","replacement":"{}","source":"catch { console.error(\"[bifrost] reliability source lock ownership changed; the lock was left untouched.\"); }"}
+{"file":"reliability.ts","line":332,"mutator":"StringLiteral","replacement":"\"\"","source":"catch { console.error(\"[bifrost] reliability source lock ownership changed; the lock was left untouched.\"); }"}
+{"file":"routing.ts","line":52,"mutator":"ConditionalExpression","replacement":"false","source":"if (!pattern) return undefined;"}
+{"file":"routing.ts","line":78,"mutator":"ConditionalExpression","replacement":"true","source":"if (!meta) {"}
+{"file":"routing.ts","line":80,"mutator":"CallExpression","replacement":";","source":"modelLowerCache.set(m, meta);"}
+{"file":"routing.ts","line":94,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":"if (!pattern) return [];"}
+{"file":"routing.ts","line":94,"mutator":"ConditionalExpression","replacement":"false","source":"if (!pattern) return [];"}
+{"file":"routing.ts","line":150,"mutator":"ConditionalExpression","replacement":"false","source":"if (candidates.length === 0) return undefined;"}
+{"file":"routing.ts","line":156,"mutator":"ConditionalExpression","replacement":"case \"cheapest\":","source":"case \"cheapest\":"}
+{"file":"routing.ts","line":162,"mutator":"ConditionalExpression","replacement":"case \"largest_context\":","source":"case \"largest_context\":"}
+{"file":"routing.ts","line":227,"mutator":"BooleanLiteral","replacement":"true","source":"hostCapabilities: { accountDispatch: false },"}
+{"file":"routing.ts","line":229,"mutator":"ConditionalExpression","replacement":"true","source":"const usePreferredPool = projection.mode === \"policy\" && projection.preferredCount > 0;"}
+{"file":"routing.ts","line":312,"mutator":"OptionalChaining","replacement":"config.models[tier]","source":"requestedPattern: config.models?.[tier] ?? tier,"}
+{"file":"routing.ts","line":314,"mutator":"ConditionalExpression","replacement":"true","source":"...(defaultTier !== undefined ? { defaultTier } : {}),"}
+{"file":"routing.ts","line":316,"mutator":"OptionalChaining","replacement":"config.models[defaultTier]","source":"? { defaultPattern: config.models?.[defaultTier] ?? defaultTier }"}
+{"file":"routing.ts","line":339,"mutator":"ConditionalExpression","replacement":"true","source":"const policy = config.schemaVersion === 2 ? config.tierPolicies?.[tier] : undefined;"}
+{"file":"routing.ts","line":346,"mutator":"ConditionalExpression","replacement":"true","source":"if (!affinity.modeSource) return { options, resolution };"}
+{"file":"routing.ts","line":347,"mutator":"ObjectLiteral","replacement":"{}","source":"resolution.affinityObservation = Object.freeze({"}
+{"file":"routing.ts","line":349,"mutator":"StringLiteral","replacement":"\"\"","source":"status: \"not_applicable\","}
+{"file":"routing.ts","line":351,"mutator":"StringLiteral","replacement":"\"\"","source":"mode: \"off\","}
+{"file":"routing.ts","line":352,"mutator":"ObjectLiteral","replacement":"{}","source":"...(affinity.modeSource ? { modeSource: affinity.modeSource } : {}),"}
+{"file":"routing.ts","line":353,"mutator":"StringLiteral","replacement":"\"\"","source":"selection: \"not_applicable\","}
+{"file":"routing.ts","line":355,"mutator":"ObjectLiteral","replacement":"{}","source":"return { options, resolution };"}
+{"file":"routing.ts","line":357,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const attemptedTarget = resolution.attemptedTiers?.find((attempt) => attempt.resolution.selected)"}
+{"file":"routing.ts","line":357,"mutator":"LogicalOperator","replacement":"resolution.attemptedTiers?.find(attempt => attempt.resolution.selected) && resolution.attemptedTiers?.at(-1)","source":"const attemptedTarget = resolution.attemptedTiers?.find((attempt) => attempt.resolution.selected)"}
+{"file":"routing.ts","line":358,"mutator":"UnaryOperator","replacement":"+1","source":"?? resolution.attemptedTiers?.at(-1);"}
+{"file":"routing.ts","line":360,"mutator":"ConditionalExpression","replacement":"true","source":"?? (resolution.selected && resolution.selectedTier === resolution.requestedTier"}
+{"file":"routing.ts","line":360,"mutator":"ConditionalExpression","replacement":"false","source":"?? (resolution.selected && resolution.selectedTier === resolution.requestedTier"}
+{"file":"routing.ts","line":360,"mutator":"ConditionalExpression","replacement":"true","source":"?? (resolution.selected && resolution.selectedTier === resolution.requestedTier"}
+{"file":"routing.ts","line":360,"mutator":"EqualityOperator","replacement":"resolution.selectedTier !== resolution.requestedTier","source":"?? (resolution.selected && resolution.selectedTier === resolution.requestedTier"}
+{"file":"routing.ts","line":360,"mutator":"LogicalOperator","replacement":"resolution.selected || resolution.selectedTier === resolution.requestedTier","source":"?? (resolution.selected && resolution.selectedTier === resolution.requestedTier"}
+{"file":"routing.ts","line":362,"mutator":"LogicalOperator","replacement":"resolution.fallback && resolution.primary","source":": resolution.fallback ?? resolution.primary);"}
+{"file":"routing.ts","line":363,"mutator":"OptionalChaining","replacement":"affinity.intrinsicOrigin","source":"const targetOrigin = affinity?.intrinsicOrigin ?? affinity?.targetOrigin ?? \"automatic\";"}
+{"file":"routing.ts","line":363,"mutator":"OptionalChaining","replacement":"affinity.targetOrigin","source":"const targetOrigin = affinity?.intrinsicOrigin ?? affinity?.targetOrigin ?? \"automatic\";"}
+{"file":"routing.ts","line":363,"mutator":"StringLiteral","replacement":"\"\"","source":"const targetOrigin = affinity?.intrinsicOrigin ?? affinity?.targetOrigin ?? \"automatic\";"}
+{"file":"routing.ts","line":372,"mutator":"OptionalChaining","replacement":"affinity.anchor","source":"...(affinity?.anchor ? { anchor: affinity.anchor } : {}),"}
+{"file":"routing.ts","line":374,"mutator":"OptionalChaining","replacement":"config.affinity.providerAdvisory","source":"...(config.affinity?.providerAdvisory ? { includeSameProviderAdvisory: true } : {}),"}
+{"file":"routing.ts","line":385,"mutator":"ConditionalExpression","replacement":"true","source":"} else if (resolution.selected && strategyWinner !== affinity.anchor.modelKey) {"}
+{"file":"routing.ts","line":385,"mutator":"ConditionalExpression","replacement":"true","source":"} else if (resolution.selected && strategyWinner !== affinity.anchor.modelKey) {"}
+{"file":"routing.ts","line":385,"mutator":"LogicalOperator","replacement":"resolution.selected || strategyWinner !== affinity.anchor.modelKey","source":"} else if (resolution.selected && strategyWinner !== affinity.anchor.modelKey) {"}
+{"file":"routing.ts","line":394,"mutator":"ObjectLiteral","replacement":"{}","source":"...(affinity.modeSource ? { modeSource: affinity.modeSource } : {}),"}
+{"file":"routing.ts","line":426,"mutator":"BooleanLiteral","replacement":"true","source":"hostCapabilities: { accountDispatch: false },"}
+{"file":"routing.ts","line":433,"mutator":"ConditionalExpression","replacement":"true","source":"?.filter(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\")"}
+{"file":"routing.ts","line":434,"mutator":"ArrayDeclaration","replacement":"[\"Stryker was here\"]","source":".map(({ key }) => key) ?? []);"}
+{"file":"routing.ts","line":435,"mutator":"ConditionalExpression","replacement":"true","source":"const candidates = rejected.size > 0"}
+{"file":"routing.ts","line":435,"mutator":"EqualityOperator","replacement":"rejected.size >= 0","source":"const candidates = rejected.size > 0"}
+{"file":"routing.ts","line":438,"mutator":"ConditionalExpression","replacement":"false","source":"if (!reliabilityState || reliabilityConfig?.enabled === false) {"}
+{"file":"routing.ts","line":438,"mutator":"OptionalChaining","replacement":"reliabilityConfig.enabled","source":"if (!reliabilityState || reliabilityConfig?.enabled === false) {"}
+{"file":"routing.ts","line":514,"mutator":"BooleanLiteral","replacement":"false","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":514,"mutator":"ConditionalExpression","replacement":"true","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":514,"mutator":"ConditionalExpression","replacement":"true","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":514,"mutator":"ConditionalExpression","replacement":"true","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":514,"mutator":"ConditionalExpression","replacement":"true","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":514,"mutator":"EqualityOperator","replacement":"pool.economic?.some(({\n  evaluation\n}) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") !== true","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":514,"mutator":"LogicalOperator","replacement":"evaluation.mode === \"policy\" || evaluation.disposition === \"rejected\"","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":514,"mutator":"MethodExpression","replacement":"pool.economic?.every(({\n  evaluation\n}) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\")","source":"pool.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true;"}
+{"file":"routing.ts","line":519,"mutator":"ConditionalExpression","replacement":"true","source":": primary.skipped.length > 0"}
+{"file":"routing.ts","line":519,"mutator":"EqualityOperator","replacement":"primary.skipped.length >= 0","source":": primary.skipped.length > 0"}
+{"file":"routing.ts","line":522,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"requested_tier_excluded\""}
+{"file":"routing.ts","line":528,"mutator":"BlockStatement","replacement":"{}","source":"if (requestedUnavailable && primary.skipped.length === 0 && !requestedExcluded && unavailable(fb)) {"}
+{"file":"routing.ts","line":528,"mutator":"BooleanLiteral","replacement":"requestedExcluded","source":"if (requestedUnavailable && primary.skipped.length === 0 && !requestedExcluded && unavailable(fb)) {"}
+{"file":"routing.ts","line":528,"mutator":"ConditionalExpression","replacement":"false","source":"if (requestedUnavailable && primary.skipped.length === 0 && !requestedExcluded && unavailable(fb)) {"}
+{"file":"routing.ts","line":528,"mutator":"ConditionalExpression","replacement":"true","source":"if (requestedUnavailable && primary.skipped.length === 0 && !requestedExcluded && unavailable(fb)) {"}
+{"file":"routing.ts","line":528,"mutator":"EqualityOperator","replacement":"primary.skipped.length !== 0","source":"if (requestedUnavailable && primary.skipped.length === 0 && !requestedExcluded && unavailable(fb)) {"}
+{"file":"routing.ts","line":528,"mutator":"LogicalOperator","replacement":"requestedUnavailable || primary.skipped.length === 0","source":"if (requestedUnavailable && primary.skipped.length === 0 && !requestedExcluded && unavailable(fb)) {"}
+{"file":"routing.ts","line":529,"mutator":"StringLiteral","replacement":"\"\"","source":"return \"requested_tier_unavailable\";"}
+{"file":"routing.ts","line":531,"mutator":"ConditionalExpression","replacement":"false","source":"if (fb.skipped.length > 0 || primary.skipped.length > 0) return \"all_tiers_exhausted\";"}
+{"file":"routing.ts","line":532,"mutator":"ConditionalExpression","replacement":"true","source":"if (reserveExcluded(primary) || reserveExcluded(fb)) return \"requested_tier_excluded\";"}
+{"file":"routing.ts","line":536,"mutator":"ConditionalExpression","replacement":"false","source":"if (!options.defaultTier || options.defaultTier === options.requestedTier) {"}
+{"file":"routing.ts","line":550,"mutator":"LogicalOperator","replacement":"options.defaultStrategy && options.requestedStrategy","source":"options.defaultStrategy ?? options.requestedStrategy,"}
+{"file":"routing.ts","line":586,"mutator":"OptionalChaining","replacement":"config.models[tier]","source":"pattern: config.models?.[tier] ?? tier,"}
+{"file":"routing.ts","line":598,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"BooleanLiteral","replacement":"false","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"ConditionalExpression","replacement":"true","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"ConditionalExpression","replacement":"false","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"ConditionalExpression","replacement":"true","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"ConditionalExpression","replacement":"false","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"ConditionalExpression","replacement":"true","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"ConditionalExpression","replacement":"true","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"EqualityOperator","replacement":"primary.economic?.some(({\n  evaluation\n}) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") !== true","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"EqualityOperator","replacement":"evaluation.mode !== \"policy\"","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"EqualityOperator","replacement":"evaluation.disposition !== \"rejected\"","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"LogicalOperator","replacement":"evaluation.mode === \"policy\" || evaluation.disposition === \"rejected\"","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"MethodExpression","replacement":"primary.economic?.every(({\n  evaluation\n}) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\")","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"StringLiteral","replacement":"\"\"","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":598,"mutator":"StringLiteral","replacement":"\"\"","source":"const primaryReserveExcluded = primary.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"reject"}
+{"file":"routing.ts","line":600,"mutator":"ConditionalExpression","replacement":"true","source":"resolution.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true);"}
+{"file":"routing.ts","line":600,"mutator":"ConditionalExpression","replacement":"true","source":"resolution.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true);"}
+{"file":"routing.ts","line":600,"mutator":"ConditionalExpression","replacement":"true","source":"resolution.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true);"}
+{"file":"routing.ts","line":600,"mutator":"ConditionalExpression","replacement":"true","source":"resolution.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true);"}
+{"file":"routing.ts","line":600,"mutator":"LogicalOperator","replacement":"evaluation.mode === \"policy\" || evaluation.disposition === \"rejected\"","source":"resolution.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true);"}
+{"file":"routing.ts","line":600,"mutator":"MethodExpression","replacement":"resolution.economic?.every(({\n  evaluation\n}) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\")","source":"resolution.economic?.some(({ evaluation }) => evaluation.mode === \"policy\" && evaluation.disposition === \"rejected\") === true);"}
+{"file":"routing.ts","line":601,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const allPoolsUnavailable = attemptedTiers.every(({ resolution }) => resolution.candidates.length === 0 && resolution.skipped.length === 0);"}
+{"file":"routing.ts","line":601,"mutator":"ConditionalExpression","replacement":"false","source":"const allPoolsUnavailable = attemptedTiers.every(({ resolution }) => resolution.candidates.length === 0 && resolution.skipped.length === 0);"}
+{"file":"routing.ts","line":601,"mutator":"ConditionalExpression","replacement":"true","source":"const allPoolsUnavailable = attemptedTiers.every(({ resolution }) => resolution.candidates.length === 0 && resolution.skipped.length === 0);"}
+{"file":"routing.ts","line":601,"mutator":"EqualityOperator","replacement":"resolution.skipped.length !== 0","source":"const allPoolsUnavailable = attemptedTiers.every(({ resolution }) => resolution.candidates.length === 0 && resolution.skipped.length === 0);"}
+{"file":"routing.ts","line":602,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const anySkipped = attemptedTiers.some(({ resolution }) => resolution.skipped.length > 0);"}
+{"file":"routing.ts","line":602,"mutator":"ConditionalExpression","replacement":"false","source":"const anySkipped = attemptedTiers.some(({ resolution }) => resolution.skipped.length > 0);"}
+{"file":"routing.ts","line":602,"mutator":"MethodExpression","replacement":"attemptedTiers.every(({\n  resolution\n}) => resolution.skipped.length > 0)","source":"const anySkipped = attemptedTiers.some(({ resolution }) => resolution.skipped.length > 0);"}
+{"file":"routing.ts","line":604,"mutator":"ConditionalExpression","replacement":"false","source":"? selectedAttempt.tier === options.requestedTier"}
+{"file":"routing.ts","line":604,"mutator":"ConditionalExpression","replacement":"true","source":"? selectedAttempt.tier === options.requestedTier"}
+{"file":"routing.ts","line":604,"mutator":"EqualityOperator","replacement":"selectedAttempt.tier !== options.requestedTier","source":"? selectedAttempt.tier === options.requestedTier"}
+{"file":"routing.ts","line":606,"mutator":"ConditionalExpression","replacement":"true","source":": primary.candidates.length === 0"}
+{"file":"routing.ts","line":606,"mutator":"ConditionalExpression","replacement":"false","source":": primary.candidates.length === 0"}
+{"file":"routing.ts","line":606,"mutator":"EqualityOperator","replacement":"primary.candidates.length !== 0","source":": primary.candidates.length === 0"}
+{"file":"routing.ts","line":607,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"requested_tier_unavailable\""}
+{"file":"routing.ts","line":608,"mutator":"ConditionalExpression","replacement":"true","source":": primary.skipped.length > 0"}
+{"file":"routing.ts","line":608,"mutator":"ConditionalExpression","replacement":"false","source":": primary.skipped.length > 0"}
+{"file":"routing.ts","line":608,"mutator":"EqualityOperator","replacement":"primary.skipped.length >= 0","source":": primary.skipped.length > 0"}
+{"file":"routing.ts","line":608,"mutator":"EqualityOperator","replacement":"primary.skipped.length <= 0","source":": primary.skipped.length > 0"}
+{"file":"routing.ts","line":609,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"requested_tier_unhealthy\""}
+{"file":"routing.ts","line":611,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"requested_tier_excluded\""}
+{"file":"routing.ts","line":613,"mutator":"ConditionalExpression","replacement":"false","source":": attemptedTiers.length === 1 && primary.skipped.length > 0"}
+{"file":"routing.ts","line":613,"mutator":"ConditionalExpression","replacement":"true","source":": attemptedTiers.length === 1 && primary.skipped.length > 0"}
+{"file":"routing.ts","line":613,"mutator":"ConditionalExpression","replacement":"true","source":": attemptedTiers.length === 1 && primary.skipped.length > 0"}
+{"file":"routing.ts","line":613,"mutator":"EqualityOperator","replacement":"attemptedTiers.length !== 1","source":": attemptedTiers.length === 1 && primary.skipped.length > 0"}
+{"file":"routing.ts","line":613,"mutator":"EqualityOperator","replacement":"primary.skipped.length >= 0","source":": attemptedTiers.length === 1 && primary.skipped.length > 0"}
+{"file":"routing.ts","line":613,"mutator":"EqualityOperator","replacement":"primary.skipped.length <= 0","source":": attemptedTiers.length === 1 && primary.skipped.length > 0"}
+{"file":"routing.ts","line":613,"mutator":"LogicalOperator","replacement":"attemptedTiers.length === 1 || primary.skipped.length > 0","source":": attemptedTiers.length === 1 && primary.skipped.length > 0"}
+{"file":"routing.ts","line":614,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"requested_tier_unhealthy\""}
+{"file":"routing.ts","line":616,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"requested_tier_unavailable\""}
+{"file":"routing.ts","line":618,"mutator":"StringLiteral","replacement":"\"\"","source":"? \"all_tiers_exhausted\""}
+{"file":"routing.ts","line":626,"mutator":"LogicalOperator","replacement":"selectedAttempt?.strategy && options.requestedStrategy","source":"strategy: selectedAttempt?.strategy ?? options.requestedStrategy,"}
+{"file":"routing.ts","line":627,"mutator":"ArrowFunction","replacement":"() => undefined","source":"skipped: attemptedTiers.flatMap(({ resolution }) => resolution.skipped),"}
+{"file":"routing.ts","line":628,"mutator":"ConditionalExpression","replacement":"true","source":"...(fallbackReason !== undefined ? { fallbackReason } : {}),"}
+{"file":"routing.ts","line":652,"mutator":"StringLiteral","replacement":"\"\"","source":"const re = new RegExp(rule.pattern, \"i\");"}
+{"file":"routing.ts","line":653,"mutator":"ConditionalExpression","replacement":"true","source":"if (re.test(text)) return rule.model;"}
+{"file":"routing.ts","line":654,"mutator":"BlockStatement","replacement":"{}","source":"} catch (err) {"}
+{"file":"routing.ts","line":655,"mutator":"StringLiteral","replacement":"``","source":"console.error(`[bifrost] invalid regex \"${rule.pattern}\": ${err}`);"}
+{"file":"routing.ts","line":672,"mutator":"StringLiteral","replacement":"\"\"","source":"compiled.push({ re: new RegExp(rule.pattern, \"i\"), model: rule.model });"}
+{"file":"routing.ts","line":673,"mutator":"BlockStatement","replacement":"{}","source":"} catch (err) {"}
+{"file":"routing.ts","line":674,"mutator":"StringLiteral","replacement":"``","source":"console.error(`[bifrost] invalid regex \"${rule.pattern}\": ${err}`);"}
+{"file":"routing.ts","line":683,"mutator":"ConditionalExpression","replacement":"true","source":"if (rule.re.test(text)) return rule.model;"}
+{"file":"routing.ts","line":701,"mutator":"BlockStatement","replacement":"{}","source":"export function guessTier(model: Model<Api>): \"frontier\" | \"general\" | \"quick\" | undefined {"}
+{"file":"routing.ts","line":702,"mutator":"ArithmeticOperator","replacement":"(model.cost?.input ?? 0) - (model.cost?.output ?? 0)","source":"const cost = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);"}
+{"file":"routing.ts","line":702,"mutator":"LogicalOperator","replacement":"model.cost?.input && 0","source":"const cost = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);"}
+{"file":"routing.ts","line":702,"mutator":"LogicalOperator","replacement":"model.cost?.output && 0","source":"const cost = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);"}
+{"file":"routing.ts","line":702,"mutator":"OptionalChaining","replacement":"model.cost.input","source":"const cost = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);"}
+{"file":"routing.ts","line":702,"mutator":"OptionalChaining","replacement":"model.cost.output","source":"const cost = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);"}
+{"file":"routing.ts","line":703,"mutator":"ConditionalExpression","replacement":"true","source":"if (cost > FRONTIER_COST_THRESHOLD) return \"frontier\";"}
+{"file":"routing.ts","line":703,"mutator":"ConditionalExpression","replacement":"false","source":"if (cost > FRONTIER_COST_THRESHOLD) return \"frontier\";"}
+{"file":"routing.ts","line":703,"mutator":"EqualityOperator","replacement":"cost >= FRONTIER_COST_THRESHOLD","source":"if (cost > FRONTIER_COST_THRESHOLD) return \"frontier\";"}
+{"file":"routing.ts","line":703,"mutator":"EqualityOperator","replacement":"cost <= FRONTIER_COST_THRESHOLD","source":"if (cost > FRONTIER_COST_THRESHOLD) return \"frontier\";"}
+{"file":"routing.ts","line":703,"mutator":"StringLiteral","replacement":"\"\"","source":"if (cost > FRONTIER_COST_THRESHOLD) return \"frontier\";"}
+{"file":"routing.ts","line":704,"mutator":"ConditionalExpression","replacement":"true","source":"if (cost < QUICK_COST_THRESHOLD) return \"quick\";"}
+{"file":"routing.ts","line":704,"mutator":"ConditionalExpression","replacement":"false","source":"if (cost < QUICK_COST_THRESHOLD) return \"quick\";"}
+{"file":"routing.ts","line":704,"mutator":"EqualityOperator","replacement":"cost <= QUICK_COST_THRESHOLD","source":"if (cost < QUICK_COST_THRESHOLD) return \"quick\";"}
+{"file":"routing.ts","line":704,"mutator":"EqualityOperator","replacement":"cost >= QUICK_COST_THRESHOLD","source":"if (cost < QUICK_COST_THRESHOLD) return \"quick\";"}
+{"file":"routing.ts","line":704,"mutator":"StringLiteral","replacement":"\"\"","source":"if (cost < QUICK_COST_THRESHOLD) return \"quick\";"}
+{"file":"routing.ts","line":705,"mutator":"StringLiteral","replacement":"\"\"","source":"return \"general\";"}

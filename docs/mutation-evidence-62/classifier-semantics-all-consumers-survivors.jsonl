@@ -1,0 +1,76 @@
+{"file":"classifier-semantics.ts","line":11,"mutator":"ConditionalExpression","replacement":"false","source":"return text.length <= maxChars ? text : text.slice(0, maxChars);"}
+{"file":"classifier-semantics.ts","line":11,"mutator":"EqualityOperator","replacement":"text.length < maxChars","source":"return text.length <= maxChars ? text : text.slice(0, maxChars);"}
+{"file":"classifier-semantics.ts","line":15,"mutator":"BlockStatement","replacement":"{}","source":"export function criterionText(value: TierCriterion): string {"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"ConditionalExpression","replacement":"false","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"ConditionalExpression","replacement":"true","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"EqualityOperator","replacement":"typeof value !== \"string\"","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":16,"mutator":"StringLiteral","replacement":"\"\"","source":"if (typeof value === \"string\") return value;"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"ArrayDeclaration","replacement":"[]","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"MethodExpression","replacement":"[value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"OptionalChaining","replacement":"value.examples.length","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"``","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"\"Stryker was here!\"","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"``","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"\"\"","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":17,"mutator":"StringLiteral","replacement":"\"Stryker was here!\"","source":"return [value.what, value.notFor ? `Not for: ${value.notFor}` : \"\", value.examples?.length ? `Examples: ${value.examples.join(\", \")}` : \"\"]"}
+{"file":"classifier-semantics.ts","line":18,"mutator":"StringLiteral","replacement":"\"\"","source":".filter(Boolean).join(\" \");"}
+{"file":"classifier-semantics.ts","line":22,"mutator":"BlockStatement","replacement":"{}","source":"export function finite(value: unknown): value is number {"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"ConditionalExpression","replacement":"true","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"ConditionalExpression","replacement":"false","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"ConditionalExpression","replacement":"true","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"EqualityOperator","replacement":"typeof value !== \"number\"","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"LogicalOperator","replacement":"typeof value === \"number\" || Number.isFinite(value)","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":23,"mutator":"StringLiteral","replacement":"\"\"","source":"return typeof value === \"number\" && Number.isFinite(value);"}
+{"file":"classifier-semantics.ts","line":26,"mutator":"BlockStatement","replacement":"{}","source":"export function sleep(ms: number): Promise<void> {"}
+{"file":"classifier-semantics.ts","line":27,"mutator":"ArrowFunction","replacement":"() => undefined","source":"return new Promise((resolve) => setTimeout(resolve, ms));"}
+{"file":"classifier-semantics.ts","line":34,"mutator":"BlockStatement","replacement":"{}","source":"): Promise<boolean> {"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"BooleanLiteral","replacement":"true","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"ConditionalExpression","replacement":"true","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"ConditionalExpression","replacement":"false","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":35,"mutator":"OptionalChaining","replacement":"signal.aborted","source":"if (signal?.aborted) return Promise.resolve(false);"}
+{"file":"classifier-semantics.ts","line":36,"mutator":"BlockStatement","replacement":"{}","source":"return new Promise((resolve, reject) => {"}
+{"file":"classifier-semantics.ts","line":37,"mutator":"BooleanLiteral","replacement":"true","source":"let settled = false;"}
+{"file":"classifier-semantics.ts","line":38,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const cleanup = () => signal?.removeEventListener(\"abort\", abort);"}
+{"file":"classifier-semantics.ts","line":38,"mutator":"OptionalChaining","replacement":"signal.removeEventListener","source":"const cleanup = () => signal?.removeEventListener(\"abort\", abort);"}
+{"file":"classifier-semantics.ts","line":38,"mutator":"StringLiteral","replacement":"\"\"","source":"const cleanup = () => signal?.removeEventListener(\"abort\", abort);"}
+{"file":"classifier-semantics.ts","line":39,"mutator":"BlockStatement","replacement":"{}","source":"const finish = (continued: boolean) => {"}
+{"file":"classifier-semantics.ts","line":40,"mutator":"ConditionalExpression","replacement":"false","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":40,"mutator":"ConditionalExpression","replacement":"true","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":41,"mutator":"BooleanLiteral","replacement":"false","source":"settled = true;"}
+{"file":"classifier-semantics.ts","line":42,"mutator":"CallExpression","replacement":";","source":"cleanup();"}
+{"file":"classifier-semantics.ts","line":43,"mutator":"CallExpression","replacement":";","source":"resolve(continued);"}
+{"file":"classifier-semantics.ts","line":45,"mutator":"ArrowFunction","replacement":"() => undefined","source":"const abort = () => finish(false);"}
+{"file":"classifier-semantics.ts","line":45,"mutator":"BooleanLiteral","replacement":"true","source":"const abort = () => finish(false);"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"BooleanLiteral","replacement":"false","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"ObjectLiteral","replacement":"{}","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"OptionalChaining","replacement":"signal.addEventListener","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":46,"mutator":"StringLiteral","replacement":"\"\"","source":"signal?.addEventListener(\"abort\", abort, { once: true });"}
+{"file":"classifier-semantics.ts","line":47,"mutator":"ArrowFunction","replacement":"() => undefined","source":"delay(ms).then(() => finish(true), (error) => {"}
+{"file":"classifier-semantics.ts","line":47,"mutator":"BlockStatement","replacement":"{}","source":"delay(ms).then(() => finish(true), (error) => {"}
+{"file":"classifier-semantics.ts","line":47,"mutator":"BooleanLiteral","replacement":"false","source":"delay(ms).then(() => finish(true), (error) => {"}
+{"file":"classifier-semantics.ts","line":48,"mutator":"ConditionalExpression","replacement":"true","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":48,"mutator":"ConditionalExpression","replacement":"false","source":"if (settled) return;"}
+{"file":"classifier-semantics.ts","line":49,"mutator":"BooleanLiteral","replacement":"false","source":"settled = true;"}
+{"file":"classifier-semantics.ts","line":50,"mutator":"CallExpression","replacement":";","source":"cleanup();"}
+{"file":"classifier-semantics.ts","line":51,"mutator":"CallExpression","replacement":";","source":"reject(error);"}
+{"file":"classifier-semantics.ts","line":57,"mutator":"ConditionalExpression","replacement":"false","source":"if (Array.isArray(value)) return value.map(stableValue);"}
+{"file":"classifier-semantics.ts","line":88,"mutator":"ConditionalExpression","replacement":"true","source":"const isDirect = input.backend === CLASSIFIER_BACKEND_IDS.typesafe"}
+{"file":"classifier-semantics.ts","line":91,"mutator":"ConditionalExpression","replacement":"true","source":"const useDirect = stagesEnabled && isDirect && input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":91,"mutator":"LogicalOperator","replacement":"stagesEnabled || isDirect","source":"const useDirect = stagesEnabled && isDirect && input.directConfigOk;"}
+{"file":"classifier-semantics.ts","line":102,"mutator":"OptionalChaining","replacement":"config.classifier.piNative","source":"&& !(effectiveBackend === CLASSIFIER_BACKEND_IDS.piNative && !config.classifier?.piNative?.model);"}
+{"file":"classifier-semantics.ts","line":121,"mutator":"OptionalChaining","replacement":"classifier.backend","source":"backend: runtime.effectiveBackend ?? classifier?.backend ?? CLASSIFIER_BACKEND_IDS.prompt,"}
+{"file":"classifier-semantics.ts","line":122,"mutator":"OptionalChaining","replacement":"classifier.model","source":"model: classifier?.model,"}
+{"file":"classifier-semantics.ts","line":123,"mutator":"OptionalChaining","replacement":"classifier.piNative","source":"piNativeModel: runtime.piNativeModel ?? classifier?.piNative?.model,"}
+{"file":"classifier-semantics.ts","line":124,"mutator":"OptionalChaining","replacement":"classifier.endpoint","source":"endpoint: classifier?.endpoint,"}
+{"file":"classifier-semantics.ts","line":125,"mutator":"OptionalChaining","replacement":"classifier.method","source":"method: classifier?.method,"}
+{"file":"classifier-semantics.ts","line":126,"mutator":"OptionalChaining","replacement":"classifier.systemPrompt","source":"systemPrompt: classifier?.systemPrompt,"}
+{"file":"classifier-semantics.ts","line":127,"mutator":"OptionalChaining","replacement":"classifier.maxTokens","source":"maxTokens: classifier?.maxTokens,"}
+{"file":"classifier-semantics.ts","line":128,"mutator":"OptionalChaining","replacement":"classifier.temperature","source":"temperature: classifier?.temperature,"}
+{"file":"classifier-semantics.ts","line":129,"mutator":"OptionalChaining","replacement":"classifier.fallbackToRegex","source":"fallbackToRegex: classifier?.fallbackToRegex,"}
+{"file":"classifier-semantics.ts","line":130,"mutator":"LogicalOperator","replacement":"classifier?.typesafe?.model && TYPE_SAFE_MODEL","source":"typesafeModel: classifier?.typesafe?.model ?? TYPE_SAFE_MODEL,"}
+{"file":"classifier-semantics.ts","line":130,"mutator":"OptionalChaining","replacement":"classifier.typesafe","source":"typesafeModel: classifier?.typesafe?.model ?? TYPE_SAFE_MODEL,"}
+{"file":"classifier-semantics.ts","line":131,"mutator":"OptionalChaining","replacement":"classifier.criteria","source":"criteria: classifier?.criteria,"}
+{"file":"classifier-semantics.ts","line":132,"mutator":"LogicalOperator","replacement":"classifier?.minConfidence && 0.8","source":"minConfidence: classifier?.minConfidence ?? 0.8,"}
+{"file":"classifier-semantics.ts","line":132,"mutator":"OptionalChaining","replacement":"classifier.minConfidence","source":"minConfidence: classifier?.minConfidence ?? 0.8,"}
+{"file":"classifier-semantics.ts","line":133,"mutator":"OptionalChaining","replacement":"classifier.fallback","source":"fallback: classifier?.fallback,"}
+{"file":"classifier-semantics.ts","line":134,"mutator":"BooleanLiteral","replacement":"true","source":"typesafeCredentialAvailable: runtime.typesafeCredentialAvailable ?? false,"}

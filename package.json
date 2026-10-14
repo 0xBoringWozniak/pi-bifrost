@@ -53,6 +53,7 @@
     "build:router": "node scripts/build-router.mjs",
     "prepack": "npm run build:router",
     "test": "node --test --experimental-strip-types \"tests/*.test.ts\" \"tests/*.test.mjs\"",
+    "test:mutation": "stryker run",
     "test:integration": "node --test --experimental-strip-types tests/integration/*.test.mjs",
     "test:ui": "python3 scripts/ui-smoke.py",
     "test:ui:agent-tui": "bash scripts/ui-smoke-agent-tui.sh",
@@ -73,6 +74,7 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "1.0.1",
     "@earendil-works/pi-coding-agent": "1.0.1",
+    "@stryker-mutator/core": "^10.0.0",
     "@types/node": "^26.1.1",
     "agent-tui": "^1.1.0",
     "fast-check": "4.10.2",
