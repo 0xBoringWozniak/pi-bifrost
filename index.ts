@@ -3630,7 +3630,11 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     // runner (src/runs/background/subagent-runner.js). Scope this bypass to
     // that verified child-host marker; PI_SUBAGENT_RUN_ID is not a producer
     // contract in the installed SDK and must not drive routing decisions.
-    const explicitSubagentChild = process.env.PI_SUBAGENT_CHILD === "1";
+    // The bypass preserves a child host's fixed physical model identity, but
+    // an explicitly selected bifrost/auto child owns per-request virtual
+    // dispatch (including the inline tier handoff below), so only physical
+    // selections take the early return.
+    const explicitSubagentChild = process.env.PI_SUBAGENT_CHILD === "1" && !isBifrostAuto(ctx.model);
     if (explicitSubagentChild) {
       debug("input", "subagent", {
         source: "PI-subagent",
