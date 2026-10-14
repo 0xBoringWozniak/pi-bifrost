@@ -1,10 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execPath } from "node:process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -28,8 +29,7 @@ function stopChild(child, graceMs = 1_000) {
   });
 }
 
-function startFakeServer() {
-  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
+function waitForFakeReady(child) {
   return new Promise((resolve, reject) => {
     let output = "";
     let settled = false;
@@ -49,7 +49,7 @@ function startFakeServer() {
         const ready = JSON.parse(output);
         settled = true;
         clearTimeout(timer);
-        resolve({ child, port: ready.port });
+        resolve({ port: ready.port });
       } catch {
         // Wait for the server's complete one-line startup record.
       }
@@ -59,6 +59,11 @@ function startFakeServer() {
       if (!settled) void fail("fake provider exited before startup");
     });
   });
+}
+
+function startFakeServer() {
+  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
+  return waitForFakeReady(child).then(({ port }) => ({ child, port }));
 }
 
 async function readStats(port) {
@@ -126,26 +131,29 @@ function runPi({ home, work, model, prompt, child }) {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    let forceKill;
+    let spawnError;
     childProcess.stdout.setEncoding("utf8");
     childProcess.stderr.setEncoding("utf8");
     childProcess.stdout.on("data", (chunk) => { stdout += chunk; });
     childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
+    childProcess.on("error", (error) => { spawnError = error; });
+    // Bounded termination: SIGTERM, then SIGKILL after the grace window,
+    // resolving only on close so cleanup never races a live child.
     const timer = setTimeout(() => {
       timedOut = true;
-      childProcess.kill("SIGTERM");
+      void stopChild(childProcess, 5_000);
     }, 60_000);
-    childProcess.on("error", async (error) => {
-      clearTimeout(timer);
-      clearTimeout(forceKill);
-      await stopChild(childProcess);
-      reject(error);
-    });
     childProcess.on("close", async (code) => {
       clearTimeout(timer);
-      clearTimeout(forceKill);
+      if (spawnError) {
+        reject(spawnError);
+        return;
+      }
+      if (timedOut) {
+        reject(new Error(`Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`));
+        return;
+      }
       try {
-        if (timedOut) throw new Error(`Pi timed out and exited after termination (stdout=${stdout.length}, stderr=${stderr.length})`);
         const violationsText = readFileSync(violations, "utf8");
         assert.equal(violationsText, "", "Pi child made a blocked outbound attempt");
         resolve({ code, stdout, stderr, violations: violationsText });
@@ -200,16 +208,121 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         const dispatch = { "physical-fast": 0, "physical-capable": 0, ...attempts };
         assert.deepEqual(dispatch, testCase.expected,
           `child=${JSON.stringify(testCase.child)} model=${testCase.model} prompt=${JSON.stringify(testCase.prompt)} dispatched ${JSON.stringify(attempts)}`);
-        // Non-vacuous fence: the fenced Pi child reached exactly the allowed
-        // origin (the attempts delta above is non-zero), and the pre-created
-        // violation log proves the guard was armed and silent.
-        assert.ok(Object.values(attempts).reduce((sum, count) => sum + count, 0) >= 1,
-          "no provider attempt reached the allowed fake provider origin");
+        // The main matrix keeps the real allowed loopback transport and
+        // asserts zero outbound violations. That absence alone is not proof
+        // the guard blocks; the negative-control test below supplies it.
         assert.equal(result.violations, "", "network fence recorded a violation");
       } finally {
         rmSync(home, { recursive: true, force: true });
         rmSync(work, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("force-kills a real SIGTERM-ignoring child, awaits close, and frees its scratch", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "bifrost-term-proof-"));
+    const stubborn = spawn(execPath, ["-e",
+      "process.on('SIGTERM', () => {}); process.stdout.write('stubborn-ready\\n'); setInterval(() => {}, 1000);"],
+      { stdio: ["ignore", "pipe", "ignore"], cwd: scratch });
+    try {
+      // Readiness comes from the child's observable ready record, no sleep.
+      await new Promise((resolve, reject) => {
+        stubborn.stdout.setEncoding("utf8");
+        stubborn.stdout.once("data", (chunk) => {
+          if (chunk.includes("stubborn-ready")) resolve();
+          else reject(new Error(`unexpected startup output: ${chunk}`));
+        });
+        stubborn.once("error", reject);
+        stubborn.once("close", () => reject(new Error("child exited before it could ignore SIGTERM")));
+      });
+      await stopChild(stubborn, 300);
+      // stopChild resolves on close, so the dead child cannot hold the scratch.
+      assert.equal(stubborn.exitCode, null, "SIGTERM-ignoring child must not exit via TERM");
+      assert.equal(stubborn.signalCode, "SIGKILL", "SIGTERM-ignoring child must be force-killed");
+      rmSync(scratch, { recursive: true, force: true });
+      assert.equal(existsSync(scratch), false, "scratch must be removable after the forced close");
+    } finally {
+      await stopChild(stubborn, 300);
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects fake-provider startup when the child exits before its ready record", async () => {
+    const failing = spawn(execPath, ["-e", "process.exit(3)"], { stdio: ["ignore", "pipe", "ignore"] });
+    await assert.rejects(waitForFakeReady(failing), /fake provider exited before startup/);
+    await stopChild(failing);
+  });
+
+  it("records forbidden fetch, socket, and UDP attempts through the same preloaded guard", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-guard-negative-home-"));
+    try {
+      const violations = join(home, "test-network-violations.log");
+      writeFileSync(violations, "");
+      // Same preload, same guard, same allowed-origin contract as runPi.
+      // Without the preload (guard-removal mutation) nothing records the
+      // forbidden attempts, so the record assertions below go RED.
+      const probe = await new Promise((resolve, reject) => {
+        const childProcess = spawn(execPath, ["-e", `
+          const net = require("node:net");
+          const dgram = require("node:dgram");
+          (async () => {
+            const allowed = await fetch("http://127.0.0.1:${fakePort}/_stats");
+            const stats = await allowed.json();
+            if (!stats || typeof stats.attempts !== "object") process.exitCode = 7;
+            const unreachable = ${fakePort + 1};
+            for (const attempt of [
+              () => fetch("http://127.0.0.1:" + unreachable),
+              () => new Promise((resolveAttempt) => {
+                const socket = new net.Socket();
+                const done = () => { socket.destroy(); resolveAttempt(); };
+                socket.once("error", done);
+                try { socket.connect({ port: unreachable, host: "127.0.0.1" }, done); } catch { done(); }
+              }),
+              () => new Promise((resolveAttempt) => {
+                const socket = dgram.createSocket("udp4");
+                const done = () => { try { socket.close(); } catch {} resolveAttempt(); };
+                try {
+                  socket.send(Buffer.from("fixture"), unreachable, "127.0.0.1", done);
+                } catch { done(); }
+              }),
+            ]) { try { await attempt(); } catch {} }
+          })();
+        `], {
+          stdio: ["ignore", "pipe", "pipe"],
+          cwd: ROOT,
+          env: {
+            PATH: process.env.PATH,
+            NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
+            BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
+            BIFROST_TEST_NETWORK_VIOLATIONS: violations,
+          },
+        });
+        let stderr = "";
+        let timedOut = false;
+        childProcess.stderr.setEncoding("utf8");
+        childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
+        // Bounded termination so a leaking probe cannot hang the suite.
+        const killer = setTimeout(() => {
+          timedOut = true;
+          void stopChild(childProcess, 1_000);
+        }, 30_000);
+        childProcess.once("error", reject);
+        childProcess.once("close", (code) => {
+          clearTimeout(killer);
+          if (timedOut) reject(new Error(`guard negative-control probe exceeded its bounded window (stderr=${stderr.length})`));
+          else resolve({ code, stderr });
+        });
+      });
+      assert.equal(probe.code, 0, probe.stderr);
+      const attempts = readFileSync(violations, "utf8");
+      assert.match(attempts, /blocked fetch to http:\/\/127\.0\.0\.1:/,
+        "forbidden fetch must be blocked and specifically recorded");
+      assert.match(attempts, /blocked socket connection to 127\.0\.0\.1:/,
+        "forbidden socket connection must be blocked and specifically recorded");
+      assert.match(attempts, /blocked UDP datagram to 127\.0\.0\.1/,
+        "forbidden UDP datagram must be blocked and specifically recorded");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });
