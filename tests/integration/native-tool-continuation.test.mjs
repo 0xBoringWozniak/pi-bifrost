@@ -13,6 +13,37 @@ const child = join(root, "tests", "fixtures", "native-tool-continuation-child.mj
 const guard = join(root, "scripts", "test-outbound-guard.cjs");
 const credentials = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function killProcessGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
+async function waitForGroupTermination(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(-pid, 0);
+    } catch {
+      return;
+    }
+    await delay(20);
+  }
+  try {
+    process.kill(-pid, 0);
+    throw new Error("owned process group did not terminate: " + pid);
+  } catch {
+    return;
+  }
+}
+
 function runNode(args, options) {
   return new Promise((resolve, reject) => {
     const childProcess = spawn(execPath, args, {
@@ -20,6 +51,7 @@ function runNode(args, options) {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const pid = childProcess.pid;
     let stdout = "";
     let stderr = "";
     if (childProcess.stdout) childProcess.stdout.setEncoding("utf8");
@@ -27,52 +59,104 @@ function runNode(args, options) {
     if (childProcess.stdout) childProcess.stdout.on("data", (chunk) => { stdout += chunk; });
     if (childProcess.stderr) childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
 
-    const timeoutMs = options.timeoutMs || 20000;
-    let settled = false;
-    let timer = null;
-    let termTimer = null;
-
-    function cleanupTimers() {
-      if (timer) clearTimeout(timer);
-      if (termTimer) clearTimeout(termTimer);
-      timer = null;
-      termTimer = null;
-    }
-
-    function finish(error, result) {
-      if (settled) return;
-      settled = true;
-      cleanupTimers();
-      try { process.kill(-childProcess.pid, "SIGKILL"); } catch {}
-      if (error) reject(error); else resolve(result);
-    }
-
-    childProcess.once("error", (error) => finish(error));
-    childProcess.once("close", (status, signal) => {
-      finish(null, { status, signal, stdout, stderr });
+    let closed = false;
+    let exitCode = null;
+    let exitSignal = null;
+    const closePromise = new Promise((resolveClose) => {
+      childProcess.once("close", (code, signal) => {
+        closed = true;
+        exitCode = code;
+        exitSignal = signal;
+        resolveClose();
+      });
     });
 
-    timer = setTimeout(() => {
-      try { process.kill(-childProcess.pid, "SIGTERM"); } catch {}
-      termTimer = setTimeout(() => {
-        try { process.kill(-childProcess.pid, "SIGKILL"); } catch {}
-        finish(new Error("runNode timed out after " + timeoutMs + "ms\n" + stdout + "\n" + stderr));
-      }, 2000);
+    const timeoutMs = options.timeoutMs || 20000;
+    let escalationTimer = null;
+    let settled = false;
+
+    function succeed() {
+      if (settled) return;
+      settled = true;
+      if (escalationTimer) clearTimeout(escalationTimer);
+      resolve({ status: exitCode, signal: exitSignal, stdout, stderr, closeObserved: closed, groupTerminated: true });
+    }
+
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      if (escalationTimer) clearTimeout(escalationTimer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+
+    childProcess.once("error", (error) => fail(error));
+
+    escalationTimer = setTimeout(async () => {
+      const termError = killProcessGroup(pid, "SIGTERM");
+      if (termError && termError.code !== "ESRCH") {
+        fail(new Error("SIGTERM failed for owned process group " + pid + ": " + termError.message + "\n" + stdout + "\n" + stderr));
+        return;
+      }
+      await delay(2000);
+      const killError = killProcessGroup(pid, "SIGKILL");
+      if (killError && killError.code !== "ESRCH") {
+        fail(new Error("SIGKILL failed for owned process group " + pid + ": " + killError.message + "\n" + stdout + "\n" + stderr));
+        return;
+      }
+      const closedInTime = await Promise.race([
+        closePromise.then(() => true),
+        delay(2000).then(() => false),
+      ]);
+      if (!closedInTime) {
+        fail(new Error("owned child did not close after escalation\n" + stdout + "\n" + stderr));
+        return;
+      }
+      try {
+        await waitForGroupTermination(pid, 1000);
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      succeed();
     }, timeoutMs);
+
+    closePromise.then(async () => {
+      if (settled) return;
+      clearTimeout(escalationTimer);
+      escalationTimer = null;
+      try {
+        await waitForGroupTermination(pid, 200);
+      } catch {
+        const killError = killProcessGroup(pid, "SIGKILL");
+        if (killError && killError.code !== "ESRCH") {
+          fail(new Error("SIGKILL failed for owned process group " + pid + ": " + killError.message + "\n" + stdout + "\n" + stderr));
+          return;
+        }
+        try {
+          await waitForGroupTermination(pid, 1000);
+        } catch (error) {
+          fail(error);
+          return;
+        }
+      }
+      succeed();
+    });
   });
 }
+
 
 it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fence", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "bifrost-native-tool-continuation-"));
   const violations = join(scratch, "network-violations.log");
   const server = createServer((_request, response) => response.end("allowed loopback fixture"));
-  const port = 65534;
   const previousCredentials = Object.fromEntries(credentials.map((name) => [name, process.env[name]]));
   try {
     await new Promise((resolve, reject) => {
       server.once("error", reject);
-      server.listen(port, "127.0.0.1", resolve);
+      server.listen(0, "127.0.0.1", resolve);
     });
+    const port = server.address().port;
+    const forbiddenPort = port === 65535 ? 65534 : port + 1;
     for (const name of credentials) process.env[name] = "ambient-secret-fixture";
     const isolatedEnv = {
       PATH: process.env.PATH,
@@ -96,12 +180,25 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
         const allowed = await fetch("http://127.0.0.1:${port}");
         if (await allowed.text() !== "allowed loopback fixture") process.exitCode = 8;
         for (const attempt of [
-          () => fetch("https://127.0.0.1:${port}"),
-          () => fetch("http://127.0.0.1:65535"),
-          () => new net.Socket().connect({ port: 65535, host: "127.0.0.1" }),
-          () => tls.connect({ port: 65535, host: "127.0.0.1" }),
-          () => dgram.createSocket("udp4").send(Buffer.from("fixture"), ${port}, "127.0.0.1"),
+          () => fetch("https://127.0.0.1:${forbiddenPort}"),
+          () => fetch("http://127.0.0.1:${forbiddenPort}"),
         ]) { try { await attempt(); } catch {} }
+        try {
+          const socket = new net.Socket();
+          socket.on("error", () => {});
+          socket.connect({ port: ${forbiddenPort}, host: "127.0.0.1" });
+          socket.destroy();
+        } catch {}
+        try {
+          const tlsSocket = tls.connect({ port: ${forbiddenPort}, host: "127.0.0.1" });
+          tlsSocket.on("error", () => {});
+          tlsSocket.destroy();
+        } catch {}
+        try {
+          const udp = dgram.createSocket("udp4");
+          udp.on("error", () => {});
+          udp.send(Buffer.from("fixture"), ${forbiddenPort}, "127.0.0.1", () => { try { udp.close(); } catch {} });
+        } catch {}
         if (${JSON.stringify(credentials)}.some((name) => process.env[name] !== undefined)) process.exitCode = 9;
       })();
     `], { cwd: root, env: isolatedEnv });

@@ -13,6 +13,9 @@ const allowLoopback = process.env.BIFROST_TEST_ALLOW_LOOPBACK === "1";
 if (process.env.BIFROST_TEST_ALLOW_LOOPBACK && !allowLoopback) {
   throw new Error("BIFROST_TEST_ALLOW_LOOPBACK must be exactly 1 when set");
 }
+if (process.env.BIFROST_TEST_DENY_ALL && process.env.BIFROST_TEST_DENY_ALL !== "1") {
+  throw new Error("BIFROST_TEST_DENY_ALL must be exactly 1 when set");
+}
 if (denyAll && (rawOrigin || allowLoopback)) {
   throw new Error("deny-all guard cannot be combined with allowed origins");
 }
