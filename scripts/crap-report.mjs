@@ -328,7 +328,7 @@ export function collectFunctions(sourceText, fileName = "source.ts") {
     for (const other of functions) {
       if (other === fn) continue;
       const startsInside = comparePosition(other.start, fn.start) > 0;
-      const endsInside = comparePosition(other.end, fn.end) < 0;
+      const endsInside = comparePosition(other.end, fn.end) <= 0;
       if (startsInside && endsInside) fn.nested.push({ start: other.start, end: other.end });
     }
   }
@@ -347,6 +347,10 @@ function rangeContains(container, candidate) {
 /** Statement coverage % for a function's own statements, or null when the
  *  file has no compatible coverage data (treated as 0% by the caller). */
 export function coverageFor(coverageEntry, fn) {
+  // Istanbul/c8 may emit the function declaration as a zero-count statement
+  // even when its AST block is genuinely empty. Do not let that declaration
+  // mapping override empty-body semantics.
+  if (fn.emptyBody) return 100;
   if (!coverageEntry || !coverageEntry.statementMap || !coverageEntry.s
     || typeof coverageEntry.statementMap !== "object" || typeof coverageEntry.s !== "object") return null;
   const map = coverageEntry.statementMap;
@@ -486,7 +490,7 @@ export function makeRecord(rows, threshold, options = {}) {
   return {
     at: options.at ?? new Date().toISOString(),
     revision: options.revision ?? state.revision,
-    dirty: options.dirty ?? state.dirty,
+    dirty: options.dirty !== undefined ? options.dirty : state.dirty,
     threshold,
     coverageKind: "statement",
     ...summarize(rows, threshold),
@@ -533,14 +537,17 @@ export function renderTrend(records, threshold) {
   ];
   let previous = null;
   let anyDirty = false;
+  let anyUnknown = false;
   for (const record of records) {
     const delta =
       previous === null ? "-" : formatDelta(record.flagged - previous.flagged);
     if (record.dirty === true) anyDirty = true;
+    if (record.dirty === null) anyUnknown = true;
+    const dirtyMarker = record.dirty === true ? "*" : record.dirty === null ? "?" : "";
     lines.push(
       [
         String(record.at ?? "?").slice(0, 16).replace("T", " "),
-        `${String(record.revision ?? "?").slice(0, 7)}${record.dirty === true ? "*" : ""}`.padEnd(8),
+        `${String(record.revision ?? "?").slice(0, 7)}${dirtyMarker}`.padEnd(8),
         String(record.threshold ?? "?").padStart(3),
         String(record.functions ?? "?").padStart(9),
         String(record.flagged ?? "?").padStart(7),
@@ -564,12 +571,21 @@ export function renderTrend(records, threshold) {
         `${last.flagged} (${formatDelta(delta)}), ${direction}.`,
     );
   }
-  if (anyDirty) {
-    lines.push(
-      "",
-      "A revision marked * was recorded with uncommitted changes, so it does " +
-        "not describe a frozen candidate.",
-    );
+  if (anyDirty || anyUnknown) {
+    lines.push("");
+    if (anyDirty) {
+      lines.push(
+        "A revision marked * was recorded with uncommitted changes, so it does " +
+          "not describe a frozen candidate.",
+      );
+    }
+    if (anyUnknown) {
+      lines.push(
+        "A revision marked ? has unknown clean-tree status; do not treat it as " +
+          "clean evidence.",
+      );
+    }
+    lines.push("Legend: * dirty, ? unknown, no marker clean.");
   }
   const thresholds = [...new Set(records.map((record) => record.threshold))];
   if (thresholds.length > 1) {

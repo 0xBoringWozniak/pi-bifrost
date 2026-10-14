@@ -169,8 +169,14 @@ test("a snapshot from a dirty tree is marked in the trend", () => {
   assert.match(trend, /aaaaaaa\s/);
   assert.match(trend, /bbbbbbb\*/);
   assert.match(trend, /recorded with uncommitted changes/);
+  // Unknown status gets distinct evidence from both clean and dirty.
+  const unknown = { ...clean, at: "2026-01-03T00:00:00.000Z", revision: "ccccccc", dirty: null };
+  const mixed = renderTrend([clean, dirty, unknown], 30);
+  assert.match(mixed, /ccccccc\?/);
+  assert.match(mixed, /unknown clean-tree status/);
+  assert.match(mixed, /Legend: \* dirty, \? unknown, no marker clean/);
   // A clean history carries no warning.
-  assert.doesNotMatch(renderTrend([clean], 30), /uncommitted/);
+  assert.doesNotMatch(renderTrend([clean], 30), /uncommitted|unknown clean-tree/);
 });
 
 test("an empty history renders guidance instead of a table", () => {
@@ -302,6 +308,38 @@ test("real c8 CLI does not credit same-line sibling functions with shared covera
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("real c8 CLI preserves empty function coverage and fail-above boundary", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crap-c8-empty-"));
+  writeFileSync(join(dir, "empty.ts"), "function empty() {}\nconst emptyArrow = () => {};\nconst methods = { emptyMethod() {} };\n");
+  try {
+    const c8 = join(process.cwd(), "node_modules", ".bin", "c8");
+    const covered = spawnSync(c8, ["--reporter=json", "node", "--experimental-strip-types", "empty.ts"], { cwd: dir, encoding: "utf8" });
+    assert.equal(covered.status, 0, covered.stderr);
+    const report = spawnSync(process.execPath, [join(process.cwd(), "scripts", "crap-report.mjs"), "--all", "--fail-above", "1", "empty.ts"], { cwd: dir, encoding: "utf8" });
+    assert.equal(report.status, 0, `${report.stdout}\n${report.stderr}`);
+    assert.match(report.stdout, /1\.0\s+1\s+100%\s+empty\.ts:1\s+empty/);
+    assert.match(report.stdout, /1\.0\s+1\s+100%\s+empty\.ts:2\s+emptyArrow/);
+    assert.match(report.stdout, /1\.0\s+1\s+100%\s+empty\.ts:3\s+emptyMethod/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("nested arrow ending at parent end owns its return statement", () => {
+  const functions = collectFunctions("const outer = () => () => { return 1; }; const sibling = () => { return 2; };");
+  const outer = functions.find((fn) => fn.name === "outer");
+  const inner = functions.find((fn) => fn.name === "(anonymous)");
+  const sibling = functions.find((fn) => fn.name === "sibling");
+  const statementMap = {
+    nestedReturn: { start: { line: 1, column: 28 }, end: { line: 1, column: 38 } },
+    siblingReturn: { start: { line: 1, column: 65 }, end: { line: 1, column: 75 } },
+  };
+  const entry = { statementMap, s: { nestedReturn: 1, siblingReturn: 0 } };
+  assert.equal(coverageFor(entry, outer), null);
+  assert.equal(coverageFor(entry, inner), 100);
+  assert.equal(coverageFor(entry, sibling), 0);
 });
 
 test("nonempty functions with missing or incompatible statement coverage stay unknown", () => {
