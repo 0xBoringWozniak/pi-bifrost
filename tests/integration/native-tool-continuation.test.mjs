@@ -46,6 +46,7 @@ async function waitForGroupTermination(pid, timeoutMs) {
   throw new Error("owned process group did not terminate: " + pid);
 }
 
+let cleanupSafeForCaller = true;
 function runNode(args, options) {
   return new Promise((resolve, reject) => {
     const childProcess = spawn(execPath, args, {
@@ -81,6 +82,10 @@ function runNode(args, options) {
       if (settled) return;
       settled = true;
       if (escalationTimer) clearTimeout(escalationTimer);
+      try { childProcess.stdout?.destroy(); } catch {}
+      try { childProcess.stderr?.destroy(); } catch {}
+      try { childProcess.unref(); } catch {}
+      cleanupSafeForCaller = true;
       resolve({ status: exitCode, signal: exitSignal, stdout, stderr, closeObserved: closed, groupTerminated: true });
     }
 
@@ -88,6 +93,10 @@ function runNode(args, options) {
       if (settled) return;
       settled = true;
       if (escalationTimer) clearTimeout(escalationTimer);
+      try { childProcess.stdout?.destroy(); } catch {}
+      try { childProcess.stderr?.destroy(); } catch {}
+      try { childProcess.unref(); } catch {}
+      cleanupSafeForCaller = false;
       reject(error instanceof Error ? error : new Error(String(error)));
     }
 
@@ -154,6 +163,7 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
   writeFileSync(violations, "");
   const previousCredentials = Object.fromEntries(credentials.map((name) => [name, process.env[name]]));
   let cleanupVerified = false;
+  let cleanupSafe = true;
   try {
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -215,14 +225,18 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
 
     writeFileSync(violations, "");
     const result = await runNode(["--test", "--experimental-strip-types", child], { cwd: root, env: childEnv });
+    cleanupSafe = result.groupTerminated === true;
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(readFileSync(violations, "utf8"), "", "faux AgentSession made blocked outbound attempt");
     cleanupVerified = true;
+  } catch (error) {
+    cleanupSafe = false;
+    throw error;
   } finally {
     for (const [name, value] of Object.entries(previousCredentials)) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
     await new Promise((resolve) => server.close(resolve));
-    if (cleanupVerified) rmSync(scratch, { recursive: true, force: true });
+    if (cleanupSafe) rmSync(scratch, { recursive: true, force: true });
   }
 });
