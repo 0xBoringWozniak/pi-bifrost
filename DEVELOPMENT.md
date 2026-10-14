@@ -85,6 +85,12 @@ Settings live in the `crap` block of `package.json`, so they are configurable wi
 
 `threshold` flags functions at or above that score. `coverage` names the c8 report to read. `failAbove` is the optional gate: `null` means the report stays advisory; a number makes the command exit 1 when any function scores above it.
 
+Why 30 is the default: Alberto Savoia and Bob Evans, who introduced the metric and the crap4j tool in 2007, chose it empirically after reviewing their code and many open source projects, and called it a starting point rather than a derived constant. It is tunable configuration here for that reason.
+
+The number is still self-consistent. A fully covered function scores exactly its own complexity, so a threshold of 30 also caps the complexity worth testing at 30: a function of complexity 31 or more cannot comply with any amount of testing. The authors' table agrees: complexity 10 needs 42% coverage, 20 needs 71%, and 26-30 needs 100%. Source: the [crap4j FAQ](http://www.crap4j.org/faq.html).
+
+One calibration caveat: crap4j measured basis path coverage, while this report uses statement coverage from c8. Statement coverage is usually higher for the same tests, so scores here are slightly more optimistic than the original table implies. Treat the number as a ranking aid, not a converted measurement.
+
 Precedence is CLI flag, then the `crap` block, then the built-in default. Run the unit tests with coverage, then generate the report:
 
 ```bash
