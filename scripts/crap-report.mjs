@@ -128,6 +128,14 @@ export function resolveOptions(argv = [], config = {}) {
       cli.threshold = takeValue(arg);
     } else if (arg === "--fail-above") {
       cli.failAbove = takeValue(arg);
+    } else if (arg === "--history") {
+      cli.history = takeValue(arg);
+    } else if (arg.startsWith("--history=")) {
+      const value = arg.slice("--history=".length);
+      if (value === "") {
+        throw new ConfigError("--history expects a path.");
+      }
+      cli.history = value;
     } else if (arg.startsWith("--")) {
       throw new ConfigError(`Unknown flag ${arg}.`);
     } else {
@@ -187,7 +195,15 @@ export function resolveOptions(argv = [], config = {}) {
   };
 
   const coverage = readPath("coverage", config.coverage, DEFAULTS.coverage);
-  const history = readPath("history", config.history, DEFAULTS.history);
+  const history =
+    cli.history !== undefined
+      ? (() => {
+          if (typeof cli.history !== "string" || cli.history.trim() === "") {
+            throw new ConfigError("--history must be a non-empty path.");
+          }
+          return { value: cli.history, source: "cli" };
+        })()
+      : readPath("history", config.history, DEFAULTS.history);
 
   return {
     files: cli.files,
