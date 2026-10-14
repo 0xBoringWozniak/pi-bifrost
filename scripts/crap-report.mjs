@@ -378,12 +378,23 @@ function formatRow(row) {
   ].join("  ");
 }
 
+/**
+ * Shorten a path for display, but keep it absolute when it lies outside
+ * the working directory. A relative path that escapes cwd would otherwise
+ * read as "../../../Users/...", which hides where the code actually lives.
+ */
+export function displayPath(file, cwd = process.cwd()) {
+  const relative = path.relative(cwd, file);
+  if (relative === "" || relative.startsWith("..")) return file;
+  return relative;
+}
+
 function buildRows(files, coverage) {
   const rows = [];
   for (const file of targetFiles(files)) {
     const sourceText = fs.readFileSync(file, "utf8");
     const entry = coverage[path.resolve(file)] ?? null;
-    const rel = path.relative(process.cwd(), file);
+    const rel = displayPath(file);
     for (const fn of collectFunctions(sourceText, file)) {
       const cov = coverageFor(entry, fn);
       const effectiveCov = cov === null ? 0 : cov;

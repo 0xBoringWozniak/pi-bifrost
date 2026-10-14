@@ -8,6 +8,7 @@ import {
   collectFunctions,
   computeCrap,
   coverageFor,
+  displayPath,
   makeRecord,
   readHistory,
   renderTrend,
@@ -113,6 +114,14 @@ test("invalid configuration fails with a clear error", () => {
   assert.throws(() => resolveOptions([], { coverage: "" }), /non-empty string/);
   assert.throws(() => resolveOptions(["--nope"], {}), /Unknown flag/);
   assert.throws(() => resolveOptions(["--threshold"], {}), /expects a number/);
+});
+
+test("displayPath shortens in-tree paths and keeps outside paths absolute", () => {
+  assert.equal(displayPath("/repo/src/a.ts", "/repo"), "src/a.ts");
+  assert.equal(displayPath("/repo/a.ts", "/repo"), "a.ts");
+  // A path outside the working directory stays absolute instead of
+  // rendering as "../../..", which would hide where the code lives.
+  assert.equal(displayPath("/elsewhere/a.ts", "/repo"), "/elsewhere/a.ts");
 });
 
 test("summarize counts flagged functions and finds the worst one", () => {
