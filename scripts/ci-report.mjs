@@ -82,14 +82,7 @@ export function makeReportData(evidence) {
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) throw new Error("Evidence must be a JSON object");
   if (evidence.schemaVersion !== 1) throw new Error("Unsupported acceptance evidence schema version");
   if (!Array.isArray(evidence.cases)) throw new Error("Evidence cases must be a bounded array");
-  // Keep a bounded report without dropping failed, blocked, or missing checks.
-  // Required problematic cases take precedence over passing rows when the
-  // evidence contains more than MAX_CASES entries.
-  const orderedCases = [
-    ...evidence.cases.filter((item) => item?.status === "failed" || item?.status === "blocked" || item?.status === "missing"),
-    ...evidence.cases.filter((item) => !(item?.status === "failed" || item?.status === "blocked" || item?.status === "missing")),
-  ];
-  const cases = orderedCases.slice(0, MAX_CASES);
+  const cases = evidence.cases.slice(0, MAX_CASES);
   const truncatedCases = evidence.cases.length - cases.length;
   const safeEvidence = {
     schemaVersion: 1,
@@ -124,7 +117,7 @@ export function makeReportData(evidence) {
 export function validateReportData(evidence) {
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) throw new Error("Evidence must be a JSON object");
   if (evidence.schemaVersion !== 1) throw new Error("Unsupported acceptance evidence schema version");
-  if (!Array.isArray(evidence.cases)) throw new Error("Evidence cases must be a bounded array");
+  if (!Array.isArray(evidence.cases) || evidence.cases.length > MAX_CASES) throw new Error("Evidence cases must be a bounded array");
   return makeReportData(evidence);
 }
 
