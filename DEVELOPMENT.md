@@ -69,6 +69,22 @@ This test uses a local fake provider and `agent-tui`. It sets `PI_OFFLINE=1` and
 
 `npm run test:ui:agent-tui` is a separate proof of concept. It uses the local Ollama model `gemma4:12b-mlx`. It does not replace `npm run test:ui`.
 
+## CRAP analysis
+
+CRAP (Change Risk Anti-Patterns) ranks functions by change risk: complex functions with low unit-test coverage score high. The score is `CC^2 * (1 - coverage)^3 + CC`, where `CC` is cyclomatic complexity and coverage is statement-level for that function's own statements. A score at or above 30 is the classic "CRAP-y" threshold.
+
+Run the unit tests with coverage, then generate the report:
+
+```bash
+npm run crap                 # coverage run + report
+npm run test:coverage        # coverage only (writes coverage/coverage-final.json)
+node scripts/crap-report.mjs # report from existing coverage data
+node scripts/crap-report.mjs --all            # list every function, not only >= 30
+node scripts/crap-report.mjs --fail-above 30  # exit 1 when any score exceeds 30
+```
+
+The report covers the top-level `*.ts` package sources. Files absent from the coverage data count as 0% coverage. The report is advisory by default; `--fail-above` is the opt-in gate. Coverage data under `coverage/` is gitignored. The formula and threshold tests live in `tests/crap-report.test.mjs`.
+
 ## Build the router package
 
 The router build creates files in `dist/router/`:
