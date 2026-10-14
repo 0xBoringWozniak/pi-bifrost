@@ -33,6 +33,7 @@ function startFakeProvider() {
     request.on("end", () => {
       const model = JSON.parse(body).model;
       requests.push(model);
+      if (model === "timeout") return;
       if (model === "credits-exhausted") {
         return json(response, 402, { error: { message: "No remaining credits" } });
       }
@@ -46,7 +47,7 @@ function startFakeProvider() {
   });
 }
 
-function fixture(port, models) {
+function fixture(port, models, options = {}) {
   const home = mkdtempSync(join(tmpdir(), "bifrost-init-home-"));
   const work = mkdtempSync(join(tmpdir(), "bifrost-init-work-"));
   const extensionDir = join(home, "extension");
@@ -61,6 +62,7 @@ function fixture(port, models) {
     $schema: "./schema.json",
     ...BUNDLED_PUBLIC_INIT_DEFAULTS,
     models: { quick: [], general: [], frontier: [] },
+    ...(options.probe ? { probe: options.probe } : {}),
   }));
   const agent = join(home, ".pi", "agent");
   mkdirSync(agent, { recursive: true });
@@ -240,6 +242,23 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
       const report = JSON.parse(preview.stderr.split("[bifrost-json] ").at(-1));
       assert.equal(report.source, "classifier");
       assert.equal(report.model, "fake/healthy");
+    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+  });
+
+  it("keeps timed-out models out of generated pools when another model succeeds", async () => {
+    requests = [];
+    const env = fixture(port, ["healthy", "timeout", "credits-exhausted"], { probe: { timeoutMs: 30 } });
+    try {
+      const result = await runInit({ ...env, args: "-f --write" });
+      assert.equal(result.timedOut, false);
+      assert.equal(result.violations, "");
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual([...new Set(requests)], ["healthy", "timeout", "credits-exhausted"]);
+      const config = JSON.parse(readFileSync(join(env.work, ".pi", "bifrost.json"), "utf8"));
+      const savedModels = Object.values(config.models).flat();
+      assert.ok(savedModels.includes("fake/healthy"));
+      assert.equal(savedModels.includes("fake/timeout"), false);
+      assert.equal(savedModels.includes("fake/credits-exhausted"), false);
     } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
   });
 
