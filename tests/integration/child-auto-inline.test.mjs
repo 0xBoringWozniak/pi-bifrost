@@ -14,6 +14,7 @@ const ROOT = join(__dirname, "..", "..");
 const PI = join(ROOT, "node_modules", ".bin", "pi");
 const EXTENSION = join(__dirname, "..", "fixtures", "child-auto-inline-extension.mjs");
 const DESCENDANT_CLI = join(__dirname, "..", "fixtures", "child-auto-descendant-cli.mjs");
+const PIPE_RACE_CLI = join(__dirname, "..", "fixtures", "child-auto-pipe-race-descendant-cli.mjs");
 const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
 const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 const CREDENTIALS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
@@ -29,20 +30,31 @@ const CLOSE_WAIT_MS = 10_000;
 // is only true when the real close event then arrives.
 const DESCENDANT_GRACE_MS = 2_000;
 const DESCENDANT_CLEANUP_MS = 5_000;
+// How long the leader's own close may take after its grace window before the
+// owned group is terminated anyway. Kept short so a stubborn leader cannot
+// spend the whole descendant budget before the group phase begins.
+const LEADER_CLOSE_SLOP_MS = 2_000;
 
 // Every child this suite owns is spawned as the leader of its own process group
-// and has its close event tracked from creation. "Closed" is therefore an
-// observed event, never an inference from an exit code or from pipe state.
+// so cleanup can signal that group and nothing else. Each carries one lifecycle
+// record: the observed close event plus a single coordinated termination
+// promise. The close path and the timeout path await that same promise, so
+// neither can settle while a descendant of the owned group is still alive.
 function spawnOwned(command, args, options = {}) {
   const child = spawn(command, args, { detached: process.platform !== "win32", ...options });
   let markClosed;
   const observed = new Promise((resolve) => { markClosed = resolve; });
-  const tracking = { isClosed: false, observed };
+  const lifecycle = { isClosed: false, observed, termination: null };
   child.once("close", () => {
-    tracking.isClosed = true;
+    lifecycle.isClosed = true;
     markClosed(true);
   });
-  trackedChildren.set(child, tracking);
+  lifecycle.terminate = (graceMs) => {
+    // Memoized on purpose: one owned group, one termination, one result.
+    lifecycle.termination ??= terminateOwnedGroup(child, graceMs);
+    return lifecycle.termination;
+  };
+  trackedChildren.set(child, lifecycle);
   return child;
 }
 
@@ -67,30 +79,52 @@ function waitForObservedClose(child, boundMs = CLOSE_WAIT_MS) {
   });
 }
 
-// Terminates an owned child and resolves true only when its close event was
-// observed. A child whose descendants keep the inherited pipes open can never
-// reach close on its own, so the owned process group is terminated and the
-// real close event is still required before this reports success. False means
-// cleanup could not be verified, and callers must fail rather than assume.
-async function stopChild(child, graceMs = 1_000) {
-  if (closeTracking(child).isClosed) return true;
-  const alreadyExited = child.exitCode !== null || child.signalCode !== null;
-  if (!alreadyExited) {
+// Terminates the owned child and its process group, and resolves true only when
+// BOTH halves of the cleanup are proven: the leader's close event was actually
+// observed, and the owned group is dead. A close event alone proves nothing --
+// a descendant can close the inherited pipes when signalled and keep running,
+// and an already-closed leader says nothing about what it left behind. False
+// means cleanup could not be verified, and every caller must fail rather than
+// assume.
+async function terminateOwnedGroup(child, graceMs = 1_000) {
+  if (child.exitCode === null && child.signalCode === null) {
     const forceKill = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, graceMs);
     try { child.kill("SIGTERM"); } catch {}
-    const observed = await waitForObservedClose(child, graceMs + CLOSE_WAIT_MS);
+    await waitForObservedClose(child, graceMs + LEADER_CLOSE_SLOP_MS);
     clearTimeout(forceKill);
-    if (observed) return true;
   }
-  // The child is gone or its own termination did not reach close, which means a
-  // descendant it spawned inherited the stdio. Signal only the process group
-  // this suite owns, then require the genuine close event.
-  const groupTerminated = await terminateProcessGroup(child, {
+  // Signal only the process group this suite owns. Never a parent or shared
+  // group, and never a bare pattern match against unrelated processes.
+  const groupSignalled = await terminateProcessGroup(child, {
     graceMs: DESCENDANT_GRACE_MS,
     cleanupTimeoutMs: DESCENDANT_CLEANUP_MS,
   });
-  if (!groupTerminated) return false;
-  return await waitForObservedClose(child, DESCENDANT_CLEANUP_MS + CLOSE_WAIT_MS);
+  // terminateProcessGroup already returns group death; re-derive it here so the
+  // result rests on observed evidence rather than on the helper's contract.
+  const groupDead = groupSignalled === true && !processGroupExists(child.pid);
+  const leaderClosed = await waitForObservedClose(child, DESCENDANT_CLEANUP_MS + CLOSE_WAIT_MS);
+  return leaderClosed && groupDead;
+}
+
+// Terminates an owned child, resolving true only when its cleanup is verified.
+async function stopChild(child, graceMs = 1_000) {
+  return closeTracking(child).terminate(graceMs);
+}
+
+// Test-only seam: forces one child's cleanup to report failure without touching
+// shared state, so a caller's cleanup-failure cause can be asserted directly.
+function forceCleanupFailure(child) {
+  closeTracking(child).terminate = () => Promise.resolve(false);
+}
+
+// Every caller reports cleanup the same way: the primary cause first, then an
+// explicit clause when the owned group could not be verified gone. A caller can
+// therefore tell "this run timed out" from "this run timed out and its cleanup
+// could not be verified".
+function cleanupFailure(message, verified) {
+  return verified
+    ? message
+    : `${message}; cleanup failure: the owned process group did not reach a verified dead state`;
 }
 
 function waitForFakeReady(child) {
@@ -101,8 +135,10 @@ function waitForFakeReady(child) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      await stopChild(child);
-      reject(new Error(message));
+      // The stop result is the only evidence of whether this child is really
+      // gone. Discarding it is how an unverified cleanup stayed invisible.
+      const verified = await stopChild(child);
+      reject(new Error(cleanupFailure(message, verified)));
     };
     const timer = setTimeout(() => { void fail("fake provider startup timed out"); }, 10_000);
     child.stdout.setEncoding("utf8");
@@ -227,16 +263,16 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
     childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
     childProcess.on("error", (error) => { spawnError = error; });
     // Bounded termination: SIGTERM, then SIGKILL after the grace window, and
-    // if a descendant still holds the inherited pipes the owned process group
-    // is terminated. The run settles either way, so a child that can never
-    // reach close fails the run instead of leaving it pending forever.
+    // then the owned process group. The run settles only once that cleanup has
+    // reported back, so a child whose descendant closes the inherited pipes on
+    // SIGTERM and keeps running fails the run instead of settling on a close
+    // event that proves nothing.
+    const lifecycle = closeTracking(childProcess);
+    const timeoutDetail = () => `Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`;
     const timer = setTimeout(() => {
       timedOut = true;
-      void stopChild(childProcess, terminationGraceMs).then((closed) => {
-        const detail = `Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`;
-        finish(reject, closed
-          ? new Error(detail)
-          : new Error(`${detail}; the owned process group did not reach a verified close`));
+      void lifecycle.terminate(terminationGraceMs).then((verified) => {
+        finish(reject, new Error(cleanupFailure(timeoutDetail(), verified)));
       });
     }, windowMs);
     childProcess.on("close", async (code) => {
@@ -245,7 +281,11 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
         return;
       }
       if (timedOut) {
-        finish(reject, new Error(`Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`));
+        // The leader closed, but the owned group may still have a live member
+        // that closed the inherited pipes. Wait for the same coordinated
+        // termination the timeout path started; it decides the message.
+        const verified = await lifecycle.terminate(terminationGraceMs);
+        finish(reject, new Error(cleanupFailure(timeoutDetail(), verified)));
         return;
       }
       try {
@@ -414,6 +454,124 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     const failing = spawnOwned(execPath, ["-e", "process.exit(3)"], { stdio: ["ignore", "pipe", "ignore"] });
     await assert.rejects(waitForFakeReady(failing), /fake provider exited before startup/);
     assert.equal(await stopChild(failing), true, "failed startup must still reach a verified close");
+  });
+
+  it("settles a timed-out run only after the owned group is verified dead", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-pipe-race-home-"));
+    const pidFile = join(home, "descendant.pid");
+    try {
+      // The leader exits and its descendant releases the inherited pipes when
+      // signalled but keeps running, so the close event lands while a member of
+      // the owned group is still alive. A close event is not cleanup evidence:
+      // the run must not settle until the group is verified gone.
+      const run = runPi({
+        home,
+        work: home,
+        model: "bifrost/auto",
+        prompt: "native faux dispatch marker",
+        child: "1",
+        command: execPath,
+        args: [PIPE_RACE_CLI],
+        windowMs: 1_000,
+        terminationGraceMs: 200,
+        extraEnv: { BIFROST_DESCENDANT_PID_FILE: pidFile },
+      });
+      await assert.rejects(
+        Promise.race([
+          run,
+          new Promise((_, reject) => { setTimeout(() => reject(new Error("runPi stayed pending after its bounded window and owned termination")), 40_000); }),
+        ]),
+        /exceeded the bounded run window/,
+        "a run whose descendant releases the pipes but survives must still fail bounded",
+      );
+      // Settling above is only legitimate if the group descendant is already
+      // dead. Rejecting while it lived is exactly the defect this pins.
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      assert.ok(Number.isInteger(pid) && pid > 0, "the fixture must record its descendant pid");
+      assert.throws(
+        () => process.kill(pid, 0),
+        (error) => error.code === "ESRCH",
+        `owned group descendant ${pid} survived the run's cleanup`,
+      );
+      // Verified cleanup means the scratch is safe to reclaim.
+      rmSync(home, { recursive: true, force: true });
+      assert.equal(existsSync(home), false, "verified cleanup must leave the scratch removable");
+    } finally {
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("reaps a live group descendant behind an already-closed leader", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "bifrost-closed-leader-"));
+    // The descendant takes no inherited pipes at all, so it cannot influence
+    // when the leader's close event arrives. Only the owned group's death says
+    // anything about it.
+    const leader = spawnOwned(execPath, ["-e", [
+      "const { spawn } = require('node:child_process');",
+      "const d = spawn(process.execPath, ['-e', \"process.send({ pid: process.pid }); setInterval(() => {}, 1000);\"], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });",
+      "d.once('message', (m) => process.stdout.write(JSON.stringify(m) + '\\n', () => process.exit(0)));",
+    ].join("\n")], { stdio: ["ignore", "pipe", "ignore"], cwd: scratch });
+    try {
+      const pid = await new Promise((resolve, reject) => {
+        let seen = "";
+        leader.stdout.setEncoding("utf8");
+        leader.stdout.on("data", (chunk) => {
+          seen += chunk;
+          try { resolve(JSON.parse(seen).pid); } catch { /* wait for the record */ }
+        });
+        leader.once("error", reject);
+      });
+      await once(leader, "close");
+      // Safety: cleanup may only ever signal this child's own isolated group,
+      // never a parent or shared one.
+      assert.equal(processGroupExists(leader.pid), true, "the owned child must lead its own live process group");
+      assert.equal(await stopChild(leader), true, "an already-closed leader still needs verified group cleanup");
+      assert.equal(processGroupExists(leader.pid), false, "the owned process group must be dead");
+      assert.throws(
+        () => process.kill(pid, 0),
+        (error) => error.code === "ESRCH",
+        `owned group descendant ${pid} survived behind a closed leader`,
+      );
+    } finally {
+      await stopChild(leader);
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a cleanup failure as its own cause instead of a bare timeout", async () => {
+    // Forced, not simulated: the child really does exit, but its cleanup
+    // reports failure so the caller's cause-clause can be asserted. Both
+    // seams are attached synchronously, before close can possibly fire.
+    const unverified = spawnOwned(execPath, ["-e", "process.exit(3)"], { stdio: ["ignore", "pipe", "ignore"] });
+    forceCleanupFailure(unverified);
+    await assert.rejects(
+      waitForFakeReady(unverified),
+      (error) => {
+        assert.match(error.message, /fake provider/, "the startup cause must survive alongside the cleanup cause");
+        assert.match(
+          error.message,
+          /cleanup failure: the owned process group did not reach a verified dead state/,
+          "an unverified cleanup must be named as its own cause",
+        );
+        return true;
+      },
+      "a startup failure whose cleanup is unverified must name the cleanup failure",
+    );
+    // Contrast: the same caller with verified cleanup keeps only the startup
+    // cause, so the clause above can never be mistaken for ordinary output.
+    const verified = spawnOwned(execPath, ["-e", "process.exit(3)"], { stdio: ["ignore", "pipe", "ignore"] });
+    await assert.rejects(
+      waitForFakeReady(verified),
+      (error) => {
+        assert.doesNotMatch(error.message, /cleanup failure/, "verified cleanup must not claim a cleanup failure");
+        return true;
+      },
+      "a verified cleanup must report the startup cause alone",
+    );
   });
 
   it("fails a bounded run and reaps the owned descendant holding inherited pipes", async () => {
