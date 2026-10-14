@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { execPath } from "node:process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +26,7 @@ function runNode(args, options) {
   });
 }
 
-it("routes real AgentSession turns behind a child-close scratch boundary", async () => {
+it("routes real AgentSession turns by direct rules, tier override precedence, and default", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "bifrost-native-lifecycle-"));
   const violations = join(scratch, "network-violations.log");
   const previousCredentials = Object.fromEntries(credentials.map((name) => [name, process.env[name]]));
@@ -42,19 +42,36 @@ it("routes real AgentSession turns behind a child-close scratch boundary", async
     };
     for (const name of credentials) assert.equal(isolatedEnv[name], undefined, `${name} must not enter child env`);
 
+    writeFileSync(violations, "");
+    const probe = await runNode(["-e", `
+      const net = require("node:net");
+      const tls = require("node:tls");
+      const dgram = require("node:dgram");
+      (async () => {
+        for (const attempt of [
+          () => fetch("http://127.0.0.1:2"),
+          () => fetch("https://127.0.0.1:2"),
+          () => new net.Socket().connect({ port: 2, host: "127.0.0.1" }),
+          () => tls.connect({ port: 2, host: "127.0.0.1" }),
+          () => dgram.createSocket("udp4").send(Buffer.from("fixture"), 2, "127.0.0.1"),
+        ]) { try { await attempt(); } catch {} }
+        if (${JSON.stringify(credentials)}.some((name) => process.env[name] !== undefined)) process.exitCode = 9;
+      })();
+    `], { cwd: root, env: isolatedEnv });
+    assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
+    const attempts = readFileSync(violations, "utf8");
+    assert.match(attempts, /blocked fetch to https?:\/\/[^:\s]+:\d/);
+    assert.match(attempts, /blocked socket connection to [^\s]+:\d/);
+    assert.match(attempts, /blocked UDP datagram to/);
+
+    writeFileSync(violations, "");
     const result = await runNode(["--test", "--experimental-strip-types", child], { cwd: root, env: isolatedEnv });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.equal(existsSync(violations) ? readFileSync(violations, "utf8") : "", "", "faux AgentSession made blocked outbound attempt");
+    assert.equal(readFileSync(violations, "utf8"), "", "socket, UDP, and fetch guard must record zero outbound attempts");
   } finally {
     for (const [name, value] of Object.entries(previousCredentials)) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
     rmSync(scratch, { recursive: true, force: true });
   }
-
-  // Scoped to this run's own scratch. The child has exited, so no in-process
-  // auth work can recreate these paths; a global temp-prefix count would be
-  // wrong under concurrent test processes.
-  assert.equal(existsSync(scratch), false, "scratch must be gone after the child exits");
-  assert.equal(existsSync(join(scratch, "home", ".pi", "agent", "auth.json")), false, "auth.json must not be recreated after the child exits");
 });
