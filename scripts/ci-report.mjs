@@ -2,6 +2,7 @@
 import { appendFileSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readHistory, renderTrend } from "./crap-report.mjs";
 
 const REPORT_SCHEMA_VERSION = 1;
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
@@ -244,6 +245,21 @@ function fullIssue(item) {
   return `- **${statusEmoji(item.status)} ${escapeCell(item.id)}** — ${escapeCell(detail)}${paths}`;
 }
 
+function resolveCrapHistory(context) {
+  if (Array.isArray(context?.crapHistory)) return context.crapHistory;
+  if (typeof context?.crapHistory === "string") {
+    return context.crapHistory.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => JSON.parse(line));
+  }
+  if (typeof context?.crapHistoryPath === "string") {
+    try {
+      return readHistory(context.crapHistoryPath);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 export function renderCiReport(inputData, context = {}) {
   context ??= {};
   let data;
@@ -267,13 +283,38 @@ export function renderCiReport(inputData, context = {}) {
   const issues = issueRows(evidence.cases);
   const deferred = evidence.cases.filter((item) => item.status === "deferred");
 
-  const crapSection = [
-    "### CRAP analysis",
-    "",
-    "Complexity/coverage (CRAP) analysis is intentionally not embedded in this acceptance evidence.",
-    "It does not depend on committed history. Run `npm run crap` locally or in a separate job to audit hotspots.",
-    "",
-  ];
+  const crapRecords = resolveCrapHistory(context);
+  let crapSection;
+  if (crapRecords.length > 0) {
+    const latest = crapRecords[crapRecords.length - 1];
+    crapSection = [];
+    crapSection.push("### CRAP analysis");
+    crapSection.push("");
+    crapSection.push(
+      `- Current (rev ${code(latest.revision ?? "unknown")}${latest.dirty ? "*" : ""}, ${latest.at ? String(latest.at).slice(0, 10) : "unknown"}): ${latest.flagged ?? "?"}/${latest.functions ?? "?"} flagged at or above ${latest.threshold ?? "?"} (${latest.percentFlagged ?? "?"}%); max ${latest.max ?? "?"}`,
+    );
+    if (crapRecords.length > 1) {
+      const first = crapRecords[0];
+      const delta = (latest.flagged ?? 0) - (first.flagged ?? 0);
+      const direction = delta === 0 ? "unchanged" : delta > 0 ? "drifting up" : "improving";
+      crapSection.push(
+        `- Trend: ${crapRecords.length} snapshots ${String(first.at ?? "?").slice(0, 10)} → ${String(latest.at ?? "?").slice(0, 10)}: flagged ${first.flagged} → ${latest.flagged} (${delta >= 0 ? "+" : ""}${delta}), ${direction}.`,
+      );
+    }
+    crapSection.push("");
+    const trend = renderTrend(crapRecords, latest.threshold ?? 30);
+    crapSection.push("```text");
+    crapSection.push(...trend.split("\n"));
+    crapSection.push("```");
+    crapSection.push("");
+  } else {
+    crapSection = [
+      "### CRAP analysis",
+      "",
+      "Not included in this run. Supply CRAP history via CI artifacts or run `npm run crap` locally.",
+      "",
+    ];
+  }
 
   const scope = evidence.profile === "live"
     ? "Scope: Live profile; one approved model allowlisted; provider requests may be blocked; PRD coverage partial."
