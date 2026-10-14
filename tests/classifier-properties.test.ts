@@ -236,13 +236,35 @@ describe("pi-native judgment validation properties", () => {
     );
   });
 
-  it("accepts a distribution inside the sum tolerance and rejects one outside it", () => {
+  it("accepts and rejects generated sums on both sides of the exact tolerance boundary", () => {
+    const boundedPair = fc.tuple(
+      fc.double({ min: 0.25, max: 0.75, noNaN: true }),
+      fc.double({ min: 0.25, max: 0.75, noNaN: true }),
+    ).map(([left, right]) => ({
+      tiers: ["a", "b"] as const,
+      probabilities: { a: left / (left + right), b: right / (left + right) },
+      choice: left >= right ? "a" : "b",
+      confidence: 0.9,
+    }));
+    const within = fc.constantFrom(0.9995, 1.0005);
+    const outside = fc.constantFrom(0.9985, 1.0015);
     fc.assert(
-      fc.property(VALID, fc.double({ min: 0.9995, max: 0.9999, noNaN: true }), (c, scale) => {
+      fc.property(boundedPair, within, (c, scale) => {
         const probabilities = scaleProbabilities(c.probabilities, scale);
         assert.ok(
           decodePiNativeJudgment(resultFixture(choiceAnswer(c, { probabilities })), c.tiers, 0),
-          `sum scale ${scale} stays within the 0.001 tolerance`,
+          `sum ${scale} must stay within the 0.001 tolerance`,
+        );
+      }),
+      { numRuns: 200 },
+    );
+    fc.assert(
+      fc.property(boundedPair, outside, (c, scale) => {
+        const probabilities = scaleProbabilities(c.probabilities, scale);
+        assert.equal(
+          decodePiNativeJudgment(resultFixture(choiceAnswer(c, { probabilities })), c.tiers, 0),
+          undefined,
+          `sum ${scale} must be rejected outside the 0.001 tolerance`,
         );
       }),
       { numRuns: 200 },
@@ -456,6 +478,42 @@ describe("documented fallback properties", () => {
             await pipeline.classify(case_.promptWord),
             expectedFallback(case_, judgmentTier, "classifier"),
           );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("uses configured prompt fallback after a direct miss, including prompt errors", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        TIERS,
+        fc.constantFrom<"success" | "unknown" | "empty" | "error">("success", "unknown", "empty", "error"),
+        async (tiers, mode) => {
+          let calls = 0;
+          const promptTier = tiers[1];
+          const defaultTier = tiers[0];
+          const pipeline = createPipeline({
+            instrumentation: "none",
+            cacheLookup: () => undefined,
+            classifyDirect: async () => undefined,
+            classifierModels: [makeClassifierModel("fixture", "prompt-fallback")],
+            classifyWithLLM: async () => {
+              calls += 1;
+              if (mode === "error") throw new Error("prompt fallback fixture failure");
+              return mode === "success" ? promptTier : mode === "unknown" ? "unknown" : undefined;
+            },
+            regexRules: [],
+            defaultTier,
+            tiers,
+          });
+          const result = await pipeline.classify("configured prompt fallback");
+          assert.equal(calls, 1, "direct miss must invoke configured prompt fallback exactly once");
+          if (mode === "success") {
+            assertSameClassification(result, { kind: "classified", tier: promptTier, source: "classifier" });
+          } else {
+            assertSameClassification(result, { kind: "fallback", tier: defaultTier });
+          }
         },
       ),
       { numRuns: 200 },
@@ -790,14 +848,18 @@ describe("controlled fault sensitivity", () => {
   // mutant properties produced at authoring time. A drift in the generators
   // changes the shrink path and fails this test loudly.
   const REPLAY = {
-    argmax: { seed: -181993841, path: "0:0:0:0:0:0:0:0:0" },
-    substring: { seed: 123073484, path: "0:0:0" },
-    tiers: { seed: 1947647901, path: "0:0:0:0" },
+    argmax: { seed: -716482210, path: "0:0:0:0:0:0:0:0" },
+    substring: { seed: -1540316168, path: "0:0:0" },
+    tiers: { seed: -1521897426, path: "0:0:0" },
   };
 
   /** Controlled fault: the documented checks minus the maximal-probability requirement. */
-  const argmaxBlindMutant = fc.property(NON_MAXIMAL, (c) =>
-    decodeWithoutMaximalCheck(resultFixture(choiceAnswer(c)), c.tiers) === undefined);
+  const argmaxCases = fc.oneof(
+    VALID.map((case_) => ({ case_, accepted: true })),
+    NON_MAXIMAL.map((case_) => ({ case_, accepted: false })),
+  );
+  const argmaxBlindMutant = fc.property(argmaxCases, ({ case_, accepted }) =>
+    decodeWithoutMaximalCheck(resultFixture(choiceAnswer(case_)), case_.tiers) === accepted);
   const substringMutant = fc.property(WORD, (category) =>
     substringMatch(`${category}z`, [category]) === undefined);
   const tiersBlindMutant = fc.property(TIERS, (tiers) =>
@@ -805,8 +867,8 @@ describe("controlled fault sensitivity", () => {
 
   it("detects a decoder contract that drops the maximal-probability check, shrinks, and replays", () => {
     // The production decoder passes the documented property on the same data…
-    const documented = fc.property(NON_MAXIMAL, (c) =>
-      decodePiNativeJudgment(resultFixture(choiceAnswer(c)), c.tiers, 0) === undefined);
+    const documented = fc.property(argmaxCases, ({ case_, accepted }) =>
+      (decodePiNativeJudgment(resultFixture(choiceAnswer(case_)), case_.tiers, 0) !== undefined) === accepted);
     assert.equal(fc.check(documented, { numRuns: 300 }).failed, false);
 
     // …while the argmax-blind mutant accepts strictly non-maximal winners.
@@ -816,7 +878,7 @@ describe("controlled fault sensitivity", () => {
     assert.ok((rejected.counterexamplePath ?? "").length > 0);
     // A single tier can never be non-maximal, so the counterexample must keep two.
     assert.ok(rejected.counterexamplePath !== null && typeof rejected.counterexamplePath === "string");
-    assert.equal(rejected.counterexample[0].tiers.length, 2);
+    assert.equal(rejected.counterexample[0].case_.tiers.length, 2);
 
     const replay = fc.check(argmaxBlindMutant, {
       seed: rejected.seed,
@@ -873,7 +935,7 @@ describe("controlled fault sensitivity", () => {
     const argmax = fc.check(argmaxBlindMutant, { seed: REPLAY.argmax.seed, path: REPLAY.argmax.path, numRuns: 300 });
     assert.equal(argmax.failed, true);
     assert.ok(argmax.counterexamplePath !== null && typeof argmax.counterexamplePath === "string");
-    assert.equal(argmax.counterexample[0].tiers.length, 2);
+    assert.equal(argmax.counterexample[0].case_.tiers.length, 2);
 
     const substring = fc.check(substringMutant, { seed: REPLAY.substring.seed, path: REPLAY.substring.path, numRuns: 300 });
     assert.equal(substring.failed, true);
