@@ -16,17 +16,38 @@ const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 const CREDENTIALS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
 
 let fakePort;
+const observedClosedChildren = new WeakSet();
+const closeWaiters = new WeakMap();
+
+function childStreamsClosed(child) {
+  const streams = [child.stdin, child.stdout, child.stderr].filter(Boolean);
+  return streams.length > 0 && streams.every((stream) => stream.closed === true);
+}
+
+function waitForChildClose(child) {
+  if (observedClosedChildren.has(child) || childStreamsClosed(child)) return Promise.resolve();
+  let waiter = closeWaiters.get(child);
+  if (!waiter) {
+    waiter = new Promise((resolve) => {
+      child.once("close", () => {
+        observedClosedChildren.add(child);
+        closeWaiters.delete(child);
+        resolve();
+      });
+    });
+    closeWaiters.set(child, waiter);
+  }
+  return waiter;
+}
 
 function stopChild(child, graceMs = 1_000) {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const forceKill = setTimeout(() => child.kill("SIGKILL"), graceMs);
-    child.once("close", () => {
-      clearTimeout(forceKill);
-      resolve();
-    });
-    child.kill("SIGTERM");
-  });
+  const alreadyExited = child.exitCode !== null || child.signalCode !== null;
+  const close = waitForChildClose(child);
+  if (alreadyExited) return close;
+  const forceKill = setTimeout(() => child.kill("SIGKILL"), graceMs);
+  close.finally(() => clearTimeout(forceKill));
+  child.kill("SIGTERM");
+  return close;
 }
 
 function waitForFakeReady(child) {
@@ -69,6 +90,11 @@ function startFakeServer() {
 async function readStats(port) {
   const response = await fetch(`http://127.0.0.1:${port}/_stats`);
   return response.json();
+}
+
+function alternatePort(port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError("provider port must be 1..65535");
+  return port === 65535 ? 65534 : 65535;
 }
 
 function writeFixture({ home, work, port }) {
@@ -219,6 +245,33 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     }
   });
 
+  it("waits for close when exit precedes close", async () => {
+    const child = spawn(execPath, ["-e", `
+      const { spawn } = require("node:child_process");
+      spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 100)"], {
+        stdio: ["ignore", "inherit", "ignore"],
+      });
+      process.stdout.write("exit-gap-ready\\n");
+      process.exit(0);
+    `], { stdio: ["ignore", "pipe", "ignore"] });
+    child.stdout.setEncoding("utf8");
+    await new Promise((resolve, reject) => {
+      child.stdout.once("data", (chunk) => {
+        if (chunk.includes("exit-gap-ready")) resolve();
+        else reject(new Error(`unexpected startup output: ${chunk}`));
+      });
+      child.once("error", reject);
+    });
+    await new Promise((resolve, reject) => {
+      child.once("exit", resolve);
+      child.once("error", reject);
+    });
+    let closed = false;
+    child.once("close", () => { closed = true; });
+    await stopChild(child);
+    assert.equal(closed, true, "stopChild must await close after exit");
+  });
+
   it("force-kills a real SIGTERM-ignoring child, awaits close, and frees its scratch", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-term-proof-"));
     const stubborn = spawn(execPath, ["-e",
@@ -257,6 +310,12 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     const home = mkdtempSync(join(tmpdir(), "bifrost-guard-negative-home-"));
     try {
       const violations = join(home, "test-network-violations.log");
+      const forbiddenPort = alternatePort(fakePort);
+      assert.equal(alternatePort(65535), 65534);
+      assert.equal(alternatePort(65534), 65535);
+      assert.ok(Number.isInteger(fakePort) && fakePort >= 1 && fakePort <= 65535);
+      assert.ok(Number.isInteger(forbiddenPort) && forbiddenPort >= 1 && forbiddenPort <= 65535);
+      assert.notEqual(forbiddenPort, fakePort);
       writeFileSync(violations, "");
       // Same preload, same guard, same allowed-origin contract as runPi.
       // Without the preload (guard-removal mutation) nothing records the
@@ -269,7 +328,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
             const allowed = await fetch("http://127.0.0.1:${fakePort}/_stats");
             const stats = await allowed.json();
             if (!stats || typeof stats.attempts !== "object") process.exitCode = 7;
-            const unreachable = ${fakePort + 1};
+            const unreachable = ${forbiddenPort};
             for (const attempt of [
               () => fetch("http://127.0.0.1:" + unreachable),
               () => new Promise((resolveAttempt) => {
