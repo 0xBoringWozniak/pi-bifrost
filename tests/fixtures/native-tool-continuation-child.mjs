@@ -18,6 +18,7 @@ let providers = [];
 const invocations = [];
 let toolExecutionCount = 0;
 let toolResultValue = null;
+let toolEventCounts = { toolStart: 0, toolEnd: 0, turnStart: 0, turnEnd: 0, agentStart: 0, agentEnd: 0 };
 const previous = { cwd: process.cwd(), environment: { ...process.env } };
 after(() => {
   session?.dispose();
@@ -112,6 +113,14 @@ it("routes real AgentSession native tool-call result completion lifecycle exactl
     resourceLoader,
   }));
   await session.bindExtensions({ mode: "print" });
+  const unsubscribeEvents = session.subscribe((event) => {
+    if (event.type === "tool_execution_start") toolEventCounts.toolStart += 1;
+    if (event.type === "tool_execution_end") toolEventCounts.toolEnd += 1;
+    if (event.type === "turn_start") toolEventCounts.turnStart += 1;
+    if (event.type === "turn_end") toolEventCounts.turnEnd += 1;
+    if (event.type === "agent_start") toolEventCounts.agentStart += 1;
+    if (event.type === "agent_end") toolEventCounts.agentEnd += 1;
+  });
 
   const errors = [];
   const originalError = console.error;
@@ -132,5 +141,12 @@ it("routes real AgentSession native tool-call result completion lifecycle exactl
   assert.equal(session.model.id, "physical-capable");
   assert.equal(errors.some((line) => line.includes("requested_tier_unavailable")), false);
   assert.equal(existsSync(violationPath) ? readFileSync(violationPath, "utf8") : "", "", "AgentSession made blocked outbound attempt");
+  unsubscribeEvents();
+  assert.equal(session.isStreaming, false, "session must be idle after completion");
+  assert.equal(session.pendingMessageCount, 0, "public pending session messages must be zero");
+  assert.deepEqual(session.getSteeringMessages(), [], "steering queue must be empty");
+  assert.deepEqual(session.getFollowUpMessages(), [], "follow-up queue must be empty");
+  assert.deepEqual(toolEventCounts, { toolStart: 1, toolEnd: 1, turnStart: 2, turnEnd: 2, agentStart: 1, agentEnd: 1 }, "actual tool and lifecycle event counts must match");
   assert.equal(existsSync(scratch), true, "child must not delete the parent-owned scratch");
 });
+
