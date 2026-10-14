@@ -3626,6 +3626,21 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       strictBoundary = false;
       return { action: "continue" };
     }
+    const explicitSubagentRun = process.env.PI_SUBAGENT_RUN_ID?.trim();
+    if (explicitSubagentRun) {
+      debug("input", "subagent", {
+        source: "PI-subagent",
+        agent: process.env.PI_SUBAGENT_CHILD_AGENT,
+        model: modelKey(ctx.model),
+        thinkingLevel: ctx.thinkingLevel,
+        depth: process.env.PI_SUBAGENT_PARENT_DEPTH,
+      });
+      routeBoundary = false;
+      strictBoundary = false;
+      debug("input", "bypass", { enabled: state.enabled, pinned: state.pinned, reason: "explicit_subagent_model" });
+      syncBifrostModeStatus(ctx, state);
+      return { action: "continue" };
+    }
     if (providerCooldownsEnabled()) {
       try { await ensureProviderAllowanceImports(); }
       catch {
@@ -3643,17 +3658,6 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     clearBifrostWidgets(ctx);
     const activeBootstrap = autoBootstrapBySession.get(ctx.sessionManager);
     if (activeBootstrap) renderAutoBootstrapProgress(ctx, activeBootstrap);
-    // Passive subagent observation — logged even when routing is disabled,
-    // so child-session model usage stays visible in debug logs.
-    if (process.env.PI_SUBAGENT_RUN_ID) {
-      debug("input", "subagent", {
-        source: "PI-subagent",
-        agent: process.env.PI_SUBAGENT_CHILD_AGENT,
-        model: modelKey(ctx.model),
-        thinkingLevel: ctx.thinkingLevel,
-        depth: process.env.PI_SUBAGENT_PARENT_DEPTH,
-      });
-    }
     if (!state.enabled || state.pinned) {
       const pinnedModel = ctx.model;
       if (state.enabled && state.pinned && pinnedModel && !isVirtualModel(pinnedModel) && providerCooldownsEnabled()) {
