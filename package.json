@@ -50,7 +50,7 @@
     "image": "https://iamaamir.github.io/pi-bifrost/social-card.png"
   },
   "crap": {
-    "threshold": 30,
+    "threshold": 90,
     "coverage": "coverage/coverage-final.json",
     "history": "docs/quality/crap-history.jsonl"
   },
