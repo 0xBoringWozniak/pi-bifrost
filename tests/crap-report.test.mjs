@@ -4,6 +4,7 @@ import {
   collectFunctions,
   computeCrap,
   coverageFor,
+  resolveOptions,
 } from "../scripts/crap-report.mjs";
 
 test("CRAP formula matches the published metric", () => {
@@ -38,6 +39,63 @@ const outer = (x: number) => {
   return inner(x);
 };
 `;
+
+test("options fall back to built-in defaults", () => {
+  const options = resolveOptions([], {});
+  assert.equal(options.threshold, 30);
+  assert.equal(options.coverage, "coverage/coverage-final.json");
+  assert.equal(options.failAbove, null);
+  assert.equal(options.showAll, false);
+  assert.deepEqual(options.files, []);
+  assert.deepEqual(options.sources, {
+    threshold: "default",
+    failAbove: "default",
+    coverage: "default",
+  });
+});
+
+test("package.json crap block overrides defaults", () => {
+  const options = resolveOptions([], {
+    threshold: 55,
+    coverage: "build/cov.json",
+    failAbove: 60,
+  });
+  assert.equal(options.threshold, 55);
+  assert.equal(options.coverage, "build/cov.json");
+  assert.equal(options.failAbove, 60);
+  assert.deepEqual(options.sources, {
+    threshold: "package.json",
+    failAbove: "package.json",
+    coverage: "package.json",
+  });
+});
+
+test("CLI flags override the package.json crap block", () => {
+  const options = resolveOptions(["--threshold", "10", "--fail-above", "5", "a.ts"], {
+    threshold: 55,
+    coverage: "build/cov.json",
+    failAbove: 60,
+  });
+  assert.equal(options.threshold, 10);
+  assert.equal(options.failAbove, 5);
+  assert.equal(options.coverage, "build/cov.json"); // config still applies where no flag exists
+  assert.deepEqual(options.files, ["a.ts"]);
+  assert.equal(options.sources.threshold, "cli");
+});
+
+test("a null failAbove config value means no gate", () => {
+  const options = resolveOptions([], { failAbove: null });
+  assert.equal(options.failAbove, null);
+  assert.equal(options.sources.failAbove, "default");
+});
+
+test("invalid configuration fails with a clear error", () => {
+  assert.throws(() => resolveOptions([], { threshold: "abc" }), /finite number/);
+  assert.throws(() => resolveOptions([], { threshold: 0 }), /greater than 0/);
+  assert.throws(() => resolveOptions([], { coverage: "" }), /non-empty string/);
+  assert.throws(() => resolveOptions(["--nope"], {}), /Unknown flag/);
+  assert.throws(() => resolveOptions(["--threshold"], {}), /expects a number/);
+});
 
 test("complexity counts decision points but not nested functions", () => {
   const functions = collectFunctions(SNIPPET, "snippet.ts");
