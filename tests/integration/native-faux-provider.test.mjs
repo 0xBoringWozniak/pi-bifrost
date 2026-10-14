@@ -1,91 +1,84 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { execPath } from "node:process";
+import { createServer } from "node:http";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, it } from "node:test";
+import { it } from "node:test";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const scratch = mkdtempSync(join(tmpdir(), "bifrost-native-faux-"));
-const home = join(scratch, "home");
-const cwd = join(scratch, "workspace");
-const agentDir = join(home, ".pi", "agent");
-mkdirSync(agentDir, { recursive: true });
-mkdirSync(join(cwd, ".pi"), { recursive: true });
-writeFileSync(join(agentDir, "auth.json"), "{}\n");
-writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false } }));
-writeFileSync(join(cwd, ".pi", "bifrost.json"), JSON.stringify({
-  enabled: true,
-  models: { quick: ["faux/physical-fast"], general: ["faux/physical-capable"], frontier: ["faux/physical-capable"] },
-  default: "quick",
-  classifier: { enabled: false },
-  rules: [{ pattern: "native faux dispatch marker", model: "faux/physical-capable" }],
-}));
-const previous = { cwd: process.cwd(), HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, TYPESAFE_API_KEY: process.env.TYPESAFE_API_KEY, fetch: globalThis.fetch };
-process.chdir(cwd);
-let externalRequests = 0;
-globalThis.fetch = async () => { externalRequests++; throw new Error("native faux integration must not make external requests"); };
-process.env.HOME = home;
-process.env.PI_CODING_AGENT_DIR = agentDir;
-delete process.env.TYPESAFE_API_KEY;
-const [{ createAgentSession, ModelRuntime, DefaultResourceLoader }, { fauxProvider, fauxAssistantMessage, fauxText }] = await Promise.all([
-  import("@earendil-works/pi-coding-agent"),
-  import("@earendil-works/pi-ai"),
-]);
-const faux = fauxProvider({ provider: "faux", models: [
-  { id: "physical-fast", reasoning: false }, { id: "physical-capable", reasoning: true },
-] });
-const invocations = [];
-faux.setResponses([(_context, _options, _state, model) => {
-  invocations.push(`${model.provider}/${model.id}`);
-  return fauxAssistantMessage(fauxText("native faux response"));
-}]);
-let session;
-let runtime;
-after(() => {
-  session?.dispose();
-  if (runtime) runtime.unregisterProvider("faux");
-  rmSync(scratch, { recursive: true, force: true });
-  if (previous.HOME === undefined) delete process.env.HOME; else process.env.HOME = previous.HOME;
-  if (previous.PI_CODING_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR;
-  else process.env.PI_CODING_AGENT_DIR = previous.PI_CODING_AGENT_DIR;
-  if (previous.TYPESAFE_API_KEY === undefined) delete process.env.TYPESAFE_API_KEY;
-  else process.env.TYPESAFE_API_KEY = previous.TYPESAFE_API_KEY;
-  globalThis.fetch = previous.fetch;
-  process.chdir(previous.cwd);
-});
+const child = join(root, "tests", "fixtures", "native-faux-provider-child.mjs");
+const guard = join(root, "scripts", "test-outbound-guard.cjs");
+const credentials = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
 
-it("routes real AgentSession request to configured physical faux model", async () => {
-  runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, refreshOnCreate: false });
-  runtime.registerNativeProvider(faux.provider);
-  await runtime.setRuntimeApiKey("faux", "fixture-only");
-  await runtime.refresh({ allowNetwork: false });
-  const model = runtime.getModel("faux", "physical-fast");
-  assert.ok(model, "registered physical model must be available");
-  assert.deepEqual((await runtime.getAvailable("faux")).map(({ id }) => id), ["physical-fast", "physical-capable"]);
-  const { default: bifrostExtension } = await import(join(root, "index.ts"));
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, extensionFactories: [bifrostExtension] });
-  await resourceLoader.reload();
-  ({ session } = await createAgentSession({ cwd, agentDir, modelRuntime: runtime, model, noTools: "all", resourceLoader }));
-  await session.bindExtensions({ mode: "print" });
-  await runtime.getAvailable("faux");
-  const errors = [];
-  const originalError = console.error;
-  console.error = (...args) => { errors.push(args.join(" ")); originalError(...args); };
+function runNode(args, options) {
+  return new Promise((resolve, reject) => {
+    const childProcess = spawn(execPath, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    childProcess.stdout.setEncoding("utf8");
+    childProcess.stderr.setEncoding("utf8");
+    childProcess.stdout.on("data", (chunk) => { stdout += chunk; });
+    childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
+    childProcess.once("error", reject);
+    childProcess.once("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fence", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "bifrost-native-faux-"));
+  const violations = join(scratch, "network-violations.log");
+  const server = createServer((_request, response) => response.end("allowed loopback fixture"));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const previousCredentials = Object.fromEntries(credentials.map((name) => [name, process.env[name]]));
   try {
-    await session.prompt("native faux dispatch marker");
+    for (const name of credentials) process.env[name] = "ambient-secret-fixture";
+    const isolatedEnv = {
+      PATH: process.env.PATH,
+      HOME: join(scratch, "home"),
+      BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${port}`,
+      BIFROST_TEST_NETWORK_VIOLATIONS: violations,
+      BIFROST_NATIVE_FAUX_SCRATCH: scratch,
+      NODE_OPTIONS: `--require=${guard}`,
+    };
+    for (const name of credentials) assert.equal(isolatedEnv[name], undefined, `${name} must not enter child env`);
+
+    const probe = await runNode(["-e", `
+      const net = require("node:net");
+      const tls = require("node:tls");
+      const dgram = require("node:dgram");
+      (async () => {
+        const allowed = await fetch("http://127.0.0.1:${port}");
+        if (await allowed.text() !== "allowed loopback fixture") process.exitCode = 8;
+        for (const attempt of [
+          () => fetch("https://127.0.0.1:${port}"),
+          () => fetch("http://127.0.0.1:${port + 1}"),
+          () => new net.Socket().connect({ port: ${port + 1}, host: "127.0.0.1" }),
+          () => tls.connect({ port: ${port + 1}, host: "127.0.0.1" }),
+          () => dgram.createSocket("udp4").send(Buffer.from("fixture"), ${port}, "127.0.0.1"),
+        ]) { try { await attempt(); } catch {} }
+        if (${JSON.stringify(credentials)}.some((name) => process.env[name] !== undefined)) process.exitCode = 9;
+      })();
+    `], { cwd: root, env: isolatedEnv });
+    assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
+    const attempts = readFileSync(violations, "utf8");
+    assert.match(attempts, /blocked fetch to https:\/\/127\.0\.0\.1:/);
+    assert.match(attempts, /blocked fetch to http:\/\/127\.0\.0\.1:/);
+    assert.match(attempts, /blocked socket connection to 127\.0\.0\.1:/);
+    assert.match(attempts, /blocked UDP datagram to 127\.0\.0\.1/);
+
+    writeFileSync(violations, "");
+    const result = await runNode(["--test", "--experimental-strip-types", child], { cwd: root, env: isolatedEnv });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(readFileSync(violations, "utf8"), "", "faux AgentSession made blocked outbound attempt");
   } finally {
-    console.error = originalError;
+    for (const [name, value] of Object.entries(previousCredentials)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(scratch, { recursive: true, force: true });
   }
-  assert.equal(session.getLastAssistantText(), "native faux response");
-  assert.equal(faux.state.callCount, 1);
-  assert.equal(externalRequests, 0);
-  assert.deepEqual(invocations, ["faux/physical-capable"]);
-  assert.equal(errors.some((line) => line.includes("requested_tier_unavailable")), false);
-  assert.equal(errors.some((line) => line.includes("faux/physical-capable")), true);
-  assert.equal(errors.some((line) => line.includes("typesafe") || line.includes("pi-native")), false);
-  assert.equal(faux.getPendingResponseCount(), 0);
-  assert.equal(session.model.provider, "faux");
-  assert.equal(session.model.id, "physical-capable");
-  assert.deepEqual(runtime.getModels("faux").map(({ id }) => id), ["physical-fast", "physical-capable"]);
 });
