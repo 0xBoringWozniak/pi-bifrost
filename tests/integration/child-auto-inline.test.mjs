@@ -1,6 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -18,34 +19,52 @@ const CREDENTIALS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "G
 let fakePort;
 const observedClosedChildren = new WeakSet();
 const closeWaiters = new WeakMap();
+// Upper bound for awaiting the close event. A descendant that inherits a
+// child's stdio can hold the pipe open after the child itself has exited, so
+// the wait is bounded to keep a leak from hanging the suite indefinitely.
+const CLOSE_WAIT_MS = 10_000;
 
 function childStreamsClosed(child) {
   const streams = [child.stdin, child.stdout, child.stderr].filter(Boolean);
-  return streams.length > 0 && streams.every((stream) => stream.closed === true);
+  return streams.length === 0 || streams.every((stream) => stream.closed === true);
 }
 
-function waitForChildClose(child) {
-  if (observedClosedChildren.has(child) || childStreamsClosed(child)) return Promise.resolve();
+// Resolves true once close has been observed and false when the bounded wait
+// expires. Exit alone is never evidence of close: 'close' follows 'exit' only
+// after every stdio stream closes, so a still-running child is never treated
+// as closed just because its pipes ended, and an exited child with a
+// descendant-held pipe is never treated as closed either.
+function waitForChildClose(child, boundMs = CLOSE_WAIT_MS) {
+  if (observedClosedChildren.has(child)) return Promise.resolve(true);
+  const exited = child.exitCode !== null || child.signalCode !== null;
+  if (exited && childStreamsClosed(child)) return Promise.resolve(true);
   let waiter = closeWaiters.get(child);
   if (!waiter) {
     waiter = new Promise((resolve) => {
       child.once("close", () => {
         observedClosedChildren.add(child);
         closeWaiters.delete(child);
-        resolve();
+        resolve(true);
       });
     });
     closeWaiters.set(child, waiter);
   }
-  return waiter;
+  let bound;
+  return Promise.race([
+    waiter,
+    new Promise((resolve) => { bound = setTimeout(() => resolve(false), boundMs); }),
+  ]).then((observed) => {
+    clearTimeout(bound);
+    return observed;
+  });
 }
 
 function stopChild(child, graceMs = 1_000) {
-  const alreadyExited = child.exitCode !== null || child.signalCode !== null;
   const close = waitForChildClose(child);
+  const alreadyExited = child.exitCode !== null || child.signalCode !== null;
   if (alreadyExited) return close;
   const forceKill = setTimeout(() => child.kill("SIGKILL"), graceMs);
-  close.finally(() => clearTimeout(forceKill));
+  close.then(() => clearTimeout(forceKill));
   child.kill("SIGTERM");
   return close;
 }
@@ -92,9 +111,20 @@ async function readStats(port) {
   return response.json();
 }
 
+// A forbidden port must stay a legal, distinct port across the whole valid
+// range. The previous `port + 1` arithmetic overflowed to 65536 as soon as the
+// fake provider bound the top of the range, so fetch rejected before the
+// guard ever logged a violation.
 function alternatePort(port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError("provider port must be 1..65535");
   return port === 65535 ? 65534 : 65535;
+}
+
+function assertAlternatePortStaysLegalAndDistinct(port) {
+  const alternate = alternatePort(port);
+  assert.ok(Number.isInteger(alternate) && alternate >= 1 && alternate <= 65535,
+    `alternatePort(${port}) left the legal port range: ${alternate}`);
+  assert.notEqual(alternate, port, `alternatePort(${port}) must differ from the allowed port`);
 }
 
 function writeFixture({ home, work, port }) {
@@ -268,8 +298,23 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     });
     let closed = false;
     child.once("close", () => { closed = true; });
-    await stopChild(child);
+    const observed = await stopChild(child);
     assert.equal(closed, true, "stopChild must await close after exit");
+    assert.equal(observed, true, "stopChild must report the observed close");
+  });
+
+  it("resolves an already-closed child without waiting for a close that already fired", async () => {
+    const child = spawn(execPath, ["-e", "process.exit(0)"], { stdio: ["ignore", "pipe", "ignore"] });
+    await once(child, "close");
+    // The close event has already fired, so re-registering a listener would
+    // hang. The bounded wait proves stopChild resolves instead of waiting.
+    for (const attempt of [1, 2]) {
+      const outcome = await Promise.race([
+        stopChild(child).then(() => "closed"),
+        new Promise((resolve) => setTimeout(() => resolve("still-waiting"), 250)),
+      ]);
+      assert.equal(outcome, "closed", `already-closed child wait #${attempt} must not wait for a repeated close event`);
+    }
   });
 
   it("force-kills a real SIGTERM-ignoring child, awaits close, and frees its scratch", async () => {
@@ -311,11 +356,14 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     try {
       const violations = join(home, "test-network-violations.log");
       const forbiddenPort = alternatePort(fakePort);
+      // Independent boundary regression: the forbidden port stays legal and
+      // distinct for every valid provider port, including the top of the
+      // range that the previous arithmetic overflowed.
+      assertAlternatePortStaysLegalAndDistinct(65535);
       assert.equal(alternatePort(65535), 65534);
       assert.equal(alternatePort(65534), 65535);
-      assert.ok(Number.isInteger(fakePort) && fakePort >= 1 && fakePort <= 65535);
-      assert.ok(Number.isInteger(forbiddenPort) && forbiddenPort >= 1 && forbiddenPort <= 65535);
-      assert.notEqual(forbiddenPort, fakePort);
+      for (let port = 1; port <= 65535; port += 1) assertAlternatePortStaysLegalAndDistinct(port);
+      assertAlternatePortStaysLegalAndDistinct(fakePort);
       writeFileSync(violations, "");
       // Same preload, same guard, same allowed-origin contract as runPi.
       // Without the preload (guard-removal mutation) nothing records the
@@ -374,12 +422,16 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       });
       assert.equal(probe.code, 0, probe.stderr);
       const attempts = readFileSync(violations, "utf8");
-      assert.match(attempts, /blocked fetch to http:\/\/127\.0\.0\.1:/,
-        "forbidden fetch must be blocked and specifically recorded");
-      assert.match(attempts, /blocked socket connection to 127\.0\.0\.1:/,
-        "forbidden socket connection must be blocked and specifically recorded");
-      assert.match(attempts, /blocked UDP datagram to 127\.0\.0\.1/,
-        "forbidden UDP datagram must be blocked and specifically recorded");
+      // Exactly three violations: the guard records the forbidden attempt it
+      // blocked and nothing else. An allowed-origin request or an overflowing
+      // port that fetch rejects before the guard sees it changes this count.
+      const records = attempts.split("\n").map((line) => line.trim()).filter(Boolean);
+      assert.equal(records.length, 3, `guard recorded ${records.length} violations: ${JSON.stringify(records)}`);
+      assert.deepEqual(records, [
+        `blocked fetch to http://127.0.0.1:${forbiddenPort}`,
+        `blocked socket connection to 127.0.0.1:${forbiddenPort}`,
+        "blocked UDP datagram to 127.0.0.1",
+      ], "forbidden fetch, socket, and UDP attempts must each be recorded exactly once");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
