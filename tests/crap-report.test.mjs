@@ -181,6 +181,31 @@ test("renderTrend shows per-snapshot rows and the overall direction", () => {
   assert.match(trend, /20 → 16 \(-4\), improving\./);
 });
 
+test("renderTrend warns when thresholds differ across snapshots", () => {
+  const base = {
+    at: "2026-01-01T00:00:00.000Z",
+    revision: "aaaaaaa",
+    dirty: false,
+    functions: 10,
+    flagged: 2,
+    percentFlagged: 20,
+    max: 40,
+  };
+  const mixed = renderTrend(
+    [
+      { ...base, threshold: 30 },
+      { ...base, at: "2026-01-02T00:00:00.000Z", threshold: 55 },
+    ],
+    30,
+  );
+  assert.match(mixed, /different thresholds \(30, 55\)/);
+  // A consistent threshold carries no warning.
+  assert.doesNotMatch(
+    renderTrend([{ ...base, threshold: 30 }], 30),
+    /different thresholds/,
+  );
+});
+
 test("renderTrend reports a drift as drifting up", () => {
   const records = [
     { at: "2026-01-01T00:00:00.000Z", revision: "a", threshold: 30, functions: 10, flagged: 1, percentFlagged: 10, max: 40 },
