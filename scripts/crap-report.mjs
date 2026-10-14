@@ -110,10 +110,10 @@ export function resolveOptions(argv = [], config = {}) {
     const arg = argv[i];
     // A flag at the end of the arguments has no value; reject it instead of
     // silently falling back to the configured default.
-    const takeValue = (flag) => {
+    const takeValue = (flag, kind = "a number") => {
       const value = argv[i + 1];
-      if (value === undefined || value === "") {
-        throw new ConfigError(`${flag} expects a number.`);
+      if (value === undefined || value === "" || value.startsWith("--")) {
+        throw new ConfigError(`${flag} expects ${kind}.`);
       }
       i += 1;
       return value;
@@ -129,7 +129,7 @@ export function resolveOptions(argv = [], config = {}) {
     } else if (arg === "--fail-above") {
       cli.failAbove = takeValue(arg);
     } else if (arg === "--history") {
-      cli.history = takeValue(arg);
+      cli.history = takeValue(arg, "a path");
     } else if (arg.startsWith("--history=")) {
       const value = arg.slice("--history=".length);
       if (value === "") {

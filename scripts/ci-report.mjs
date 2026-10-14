@@ -7,7 +7,7 @@ import { readHistory, renderTrend } from "./crap-report.mjs";
 const REPORT_SCHEMA_VERSION = 1;
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 export const MAX_REPORT_BYTES = 512 * 1024;
-export const MAX_CASES = 50;
+export const MAX_CASES = 500;
 const MAX_CAUSE_DEPTH = 2;
 const STATUSES = new Set(["passed", "failed", "blocked", "missing", "deferred"]);
 const REQUIRED_GATES = [
