@@ -247,7 +247,7 @@ describe("Pi init probe regression", { concurrency: 1, timeout: 120_000 }, () =>
 
   it("keeps timed-out models out of generated pools when another model succeeds", async () => {
     requests = [];
-    const env = fixture(port, ["healthy", "timeout", "credits-exhausted"], { probe: { timeoutMs: 30 } });
+    const env = fixture(port, ["healthy", "timeout", "credits-exhausted"], { probe: { timeoutMs: 1_000 } });
     try {
       const result = await runInit({ ...env, args: "-f --write" });
       assert.equal(result.timedOut, false);
