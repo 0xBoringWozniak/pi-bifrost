@@ -3,17 +3,6 @@ import { appendFileSync, readFileSync, statSync, writeFileSync, mkdirSync } from
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-let readHistory;
-let renderTrend;
-try {
-  const crap = await import("./crap-report.mjs");
-  readHistory = crap.readHistory;
-  renderTrend = crap.renderTrend;
-} catch {
-  readHistory = () => [];
-  renderTrend = () => "No CRAP history available.";
-}
-
 const REPORT_SCHEMA_VERSION = 1;
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 export const MAX_REPORT_BYTES = 512 * 1024;
@@ -278,48 +267,13 @@ export function renderCiReport(inputData, context = {}) {
   const issues = issueRows(evidence.cases);
   const deferred = evidence.cases.filter((item) => item.status === "deferred");
 
-  let crapSection = [];
-
-  if (evidence.profile === "deterministic" && evidence.source.dirtyPathsAtEnd?.length === 0 && evidence.exitCode === 0) {
-    // Only fold CRAP context into the deterministic acceptance report when the
-    // acceptance run itself was clean and passing; a failing/blocked/dirty
-    // acceptance run already carries its own attention section.
-    try {
-      const historyPath = join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "docs", "quality", "crap-history.jsonl");
-      const records = readHistory(historyPath);
-      if (records.length > 0) {
-        const latest = records[records.length - 1];
-        crapSection.push("### CRAP analysis");
-        crapSection.push("");
-        crapSection.push(
-          `- Current (rev ${code(latest.revision ?? "unknown")}${latest.dirty ? "*" : ""}, ${latest.at ? String(latest.at).slice(0, 10) : "unknown"}): ${latest.flagged ?? "?"}/${latest.functions ?? "?"} flagged at or above ${latest.threshold ?? "?"} (${latest.percentFlagged ?? "?"}%); max ${latest.max ?? "?"}`,
-        );
-        if (records.length > 1) {
-          const first = records[0];
-          const delta = (latest.flagged ?? 0) - (first.flagged ?? 0);
-          const direction = delta === 0 ? "unchanged" : delta > 0 ? "drifting up" : "improving";
-          crapSection.push(
-            `- Trend: ${records.length} snapshots ${String(first.at ?? "?").slice(0, 10)} → ${String(latest.at ?? "?").slice(0, 10)}: flagged ${first.flagged} → ${latest.flagged} (${delta >= 0 ? "+" : ""}${delta}), ${direction}.`,
-          );
-        }
-        crapSection.push("");
-        const trend = renderTrend(records, latest.threshold ?? 30);
-        const trendLines = trend.split("\n");
-        crapSection.push("```text");
-        crapSection.push(...trendLines);
-        crapSection.push("```");
-        crapSection.push("");
-      }
-    } catch {
-      // history read failure does not belong in the CI report
-    }
-  }
-  if (crapSection.length === 0) {
-    crapSection.push("### CRAP analysis");
-    crapSection.push("");
-    crapSection.push("Not included in this run.");
-    crapSection.push("");
-  }
+  const crapSection = [
+    "### CRAP analysis",
+    "",
+    "Complexity/coverage (CRAP) analysis is intentionally not embedded in this acceptance evidence.",
+    "It does not depend on committed history. Run `npm run crap` locally or in a separate job to audit hotspots.",
+    "",
+  ];
 
   const scope = evidence.profile === "live"
     ? "Scope: Live profile; one approved model allowlisted; provider requests may be blocked; PRD coverage partial."
