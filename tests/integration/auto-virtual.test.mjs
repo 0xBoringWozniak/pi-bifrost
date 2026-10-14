@@ -1122,6 +1122,34 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     }
   });
 
+  it("surfaces malformed SSE as one failed provider attempt without replay", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-auto-malformed-sse-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-auto-malformed-sse-work-"));
+    try {
+      writeFixture({
+        home, work, port: server.port,
+        models: [{ id: "malformed-sse", reasoning: false }],
+        bifrost: {
+          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+          models: { quick: ["fake/malformed-sse"] },
+          reliability: { enabled: false, failureThreshold: 1, windowMinutes: 5, cooldownMinutes: 60 },
+        },
+      });
+      const before = await fakeStats(server.port);
+      const result = await runAuto({ home, work, messages: ["malformed transport request"] });
+      const after = await fakeStats(server.port);
+      assert.equal(result.code, 1, result.stderr);
+      assert.equal(result.stdout.trim(), "", `malformed SSE must not produce assistant output: ${result.stdout}`);
+      assert.match(result.stderr, /Bifrost auto: quick → fake\/malformed-sse/);
+      assert.match(result.stderr, /error|malformed|failed/i, result.stderr);
+      assert.equal((after.attempts["malformed-sse"] ?? 0) - (before.attempts["malformed-sse"] ?? 0), 1);
+      assert.equal((after.attempts.healthy ?? 0) - (before.attempts.healthy ?? 0), 0, "malformed SSE must not trigger a fallback request");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
   it("opens the circuit on failure and visibly degrades to the last dispatched model", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-auto-home-"));
     const work = mkdtempSync(join(tmpdir(), "bifrost-auto-work-"));

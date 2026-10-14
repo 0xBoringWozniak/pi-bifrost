@@ -147,6 +147,10 @@ const server = http.createServer((request, response) => {
     if (model === "fail") return json(response, 500, { error: { message: "simulated provider failure" } });
     if (model === "fail-then-ok" && attempt === 1) return json(response, 500, { error: { message: "simulated transient failure" } });
     if (model === "classifier") return sse(response, "general");
+    if (model === "malformed-sse") {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end("data: {malformed-json\n\n");
+    }
     if (model === "partial") {
       response.writeHead(200, { "content-type": "text/event-stream" });
       return response.write(`data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "partial" }, finish_reason: null }] })}\n\n`, () => response.socket.destroy());
