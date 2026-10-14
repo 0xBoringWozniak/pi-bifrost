@@ -359,24 +359,15 @@ function boundaryDeltas(config: ScenarioConfig): fc.Arbitrary<number> {
 const SCENARIO_OPS: readonly OpName[] = ["advance", "fail", "success", "beginTrial", "abandonTrial", "circuit", "save", "load"];
 
 /** A fresh generator per run keeps fast-check's replay path independent. */
-function scenarioArbitrary(deltas: fc.Arbitrary<number>): fc.Arbitrary<Iterable<fc.Command<ScenarioModel, ScenarioContext>>> {
+function scenarioArbitrary(deltas: fc.Arbitrary<number>, replayPath?: string): fc.Arbitrary<Iterable<fc.Command<ScenarioModel, ScenarioContext>>> {
   return fc.commands(
     SCENARIO_OPS.map((name) => opArbitrary(name, name === "advance" ? deltas : undefined)),
-    { maxCommands: 20 },
+    { maxCommands: 20, ...(replayPath ? { replayPath } : {}) },
   );
 }
 
-function scenarioProperty(config: ScenarioConfig, fault: Fault = "none"): fc.IProperty<[Iterable<fc.Command<ScenarioModel, ScenarioContext>>]> {
-  return fc.property(scenarioArbitrary(boundaryDeltas(DOCUMENTED_DEFAULTS)), (commands) => runScenario(config, commands, fault));
-}
-
-/** Surfaces the generated counterexample instead of a bare `failed` flag. */
-function assertAccepted(details: { failed: boolean; seed: number; errorInstance: unknown }): void {
-  if (details.failed) {
-    const instance = details.errorInstance;
-    throw instance instanceof Error ? instance : new Error(`property failed: seed ${String(details.seed)}`);
-  }
-  assert.ok(details.seed !== undefined);
+function scenarioProperty(config: ScenarioConfig, fault: Fault = "none", replayPath?: string): fc.IProperty<[Iterable<fc.Command<ScenarioModel, ScenarioContext>>]> {
+  return fc.property(scenarioArbitrary(boundaryDeltas(DOCUMENTED_DEFAULTS), replayPath), (commands) => runScenario(config, commands, fault));
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -388,7 +379,7 @@ const FAULT_SEED = 20260103;
 
 describe("reliability state machine", () => {
   it("matches the reference circuit across generated operation sequences", () => {
-    assertAccepted(fc.check(scenarioProperty(DOCUMENTED_DEFAULTS), { seed: SEQUENCE_SEED, numRuns: 200 }));
+    fc.assert(scenarioProperty(DOCUMENTED_DEFAULTS), { seed: SEQUENCE_SEED, numRuns: 200 });
   });
 
   it("matches the reference circuit across generated reliability configurations", () => {
@@ -400,9 +391,9 @@ describe("reliability state machine", () => {
       windowMinutes: fc.constantFrom(1, 2, 5),
       cooldownMinutes: fc.constantFrom(1, 5, 60),
     });
-    assertAccepted(fc.check(fc.property(configArbitrary, scenarioArbitrary(minuteStep), (config, generated) => {
+    fc.assert(fc.property(configArbitrary, scenarioArbitrary(minuteStep), (config, generated) => {
       runScenario(config, generated);
-    }), { seed: SWEEP_SEED, numRuns: 150 }));
+    }), { seed: SWEEP_SEED, numRuns: 150 });
   });
 
   it("keeps exact window and cooldown boundaries", () => {
@@ -507,22 +498,32 @@ describe("reliability state machine", () => {
     }
 
     it("shrinks and replays a controlled fault to a minimal sequence", () => {
-      const rejected = fc.check(scenarioProperty(IMMEDIATE, "trialFailureSkipsBackoff"), { seed: FAULT_SEED, numRuns: 250 });
+      const faultProperty = scenarioProperty(IMMEDIATE, "trialFailureSkipsBackoff");
+      const rejected = fc.check(faultProperty, { seed: FAULT_SEED, numRuns: 250 });
       assert.equal(rejected.failed, true, "a trial failure that skips the backoff must be rejected");
       assert.ok(rejected.numShrinks > 0, "the failing sequence must shrink");
       assert.ok((rejected.counterexamplePath ?? "").length > 0, "a rejected fault must report a replay path");
+      const replayPath = String(rejected.counterexample?.[0]).match(/replayPath="([^"]+)"/)?.[1];
+      assert.ok(replayPath, "generated commands must expose their command-filter replay log");
 
-      // Re-running the reported seed must reach the same generated sequence,
-      // which is the replay contract a reported counterexample depends on.
+      // Command shrinking drops commands after modelRun execution filters them.
+      // Replay both fast-check's seed/path and the command arbitrary's replay log.
       const operations = (details: {
         counterexample: readonly [Iterable<fc.Command<ScenarioModel, ScenarioContext>>] | null;
       }): string[] => (details.counterexample === null ? [] : [...details.counterexample[0]].map((command) => String(command)));
-      const replay = fc.check(scenarioProperty(IMMEDIATE, "trialFailureSkipsBackoff"), {
-        seed: rejected.seed,
-        numRuns: rejected.numRuns,
-      });
-      assert.equal(replay.failed, true);
-      assert.deepEqual(operations(replay), operations(rejected), "a reported seed must replay to the same operation sequence");
+      let replay;
+      try {
+        replay = fc.check(scenarioProperty(IMMEDIATE, "trialFailureSkipsBackoff", replayPath), {
+          seed: rejected.seed,
+          path: rejected.counterexamplePath ?? undefined,
+          numRuns: 250,
+        });
+      } catch (error) {
+        assert.fail(`seed=${rejected.seed} path=${rejected.counterexamplePath} runs=${rejected.numRuns}: ${(error as Error).message}`);
+      }
+      assert.equal(replay!.failed, true);
+      assert.equal(replay!.counterexamplePath, rejected.counterexamplePath);
+      assert.deepEqual(operations(replay!), operations(rejected), "reported seed and path must replay the same shrunk operation sequence");
     });
 
     it("shrinks a controlled fault to the shortest reproducing prefix", () => {

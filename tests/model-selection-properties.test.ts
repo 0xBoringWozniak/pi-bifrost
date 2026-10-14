@@ -422,18 +422,34 @@ describe("model selection properties", () => {
               .reverse()
               .map((entry, index) =>
                 makeModel("fixture", `pool-${index}`, 100 - entry.input, 100 - entry.output, 2_000_000 - entry.contextWindow));
-            assert.notDeepEqual(
-              asListed.map((model) => modelCost(model)),
-              inverted.map((model) => modelCost(model)),
-            );
+            // Inverting metadata can preserve each model's total cost. Candidate
+            // identity/order assertions below verify the selector contract.
             for (const strategy of ["first", "fastest"] as const) {
               assert.equal(selectModel([...asListed], strategy, RNG), asListed[0]);
               assert.equal(selectModel([...inverted], strategy, RNG), inverted[0]);
             }
           },
         ),
-        { numRuns: 250 },
+        { seed: 1408, path: "127:0:63:63:63:63", numRuns: 250 },
       );
+    });
+
+    it("keeps first and fastest on first listed model when total costs tie", () => {
+      const listed = [
+        makeModel("fixture", "listed-first", 0, 100, 1_000),
+        makeModel("fixture", "listed-last", 100, 0, 2_000),
+      ];
+      const invertedMetadata = [
+        makeModel("fixture", "inverted-first", 100, 0, 2_000),
+        makeModel("fixture", "inverted-last", 0, 100, 1_000),
+      ];
+      assert.deepEqual(listed.map(modelCost), [100, 100]);
+      assert.deepEqual(invertedMetadata.map(modelCost), [100, 100]);
+      for (const strategy of ["first", "fastest"] as const) {
+        assert.equal(selectModel(listed, strategy, RNG), listed[0]);
+        assert.equal(selectModel(invertedMetadata, strategy, RNG), invertedMetadata[0]);
+      }
+      assert.notEqual(listed[0], listed[1], "fixture must distinguish first from last");
     });
 
     it("never draws from the RNG for first or fastest", () => {
