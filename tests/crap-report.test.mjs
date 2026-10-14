@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   appendRecord,
@@ -9,6 +10,7 @@ import {
   computeCrap,
   coverageFor,
   displayPath,
+  gitState,
   makeRecord,
   readHistory,
   renderTrend,
@@ -267,6 +269,66 @@ for (const flag of HISTORY_FLAGS) {
     assert.equal(defaults[flag.slice(2)], false);
   });
 }
+
+test("same-line sibling functions keep precise AST ownership", () => {
+  const source = "const left = () => { return 1; }; const right = () => { return 2; };";
+  const functions = collectFunctions(source, "siblings.ts");
+  const left = functions.find((fn) => fn.name === "left");
+  const right = functions.find((fn) => fn.name === "right");
+  assert.deepEqual(left.nested, []);
+  assert.deepEqual(right.nested, []);
+  const statementMap = {
+    left: { start: { line: 1, column: 23 }, end: { line: 1, column: 31 } },
+    right: { start: { line: 1, column: 57 }, end: { line: 1, column: 65 } },
+  };
+  assert.equal(coverageFor({ statementMap, s: { left: 1, right: 0 } }, left), 100);
+  assert.equal(coverageFor({ statementMap, s: { left: 1, right: 0 } }, right), 0);
+});
+
+test("real c8 CLI does not credit same-line sibling functions with shared coverage", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crap-c8-siblings-"));
+  const fixture = join(dir, "siblings.ts");
+  const body = "function left(x: boolean) { if (x) { return 1; } if (x) { return 2; } if (x) { return 3; } if (x) { return 4; } } function right(x: boolean) { if (x) { return 5; } if (x) { return 6; } if (x) { return 7; } if (x) { return 8; } }\n";
+  writeFileSync(fixture, body);
+  try {
+    const c8 = join(process.cwd(), "node_modules", ".bin", "c8");
+    const covered = spawnSync(c8, ["--reporter=json", "node", "--experimental-strip-types", "siblings.ts"], { cwd: dir, encoding: "utf8" });
+    assert.equal(covered.status, 0, covered.stderr);
+    const report = spawnSync(process.execPath, [join(process.cwd(), "scripts", "crap-report.mjs"), "--all", "siblings.ts"], { cwd: dir, encoding: "utf8" });
+    assert.equal(report.status, 0, report.stderr);
+    const rows = report.stdout.split("\n").filter((line) => /\b(left|right)$/.test(line));
+    assert.equal(rows.length, 2);
+    assert.ok(rows.every((line) => /\s30\.0\s/.test(line)), report.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("nonempty functions with missing or incompatible statement coverage stay unknown", () => {
+  const fn = collectFunctions("function work() { return 1; }", "work.ts")[0];
+  assert.equal(coverageFor(null, fn), null);
+  assert.equal(coverageFor({ statementMap: {}, s: {} }, fn), null);
+  assert.equal(coverageFor({ statementMap: { one: {} }, s: { one: 1 } }, fn), null);
+  const empty = collectFunctions("function empty() {}", "empty.ts")[0];
+  assert.equal(coverageFor({ statementMap: {}, s: {} }, empty), 100);
+});
+
+test("complexity counts logical assignment operators", () => {
+  const fn = collectFunctions(`function assignments(a, b, c) {
+    a ||= b;
+    a &&= c;
+    a ??= b;
+    return a ? b : c;
+  }`, "assignments.ts")[0];
+  assert.equal(fn.complexity, 5);
+});
+
+test("git status failure never becomes clean evidence", () => {
+  const run = (_command, args) => args[0] === "rev-parse"
+    ? { status: 0, stdout: "abc123\n" }
+    : { status: 1, stdout: "", stderr: "git unavailable" };
+  assert.deepEqual(gitState(run), { revision: "abc123", dirty: null, error: "git status failed" });
+});
 
 test("complexity counts decision points but not nested functions", () => {
   const functions = collectFunctions(SNIPPET, "snippet.ts");

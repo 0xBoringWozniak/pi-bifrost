@@ -249,7 +249,10 @@ export function complexityOf(fnNode) {
         if (
           op === ts.SyntaxKind.AmpersandAmpersandToken ||
           op === ts.SyntaxKind.BarBarToken ||
-          op === ts.SyntaxKind.QuestionQuestionToken
+          op === ts.SyntaxKind.QuestionQuestionToken ||
+          op === ts.SyntaxKind.AmpersandAmpersandEqualsToken ||
+          op === ts.SyntaxKind.BarBarEqualsToken ||
+          op === ts.SyntaxKind.QuestionQuestionEqualsToken
         ) {
           complexity += 1;
         }
@@ -309,47 +312,59 @@ export function collectFunctions(sourceText, fileName = "source.ts") {
         complexity: complexityOf(node),
         startLine: start.line + 1,
         endLine: end.line + 1,
+        start: { line: start.line + 1, column: start.character },
+        end: { line: end.line + 1, column: end.character },
+        emptyBody: !!node.body && ts.isBlock(node.body) && node.body.statements.length === 0,
         nested: [],
       });
     }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  // Attribute nested-function statements to the nested function only.
+  // Attribute nested-function statements to the nested function only. Use
+  // source ranges, not line spans: sibling functions may share one line.
+  const comparePosition = (a, b) => a.line - b.line || a.column - b.column;
   for (const fn of functions) {
     for (const other of functions) {
       if (other === fn) continue;
-      if (other.startLine >= fn.startLine && other.endLine <= fn.endLine) {
-        fn.nested.push([other.startLine, other.endLine]);
-      }
+      const startsInside = comparePosition(other.start, fn.start) > 0;
+      const endsInside = comparePosition(other.end, fn.end) < 0;
+      if (startsInside && endsInside) fn.nested.push({ start: other.start, end: other.end });
     }
   }
   return functions;
 }
 
-function inNested(line, spans) {
-  for (const [start, end] of spans) {
-    if (line >= start && line <= end) return true;
-  }
-  return false;
+function comparePosition(a, b) {
+  return a.line - b.line || a.column - b.column;
+}
+
+function rangeContains(container, candidate) {
+  return comparePosition(candidate.start, container.start) >= 0
+    && comparePosition(candidate.end, container.end) <= 0;
 }
 
 /** Statement coverage % for a function's own statements, or null when the
- *  file has no coverage data (treated as 0% by the caller). */
+ *  file has no compatible coverage data (treated as 0% by the caller). */
 export function coverageFor(coverageEntry, fn) {
-  if (!coverageEntry || !coverageEntry.statementMap) return null;
+  if (!coverageEntry || !coverageEntry.statementMap || !coverageEntry.s
+    || typeof coverageEntry.statementMap !== "object" || typeof coverageEntry.s !== "object") return null;
   const map = coverageEntry.statementMap;
   const counts = coverageEntry.s;
   let total = 0;
   let covered = 0;
   for (const [id, loc] of Object.entries(map)) {
-    const line = loc.start.line;
-    if (line < fn.startLine || line > fn.endLine) continue;
-    if (inNested(line, fn.nested)) continue;
+    if (!loc?.start || !loc?.end
+      || !Number.isInteger(loc.start.line) || !Number.isInteger(loc.start.column)
+      || !Number.isInteger(loc.end.line) || !Number.isInteger(loc.end.column)) return null;
+    const statement = { start: loc.start, end: loc.end };
+    if (!rangeContains(fn, statement)) continue;
+    if (fn.nested.some((nested) => rangeContains(nested, statement))) continue;
     total += 1;
-    if ((counts[id] ?? 0) > 0) covered += 1;
+    if (typeof counts[id] !== "number") return null;
+    if (counts[id] > 0) covered += 1;
   }
-  if (total === 0) return 100; // no statements of its own (e.g. empty body)
+  if (total === 0) return fn.emptyBody ? 100 : null;
   return (covered / total) * 100;
 }
 
@@ -436,9 +451,9 @@ export function summarize(rows, threshold) {
  * snapshot from a dirty tree is marked, so the history never pretends an
  * uncommitted result belongs to a clean revision.
  */
-function gitState() {
+export function gitState(run = spawnSync) {
   try {
-    const revision = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
+    const revision = run("git", ["rev-parse", "--short", "HEAD"], {
       encoding: "utf8",
     });
     if (
@@ -448,14 +463,13 @@ function gitState() {
     ) {
       return { revision: "unknown", dirty: false };
     }
-    const status = spawnSync("git", ["status", "--porcelain"], {
+    const status = run("git", ["status", "--porcelain"], {
       encoding: "utf8",
     });
-    const dirty =
-      status.status === 0 &&
-      typeof status.stdout === "string" &&
-      status.stdout.trim() !== "";
-    return { revision: revision.stdout.trim(), dirty };
+    if (status.status !== 0 || typeof status.stdout !== "string") {
+      return { revision: revision.stdout.trim(), dirty: null, error: "git status failed" };
+    }
+    return { revision: revision.stdout.trim(), dirty: status.stdout.trim() !== "" };
   } catch {
     // Not a Git checkout, for example an unpacked tarball; the revision is
     // optional, so record it as unknown instead of failing.
