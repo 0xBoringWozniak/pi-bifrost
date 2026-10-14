@@ -28,7 +28,7 @@ describe("CI report", () => {
   it("renders a real 53-pass, 1-blocked run without turning partial coverage green", () => {
     const rendered = renderCiReport(fixture, trustedContext);
     assert.equal(rendered.confidence.state, "BLOCKED");
-    assert.deepEqual(rendered.counts, { passed: 49, failed: 0, blocked: 0, missing: 0, deferred: 1 });
+    assert.deepEqual(rendered.counts, { passed: 48, failed: 0, blocked: 1, missing: 0, deferred: 1 });
     assert.match(rendered.markdown, /PR confidence: 🔴 BLOCKED/);
     assert.match(rendered.markdown, /PR confidence: 🔴 BLOCKED \(required checks only\)[^\n]*\n> \*\*Scope: Pi \+ fake providers; live providers not tested; PRD coverage partial\.\*\*/);
     assert.match(renderCiReport(fixture, { ...trustedContext, conclusion: "failure" }).markdown, /Workflow result: 🔴 FAIL/);

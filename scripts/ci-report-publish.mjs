@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { MAX_CASES, MAX_REPORT_BYTES, makeReportData, renderCiReport } from "./ci-report.mjs";
+import { MAX_REPORT_BYTES, makeReportData, renderCiReport } from "./ci-report.mjs";
 
 export const COMMENT_MARKER = "<!-- bifrost-acceptance-report:v1 -->";
 const WORKFLOW_PATH = ".github/workflows/verification.yml";
@@ -13,7 +13,7 @@ const safeRepo = (value) => typeof value === "string" && /^[A-Za-z0-9_.-]+\/[A-Z
 
 export function validateReportData(payload) {
   const evidence = isObject(payload?.evidence) ? payload.evidence : payload;
-  if (!Array.isArray(evidence?.cases) || evidence.cases.length > MAX_CASES) return null;
+  if (!Array.isArray(evidence?.cases)) return null;
   try {
     const data = makeReportData(evidence);
     if (data?.evidence?.profile !== "deterministic") return null;
