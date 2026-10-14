@@ -34,15 +34,26 @@ export function parseDependencies(body) {
 
 function effectiveReviews(reviews) {
   if (!Array.isArray(reviews)) return { error: "review data unavailable" };
-  const latest = new Map();
-  for (const review of reviews) {
+  const ordered = [];
+  for (const [index, review] of reviews.entries()) {
     if (!review || !["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"].includes(review.state)
       || typeof review.author !== "string" || !review.author || typeof review.submitted_at !== "string"
       || !Number.isFinite(Date.parse(review.submitted_at))) return { error: "review evidence malformed or unknown" };
-    const prior = latest.get(review.author);
-    if (!prior || Date.parse(review.submitted_at) >= Date.parse(prior.submitted_at)) latest.set(review.author, review);
+    ordered.push({ review, index });
   }
-  return { latest: [...latest.values()].filter((review) => review.state !== "DISMISSED") };
+  ordered.sort((a, b) => Date.parse(a.review.submitted_at) - Date.parse(b.review.submitted_at) || a.index - b.index);
+  const decisions = new Map();
+  for (const { review } of ordered) {
+    if (review.state === "COMMENTED") continue;
+    if (review.state === "DISMISSED") decisions.delete(review.author);
+    else decisions.set(review.author, review);
+  }
+  return { latest: [...decisions.values()] };
+}
+
+export function workflowHashesMatch(baseWorkflow, headWorkflow) {
+  const credible = (value) => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
+  return credible(baseWorkflow?.sha) && credible(headWorkflow?.sha) && baseWorkflow.sha === headWorkflow.sha;
 }
 
 function checkDependencies(dependencies, baseBranch, baseOid) {
@@ -114,18 +125,22 @@ function getReviews(repo, number) {
   })) : [];
 }
 
-function getReviewThreads(repo, number) {
+export function getReviewThreads(repo, number, query = ghJson) {
   const threads = [];
   let cursor;
   do {
-    const result = ghJson(["api", "graphql", "-f", "query=query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}",
+    const result = query(["api", "graphql", "-f", "query=query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}",
       "-F", "owner=" + repo.split("/")[0], "-F", "name=" + repo.split("/")[1], "-F", `number=${number}`,
       ...(cursor ? ["-F", `cursor=${cursor}`] : [])]);
     const page = result.data?.repository?.pullRequest?.reviewThreads;
-    if (!page || !Array.isArray(page.nodes)) throw new Error("Review thread data unavailable");
+    const pageInfo = page?.pageInfo;
+    if (!page || !Array.isArray(page.nodes) || !pageInfo || typeof pageInfo.hasNextPage !== "boolean"
+      || (pageInfo.endCursor !== null && (typeof pageInfo.endCursor !== "string" || !pageInfo.endCursor))) {
+      throw new Error("Review thread pagination unavailable");
+    }
     threads.push(...page.nodes);
-    if (page.pageInfo?.hasNextPage && !page.pageInfo.endCursor) throw new Error("Review thread pagination unavailable");
-    cursor = page.pageInfo?.hasNextPage ? page.pageInfo.endCursor : null;
+    if (pageInfo.hasNextPage && !pageInfo.endCursor) throw new Error("Review thread pagination unavailable");
+    cursor = pageInfo.hasNextPage ? pageInfo.endCursor : null;
   } while (cursor);
   return threads;
 }
@@ -144,13 +159,23 @@ function dependencyEvidence(repo, ref, baseBranch, baseOid) {
   return { kind: "pr", number: ref.number, state: pr.state?.toUpperCase(), mergedAt: pr.mergedAt, base: pr.baseRefName, integrated };
 }
 
-function runEvidence(repo, workflowId, head) {
-  const runs = ghJson(["api", `repos/${repo}/actions/workflows/${workflowId}/runs?head_sha=${head}&event=pull_request&per_page=100`]).workflow_runs ?? [];
-  const candidateRuns = runs.filter((run) => run.head_sha === head && run.event === "pull_request" && run.workflow_id === workflowId)
-    .sort((a, b) => (b.run_attempt ?? 0) - (a.run_attempt ?? 0) || Date.parse(b.created_at) - Date.parse(a.created_at));
+export function runEvidence(repo, workflowId, head, query = ghJson) {
+  const runs = query(["api", `repos/${repo}/actions/workflows/${workflowId}/runs?head_sha=${head}&event=pull_request&per_page=100`]).workflow_runs ?? [];
+  const groups = new Map();
+  for (const run of runs) {
+    if (run?.head_sha !== head || run.event !== "pull_request" || run.workflow_id !== workflowId) continue;
+    const key = String(run.id);
+    const prior = groups.get(key);
+    if (!prior || (run.run_attempt ?? 0) > (prior.run_attempt ?? 0)) groups.set(key, run);
+  }
+  const candidateRuns = [...groups.values()].sort((a, b) => {
+    const created = Date.parse(b.created_at) - Date.parse(a.created_at);
+    if (Number.isFinite(created) && created !== 0) return created;
+    return Number(b.id) - Number(a.id);
+  });
   if (!candidateRuns.length) return [];
   const latest = candidateRuns[0];
-  const jobs = ghJson(["api", `repos/${repo}/actions/runs/${latest.id}/jobs?per_page=100`]).jobs ?? [];
+  const jobs = query(["api", `repos/${repo}/actions/runs/${latest.id}/jobs?per_page=100`]).jobs ?? [];
   return [{ head_sha: latest.head_sha, event: latest.event, workflow_path: latest.path,
     conclusion: latest.conclusion, jobs: jobs.map((job) => ({ name: job.name, conclusion: job.conclusion })) }];
 }
@@ -168,7 +193,7 @@ function main() {
   const reviewThreads = getReviewThreads(repo, number);
   const refs = parseDependencies(pr.body);
   const dependencies = refs.map((ref) => dependencyEvidence(repo, ref, pr.baseRefName, pr.baseRefOid));
-  const result = evaluateEligibility({ pr, workflowFileMatchesBase: baseWorkflow.sha === headWorkflow.sha,
+  const result = evaluateEligibility({ pr, workflowFileMatchesBase: workflowHashesMatch(baseWorkflow, headWorkflow),
     workflowRuns, reviews, reviewThreads, dependencies });
   console.log(JSON.stringify({ ...result, policyLimit: LIMITATIONS[0] }, null, 2));
   process.exitCode = result.eligible ? 0 : 1;

@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evaluateEligibility, parseDependencies } from "../scripts/merge-eligibility.mjs";
+import { evaluateEligibility, getReviewThreads, parseDependencies, runEvidence, workflowHashesMatch } from "../scripts/merge-eligibility.mjs";
 
 const head = "abc123";
 const valid = {
@@ -36,6 +36,19 @@ test("requires successful release-gates from trusted workflow on exact head", ()
   ]) assert.equal(evaluate({ workflowRuns }).eligible, false);
   assert.equal(evaluate({ workflowFileMatchesBase: false }).eligible, false);
   assert.equal(evaluate().eligible, true);
+});
+
+test("ordinary comments do not replace an active review decision", () => {
+  assert.equal(evaluate({ reviews: [
+    { state: "CHANGES_REQUESTED", author: "reviewer-a", commit_id: "old", submitted_at: "2026-01-01" },
+    { state: "COMMENTED", author: "reviewer-a", commit_id: head, submitted_at: "2026-01-03" },
+    { state: "APPROVED", author: "reviewer-b", commit_id: head, submitted_at: "2026-01-02" },
+  ] }).eligible, false);
+  assert.equal(evaluate({ reviews: [
+    { state: "APPROVED", author: "reviewer-a", commit_id: head, submitted_at: "2026-01-01" },
+    { state: "COMMENTED", author: "reviewer-a", commit_id: head, submitted_at: "2026-01-03" },
+    { state: "APPROVED", author: "reviewer-b", commit_id: head, submitted_at: "2026-01-02" },
+  ] }).eligible, true);
 });
 
 test("uses latest effective review per reviewer and blocks active change requests across revisions", () => {
@@ -89,6 +102,56 @@ test("fails closed when review or required-check data is unknown", () => {
   assert.equal(evaluate({ reviews: undefined }).eligible, false);
   assert.equal(evaluate({ workflowRuns: undefined }).eligible, false);
   assert.equal(evaluate({ reviewThreads: undefined }).eligible, false);
+});
+
+test("selects newest workflow run before selecting same-run rerun attempt", () => {
+  const jobs = [{ name: "release-gates", conclusion: "success" }];
+  const mock = (args) => {
+    if (args.some((arg) => arg.includes("actions/workflows/123/runs"))) return { workflow_runs: [
+      { id: 10, run_attempt: 2, head_sha: head, event: "pull_request", workflow_id: 123, path: ".github/workflows/verification.yml", conclusion: "success", created_at: "2026-01-01T00:00:00Z" },
+      { id: 20, run_attempt: 1, head_sha: head, event: "pull_request", workflow_id: 123, path: ".github/workflows/verification.yml", conclusion: "failure", created_at: "2026-01-02T00:00:00Z" },
+    ] };
+    return { jobs };
+  };
+  assert.deepEqual(runEvidence("org/repo", 123, head, mock), [{
+    head_sha: head, event: "pull_request", workflow_path: ".github/workflows/verification.yml",
+    conclusion: "failure", jobs,
+  }]);
+  const sameRun = (args) => args.some((arg) => arg.includes("actions/workflows/123/runs"))
+    ? { workflow_runs: [
+      { id: 30, run_attempt: 1, head_sha: head, event: "pull_request", workflow_id: 123, path: ".github/workflows/verification.yml", conclusion: "failure", created_at: "2026-01-03T00:00:00Z" },
+      { id: 30, run_attempt: 2, head_sha: head, event: "pull_request", workflow_id: 123, path: ".github/workflows/verification.yml", conclusion: "success", created_at: "2026-01-03T00:00:00Z" },
+    ] } : { jobs };
+  assert.equal(runEvidence("org/repo", 123, head, sameRun)[0].conclusion, "success");
+});
+
+test("workflow comparison fails closed for absent or invalid content hashes", () => {
+  const hash = "a".repeat(40);
+  assert.equal(workflowHashesMatch({ sha: hash }, { sha: hash }), true);
+  for (const pair of [
+    [{}, {}],
+    [{}, { sha: hash }],
+    [{ sha: "" }, { sha: hash }],
+    [{ sha: "not-a-github-sha" }, { sha: hash }],
+    [{ sha: hash }, {}],
+    [{ sha: hash }, { sha: "b".repeat(39) }],
+  ]) assert.equal(workflowHashesMatch(...pair), false);
+});
+
+test("review-thread pagination requires explicit valid page metadata", () => {
+  for (const reviewThreads of [
+    { nodes: [] },
+    { nodes: [], pageInfo: { hasNextPage: false } },
+  ]) assert.throws(() => getReviewThreads("org/repo", 48, () => ({ data: { repository: { pullRequest: {
+    reviewThreads,
+  } } } })), /Review thread pagination unavailable/);
+  let calls = 0;
+  const pages = [
+    { data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: true }], pageInfo: { hasNextPage: true, endCursor: "cursor-1" } } } } } },
+    { data: { repository: { pullRequest: { reviewThreads: { nodes: [{ isResolved: false }], pageInfo: { hasNextPage: false, endCursor: null } } } } } },
+  ];
+  const threads = getReviewThreads("org/repo", 48, () => pages[calls++]);
+  assert.deepEqual(threads, [{ isResolved: true }, { isResolved: false }]);
 });
 
 test("CLI main-module detection works when script path contains spaces", () => {
