@@ -3626,8 +3626,12 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       strictBoundary = false;
       return { action: "continue" };
     }
-    const explicitSubagentRun = process.env.PI_SUBAGENT_RUN_ID?.trim();
-    if (explicitSubagentRun) {
+    // pi-subagents 0.77.0 sets PI_SUBAGENT_CHILD=1 in its async child
+    // runner (src/runs/background/subagent-runner.js). Scope this bypass to
+    // that verified child-host marker; PI_SUBAGENT_RUN_ID is not a producer
+    // contract in the installed SDK and must not drive routing decisions.
+    const explicitSubagentChild = process.env.PI_SUBAGENT_CHILD === "1";
+    if (explicitSubagentChild) {
       debug("input", "subagent", {
         source: "PI-subagent",
         agent: process.env.PI_SUBAGENT_CHILD_AGENT,
@@ -3637,7 +3641,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       });
       routeBoundary = false;
       strictBoundary = false;
-      debug("input", "bypass", { enabled: state.enabled, pinned: state.pinned, reason: "explicit_subagent_model" });
+      debug("input", "bypass", { enabled: state.enabled, pinned: state.pinned, reason: "subagent_child_host" });
       syncBifrostModeStatus(ctx, state);
       return { action: "continue" };
     }
