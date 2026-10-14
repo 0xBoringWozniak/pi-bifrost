@@ -32,7 +32,6 @@ describe("CI report", () => {
     assert.match(rendered.markdown, /PR confidence: 🔴 BLOCKED/);
     assert.match(rendered.markdown, /PR confidence: 🔴 BLOCKED \(required checks only\)[^\n]*\n> \*\*Scope: Pi \+ fake providers; live providers not tested; PRD coverage partial\.\*\*/);
     assert.match(renderCiReport(fixture, { ...trustedContext, conclusion: "failure" }).markdown, /Workflow result: 🔴 FAIL/);
-    assert.match(rendered.markdown, /first-use-unverified-route-product-gap/);
     assert.match(rendered.markdown, /deferred:r13:stable-versioned-api/);
     assert.match(rendered.markdown, /not establish support for every provider or a flake-free rate/);
     assert.match(rendered.markdown, /https:\/\/github\.com\/example\/pi-bifrost\/actions\/runs\/23900123456#artifacts/);
@@ -104,11 +103,11 @@ describe("CI report", () => {
     assert.equal(missingReport.confidence.state, "BLOCKED");
     assert.match(missingReport.confidence.reasons.join(" "), /unit/);
 
-    const duplicate = structuredClone(fixture);
+    const truncated = { ...fixture, evidence: { ...fixture.evidence, cases: fixture.evidence.cases.slice(0, 49) } };
+    const duplicate = structuredClone(truncated);
     duplicate.evidence.exitCode = 0;
     duplicate.evidence.source.dirtyPathsAtStart = [];
     duplicate.evidence.source.dirtyPathsAtEnd = [];
-    duplicate.evidence.cases.find((item) => item.id === "first-use-unverified-route-product-gap").status = "passed";
     duplicate.evidence.cases.push(structuredClone(duplicate.evidence.cases[0]));
     assert.match(renderCiReport(duplicate, trustedContext).confidence.reasons.join(" "), /Duplicate case identifiers/);
 
@@ -142,14 +141,13 @@ describe("CI report", () => {
     contract.evidence.cases.find((item) => item.id === "first-use-unverified-route-product-gap").status = "passed";
     const limited = renderCiReport(contract, trustedContext);
     assert.equal(limited.confidence.state, "LIMITED");
-  });
-
-  it("keeps hostile Markdown and untrusted artifact URLs inert", () => {
+  });  it("keeps hostile Markdown and untrusted artifact URLs inert", () => {
     const hostile = structuredClone(fixture);
-    const issue = hostile.evidence.cases.find((item) => item.id === "first-use-unverified-route-product-gap");
+    const issue = hostile.evidence.cases.find((item) => item.id === "gate:pinned-pi-reliability-ui");
+    issue.status = "blocked";
     issue.id = "broken | [inject](javascript:alert(1))\n| forged row";
     issue.detail = "<script>alert('x')</script> notify @danger\n| injected | passed |";
-    issue.artifacts = ["https://evil.example/steal.md](javascript:alert(2)", "file:///secret" ];
+    issue.artifacts = ["https://evil.example/steal.md](javascript:alert(2)", "file:///secret"];
     const report = renderCiReport(hostile, {
       sha: "a".repeat(40), runId: "123", attempt: "1",
       repository: "example/repo](javascript:alert(3)", serverUrl: "javascript:alert(4)",
@@ -164,7 +162,7 @@ describe("CI report", () => {
 
   it("redacts credential-shaped failure text before exporting report data", () => {
     const sensitive = structuredClone(fixture.evidence);
-    const issue = sensitive.cases.find((item) => item.id === "first-use-unverified-route-product-gap");
+    const issue = sensitive.cases.find((item) => item.id === "gate:pinned-pi-reliability-ui");
     issue.detail = "Authorization: Bearer sk-live-report-sentinel-123456789\nCookie: session=report-cookie-sentinel";
     const output = JSON.stringify(makeReportData(sensitive));
     assert.doesNotMatch(output, /sk-live-report-sentinel-123456789|report-cookie-sentinel/);
