@@ -9,9 +9,26 @@
  *           unit test suite (statement coverage from the c8 report).
  *
  * Functions with a score at or above the threshold, 30 by default, are
- * "CRAP-y": complex and not tested enough to change safely. Threshold and
- * formula origin: Bill Hetrick's crap4j metric, as documented by NDepend
- * and the Google Testing Blog.
+ * "CRAP-y": complex and not tested enough to change safely.
+ *
+ * Origin: the C.R.A.P. metric and the crap4j tool, introduced by Alberto
+ * Savoia and Bob Evans (Agitar Labs, 2007). Sources: crap4j FAQ
+ * (http://www.crap4j.org/faq.html) and Savoia's 2007 announcement.
+ *
+ * Why 30: the authors picked it empirically after reviewing their own code
+ * and many open source projects, and called it a starting point to refine
+ * rather than a derived constant. It is configuration here, not a fact.
+ *
+ * The number is nonetheless self-consistent, because a fully covered
+ * function scores exactly its own complexity. So a threshold T also caps
+ * the complexity worth testing at T: at 30, a function of complexity 31 or
+ * more can never comply, whatever its tests do. The authors' published
+ * table matches: complexity 10 needs 42% coverage, 20 needs 71%, 26-30
+ * needs 100%.
+ *
+ * Caveat: crap4j measured basis path coverage. This report uses statement
+ * coverage from c8, which is usually higher for the same tests, so scores
+ * here can run slightly more optimistic than the original calibration.
  *
  * Settings live outside the code, in package.json:
  *
