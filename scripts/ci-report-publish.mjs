@@ -83,6 +83,7 @@ export async function publishWorkflowRun({ event, repository, serverUrl, api, re
       repository,
       serverUrl,
       conclusion: event.action === "in_progress" ? "in_progress" : confirmed.run.conclusion ?? "failure",
+      crapHistory: Array.isArray(reportData?.crapHistory) ? reportData.crapHistory : undefined,
     });
     const body = `${COMMENT_MARKER}\n${rendered.markdown}`;
     if (Buffer.byteLength(body) > 65_000) throw new Error("Rendered CI report exceeds the GitHub comment limit");

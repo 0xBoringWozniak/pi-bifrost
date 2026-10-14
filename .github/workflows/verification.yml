@@ -53,6 +53,30 @@ jobs:
           npm run test:coverage
           node scripts/crap-report.mjs --record --history "$CRAP_HISTORY"
 
+      - name: Attach CRAP history to report data
+        if: always()
+        env:
+          REPORT_DATA: ${{ steps.acceptance.outputs.report-data }}
+          CRAP_HISTORY: ${{ runner.temp }}/crap-history.jsonl
+        run: |
+          node --input-type=module <<'NODE'
+          import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+          const reportDataPath = process.env.REPORT_DATA;
+          const historyPath = process.env.CRAP_HISTORY;
+          if (!reportDataPath || !historyPath || !existsSync(reportDataPath) || !existsSync(historyPath)) process.exit(0);
+          let data;
+          try { data = JSON.parse(readFileSync(reportDataPath, 'utf8')); } catch { process.exit(0); }
+          if (!data || typeof data !== 'object' || Array.isArray(data)) process.exit(0);
+          const records = [];
+          for (const line of readFileSync(historyPath, 'utf8').split('\\n')) {
+            const trimmed = line.trim();
+            if (trimmed === '') continue;
+            try { records.push(JSON.parse(trimmed)); } catch { process.exit(0); }
+          }
+          data.crapHistory = records;
+          writeFileSync(reportDataPath, JSON.stringify(data));
+          NODE
+
       - name: Upload CRAP trend history
         if: always()
         uses: actions/upload-artifact@v4
