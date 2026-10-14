@@ -79,7 +79,8 @@ Settings live in the `crap` block of `package.json`, so they are configurable wi
 "crap": {
   "threshold": 30,
   "coverage": "coverage/coverage-final.json",
-  "failAbove": null
+  "failAbove": null,
+  "history": "docs/quality/crap-history.jsonl"
 }
 ```
 
@@ -100,7 +101,13 @@ node scripts/crap-report.mjs # report from existing coverage data
 node scripts/crap-report.mjs --all            # list every function, not only above threshold
 node scripts/crap-report.mjs --threshold 50   # override the flagged threshold once
 node scripts/crap-report.mjs --fail-above 30  # override the gate once
+npm run crap:record          # coverage run, then append a snapshot to the history
+npm run crap:trend           # print the snapshot history as a table
 ```
+
+The history records one line per snapshot: revision, whether the tree was dirty, threshold, function count, flagged count, share, and the worst score. `--trend` reads only that file, so it needs no test run and works without coverage data.
+
+Snapshots answer whether quality is improving or drifting: the table shows the change in flagged functions between consecutive snapshots and the overall direction from the first to the last. A revision marked `*` was recorded with uncommitted changes, so it describes no frozen candidate.
 
 Every run prints the effective settings and where each value came from. Invalid configuration exits 2 with a clear message.
 
