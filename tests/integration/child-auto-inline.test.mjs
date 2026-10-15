@@ -1,309 +1,27 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { execPath } from "node:process";
 import { processGroupExists, terminateProcessGroup } from "../../scripts/acceptance/core.mjs";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, "..", "..");
-const PI = join(ROOT, "node_modules", ".bin", "pi");
-const EXTENSION = join(__dirname, "..", "fixtures", "child-auto-inline-extension.mjs");
-const DESCENDANT_CLI = join(__dirname, "..", "fixtures", "child-auto-descendant-cli.mjs");
-const PIPE_RACE_CLI = join(__dirname, "..", "fixtures", "child-auto-pipe-race-descendant-cli.mjs");
-const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
-const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
-const CREDENTIALS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
-
-let fakePort;
-const trackedChildren = new WeakMap();
-// Upper bound for awaiting the close event. A descendant that inherited a
-// child's stdio can hold the pipe open after the child itself has exited, so
-// the wait is bounded to keep a leak from hanging the suite indefinitely.
-const CLOSE_WAIT_MS = 10_000;
-// Bounds for the owned-descendant path: a child that never reaches close is
-// terminated as the leader of a process group this suite owns, and the result
-// is only true when the real close event then arrives.
-const DESCENDANT_GRACE_MS = 2_000;
-const DESCENDANT_CLEANUP_MS = 5_000;
-// How long the leader's own close may take after its grace window before the
-// owned group is terminated anyway. Kept short so a stubborn leader cannot
-// spend the whole descendant budget before the group phase begins.
-const LEADER_CLOSE_SLOP_MS = 2_000;
-
-// Every child this suite owns is spawned as the leader of its own process group
-// so cleanup can signal that group and nothing else. Each carries one lifecycle
-// record: the observed close event plus a single coordinated termination
-// promise. The close path and the timeout path await that same promise, so
-// neither can settle while a descendant of the owned group is still alive.
-function spawnOwned(command, args, options = {}) {
-  const child = spawn(command, args, { detached: process.platform !== "win32", ...options });
-  let markClosed;
-  const observed = new Promise((resolve) => { markClosed = resolve; });
-  const lifecycle = { isClosed: false, observed, termination: null };
-  child.once("close", () => {
-    lifecycle.isClosed = true;
-    markClosed(true);
-  });
-  lifecycle.terminate = (graceMs) => {
-    // Memoized on purpose: one owned group, one termination, one result.
-    lifecycle.termination ??= terminateOwnedGroup(child, graceMs);
-    return lifecycle.termination;
-  };
-  trackedChildren.set(child, lifecycle);
-  return child;
-}
-
-function closeTracking(child) {
-  const tracking = trackedChildren.get(child);
-  if (!tracking) throw new Error("child was not created by spawnOwned, so its close event is not tracked");
-  return tracking;
-}
-
-// Resolves true only when the close event has actually been observed. False
-// means the bound expired with a descendant still holding an inherited pipe.
-function waitForObservedClose(child, boundMs = CLOSE_WAIT_MS) {
-  const tracking = closeTracking(child);
-  if (tracking.isClosed) return Promise.resolve(true);
-  let bound;
-  return Promise.race([
-    tracking.observed,
-    new Promise((resolve) => { bound = setTimeout(() => resolve(false), boundMs); }),
-  ]).then((observed) => {
-    clearTimeout(bound);
-    return observed;
-  });
-}
-
-// Terminates the owned child and its process group, and resolves true only when
-// BOTH halves of the cleanup are proven: the leader's close event was actually
-// observed, and the owned group is dead. A close event alone proves nothing --
-// a descendant can close the inherited pipes when signalled and keep running,
-// and an already-closed leader says nothing about what it left behind. False
-// means cleanup could not be verified, and every caller must fail rather than
-// assume.
-async function terminateOwnedGroup(child, graceMs = 1_000) {
-  if (child.exitCode === null && child.signalCode === null) {
-    const forceKill = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, graceMs);
-    try { child.kill("SIGTERM"); } catch {}
-    await waitForObservedClose(child, graceMs + LEADER_CLOSE_SLOP_MS);
-    clearTimeout(forceKill);
-  }
-  // Signal only the process group this suite owns. Never a parent or shared
-  // group, and never a bare pattern match against unrelated processes.
-  const groupSignalled = await terminateProcessGroup(child, {
-    graceMs: DESCENDANT_GRACE_MS,
-    cleanupTimeoutMs: DESCENDANT_CLEANUP_MS,
-  });
-  // terminateProcessGroup already returns group death; re-derive it here so the
-  // result rests on observed evidence rather than on the helper's contract.
-  const groupDead = groupSignalled === true && !processGroupExists(child.pid);
-  const leaderClosed = await waitForObservedClose(child, DESCENDANT_CLEANUP_MS + CLOSE_WAIT_MS);
-  return leaderClosed && groupDead;
-}
-
-// Terminates an owned child, resolving true only when its cleanup is verified.
-async function stopChild(child, graceMs = 1_000) {
-  return closeTracking(child).terminate(graceMs);
-}
-
-// Test-only seam: forces one child's cleanup to report failure without touching
-// shared state, so a caller's cleanup-failure cause can be asserted directly.
-function forceCleanupFailure(child) {
-  closeTracking(child).terminate = () => Promise.resolve(false);
-}
-
-// Every caller reports cleanup the same way: the primary cause first, then an
-// explicit clause when the owned group could not be verified gone. A caller can
-// therefore tell "this run timed out" from "this run timed out and its cleanup
-// could not be verified".
-function cleanupFailure(message, verified) {
-  return verified
-    ? message
-    : `${message}; cleanup failure: the owned process group did not reach a verified dead state`;
-}
-
-function waitForFakeReady(child) {
-  return new Promise((resolve, reject) => {
-    let output = "";
-    let settled = false;
-    const fail = async (message) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      // The stop result is the only evidence of whether this child is really
-      // gone. Discarding it is how an unverified cleanup stayed invisible.
-      const verified = await stopChild(child);
-      reject(new Error(cleanupFailure(message, verified)));
-    };
-    const timer = setTimeout(() => { void fail("fake provider startup timed out"); }, 10_000);
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-      if (settled) return;
-      try {
-        const ready = JSON.parse(output);
-        settled = true;
-        clearTimeout(timer);
-        resolve({ port: ready.port });
-      } catch {
-        // Wait for the server's complete one-line startup record.
-      }
-    });
-    child.on("error", () => { void fail("fake provider failed before startup"); });
-    child.on("close", () => {
-      if (!settled) void fail("fake provider exited before startup");
-    });
-  });
-}
-
-function startFakeServer() {
-  const child = spawnOwned("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
-  return waitForFakeReady(child).then(({ port }) => ({ child, port }));
-}
-
-async function readStats(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/_stats`);
-  return response.json();
-}
-
-// A forbidden port must stay a legal, distinct port across the whole valid
-// range. The previous `port + 1` arithmetic overflowed to 65536 as soon as the
-// fake provider bound the top of the range, so fetch rejected before the
-// guard ever logged a violation.
-function alternatePort(port) {
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError("provider port must be 1..65535");
-  return port === 65535 ? 65534 : 65535;
-}
-
-function assertAlternatePortStaysLegalAndDistinct(port) {
-  const alternate = alternatePort(port);
-  assert.ok(Number.isInteger(alternate) && alternate >= 1 && alternate <= 65535,
-    `alternatePort(${port}) left the legal port range: ${alternate}`);
-  assert.notEqual(alternate, port, `alternatePort(${port}) must differ from the allowed port`);
-}
-
-function writeFixture({ home, work, port }) {
-  const agentDir = join(home, ".pi", "agent");
-  mkdirSync(agentDir, { recursive: true });
-  mkdirSync(join(work, ".pi"), { recursive: true });
-  writeFileSync(join(agentDir, "models.json"), JSON.stringify({
-    providers: {
-      fake: {
-        baseUrl: `http://127.0.0.1:${port}/v1`,
-        api: "openai-completions",
-        apiKey: "fixture-only",
-        models: [
-          { id: "physical-fast", reasoning: false },
-          { id: "physical-capable", reasoning: true },
-        ],
-      },
-    },
-  }));
-  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false } }));
-  writeFileSync(join(work, ".pi", "bifrost.json"), JSON.stringify({
-    enabled: true,
-    default: "quick",
-    strategy: "first",
-    classifier: { enabled: false },
-    models: {
-      quick: ["fake/physical-fast"],
-      general: ["fake/physical-capable"],
-      frontier: ["fake/physical-capable"],
-    },
-    // The conflict regex: without the inline tier handoff, Auto routes the
-    // marker prompt to the capable model instead of the quick-tier fast model.
-    rules: [{ pattern: "native faux dispatch marker", model: "fake/physical-capable" }],
-  }));
-}
-
-function runPi({ home, work, model, prompt, child, command = PI, args, windowMs = 60_000, terminationGraceMs = 5_000, extraEnv = {} }) {
-  const violations = join(home, "test-network-violations.log");
-  writeFileSync(violations, "");
-  const env = {
-    PATH: process.env.PATH,
-    HOME: home,
-    PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
-    PI_SKIP_VERSION_CHECK: "1",
-    PI_OFFLINE: "1",
-    NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
-    BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
-    BIFROST_TEST_NETWORK_VIOLATIONS: violations,
-  };
-  for (const name of CREDENTIALS) env[name] = "ambient-secret-fixture";
-  // pi-subagents 0.77.0 producer contract: only the verified child marker
-  // value "1" scopes the explicit child host; absent and empty stay parent.
-  if (child !== undefined) env.PI_SUBAGENT_CHILD = child;
-  Object.assign(env, extraEnv);
-  return new Promise((resolve, reject) => {
-    const resolvedArgs = args ?? ["-e", EXTENSION, "--approve", "--no-session", "--no-tools", "--model", model, "-p", prompt];
-    const childProcess = spawnOwned(command, resolvedArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-      cwd: work,
-      env,
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let spawnError;
-    let settled = false;
-    const finish = (settle, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      settle(value);
-    };
-    childProcess.stdout.setEncoding("utf8");
-    childProcess.stderr.setEncoding("utf8");
-    childProcess.stdout.on("data", (chunk) => { stdout += chunk; });
-    childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
-    childProcess.on("error", (error) => { spawnError = error; });
-    // Bounded termination: SIGTERM, then SIGKILL after the grace window, and
-    // then the owned process group. The run settles only once that cleanup has
-    // reported back, so a child whose descendant closes the inherited pipes on
-    // SIGTERM and keeps running fails the run instead of settling on a close
-    // event that proves nothing.
-    const lifecycle = closeTracking(childProcess);
-    const timeoutDetail = () => `Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      void lifecycle.terminate(terminationGraceMs).then((verified) => {
-        finish(reject, new Error(cleanupFailure(timeoutDetail(), verified)));
-      });
-    }, windowMs);
-    childProcess.on("close", async (code) => {
-      if (spawnError) {
-        finish(reject, spawnError);
-        return;
-      }
-      if (timedOut) {
-        // The leader closed, but the owned group may still have a live member
-        // that closed the inherited pipes. Wait for the same coordinated
-        // termination the timeout path started; it decides the message.
-        const verified = await lifecycle.terminate(terminationGraceMs);
-        finish(reject, new Error(cleanupFailure(timeoutDetail(), verified)));
-        return;
-      }
-      try {
-        const violationsText = readFileSync(violations, "utf8");
-        assert.equal(violationsText, "", "Pi child made a blocked outbound attempt");
-        finish(resolve, { code, stdout, stderr, violations: violationsText });
-      } catch (error) {
-        finish(reject, error);
-      }
-    });
-  });
-}
+import {
+  CLOSE_WAIT_MS, DESCENDANT_CLEANUP_MS, DESCENDANT_GRACE_MS, DESCENDANT_CLI, PIPE_RACE_CLI,
+  NORMAL_CLOSE_CLI, RUNNER_WORKER,
+  spawnOwned, closeTracking, stopChild, waitForObservedClose, waitForFakeReady,
+  cleanupFailure, detachOwnedHandles, forceCleanupFailure, setOwnedGroupSignalDenial,
+  writeFixture, runPi, alternatePort, assertAlternatePortStaysLegalAndDistinct,
+  setFakePort, startFakeServer, readStats, runGuardProbe, withBound, ROOT, OUTBOUND_GUARD,
+} from "../fixtures/child-auto-inline-harness.mjs";
 
 describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, concurrency: 1 }, () => {
   let server;
+  let fakePort;
   before(async () => {
     server = await startFakeServer();
     fakePort = server.port;
+    setFakePort(server.port);
   });
   after(async () => {
     // Cleanup is asserted, never assumed: an unverified stop is a test failure.
@@ -476,11 +194,10 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         terminationGraceMs: 200,
         extraEnv: { BIFROST_DESCENDANT_PID_FILE: pidFile },
       });
+      // withBound clears its own timer when the race settles, so a losing
+      // bound cannot idle this process long after the test has finished.
       await assert.rejects(
-        Promise.race([
-          run,
-          new Promise((_, reject) => { setTimeout(() => reject(new Error("runPi stayed pending after its bounded window and owned termination")), 40_000); }),
-        ]),
+        withBound(run, 40_000, "runPi stayed pending after its bounded window and owned termination"),
         /exceeded the bounded run window/,
         "a run whose descendant releases the pipes but survives must still fail bounded",
       );
@@ -574,6 +291,142 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     );
   });
 
+  it("verifies the guard probe's owned group before it rejects or deletes scratch", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-guard-race-home-"));
+    const pidFile = join(home, "descendant.pid");
+    try {
+      // The guard probe driven against a fixture whose descendant keeps an
+      // inherited pipe. A probe close handler that rejects before its own group
+      // termination would settle here with the group still alive and the scratch
+      // still in use, so this asserts group death and scratch safety too.
+      const started = Date.now();
+      await assert.rejects(
+        withBound(
+          runGuardProbe({
+            command: execPath,
+            args: [DESCENDANT_CLI],
+            cwd: home,
+            windowMs: 1_000,
+            graceMs: 200,
+            env: {
+              PATH: process.env.PATH,
+              HOME: home,
+              BIFROST_DESCENDANT_PID_FILE: pidFile,
+            },
+          }),
+          40_000,
+          "the guard probe stayed pending past its bound and owned termination",
+        ),
+        /exceeded its bounded window/,
+        "a leaking guard probe must fail bounded rather than settle on its close event",
+      );
+      const elapsedMs = Date.now() - started;
+      assert.ok(elapsedMs < 30_000, `the guard probe must fail bounded, took ${elapsedMs}ms`);
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      assert.throws(
+        () => process.kill(pid, 0),
+        (error) => error.code === "ESRCH",
+        `owned descendant ${pid} survived the guard probe's cleanup`,
+      );
+      assert.equal(existsSync(home), true, "the scratch must survive until the probe's cleanup is verified");
+      rmSync(home, { recursive: true, force: true });
+      assert.equal(existsSync(home), false, "verified cleanup must leave the scratch removable");
+    } finally {
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans the owned group before a normal completion is reported", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-normal-close-home-"));
+    const pidFile = join(home, "descendant.pid");
+    try {
+      // Exit code 0 with a live descendant that owns no inherited pipes. A
+      // clean exit and an observed close say nothing about it, so the run must
+      // not report success — nor let the caller delete a scratch the group is
+      // still using — until the owned group is verified gone.
+      const result = await runPi({
+        home,
+        work: home,
+        model: "bifrost/auto",
+        prompt: "native faux dispatch marker",
+        child: "1",
+        command: execPath,
+        args: [NORMAL_CLOSE_CLI],
+        windowMs: 30_000,
+        terminationGraceMs: 500,
+        extraEnv: { BIFROST_DESCENDANT_PID_FILE: pidFile },
+      });
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      assert.ok(Number.isInteger(pid) && pid > 0, "the fixture must record its descendant pid");
+      assert.equal(result.code, 0, "the fixture must exit cleanly so only cleanup can decide the outcome");
+      // Independent group death, not inferred from the leader's close.
+      assert.throws(
+        () => process.kill(pid, 0),
+        (error) => error.code === "ESRCH",
+        `owned descendant ${pid} survived a normally completing run`,
+      );
+      assert.equal(existsSync(home), true, "the scratch must survive until cleanup is verified");
+      // Only now is the scratch safe to reclaim.
+      rmSync(home, { recursive: true, force: true });
+      assert.equal(existsSync(home), false, "verified cleanup must leave the scratch removable");
+    } finally {
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("exits bounded after an unverified cleanup instead of hanging on inherited pipes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-whole-run-home-"));
+    const pidFile = join(home, "descendant.pid");
+    let worker;
+    let ownedGroup;
+    let descendant;
+    try {
+      // The real runPi, in a real worker process, with the owned-group signal
+      // step denied. The descendant survives and keeps the inherited pipe, so a
+      // worker that merely rejects its promise would still never exit.
+      worker = spawnOwned(execPath, [RUNNER_WORKER, home], { stdio: ["ignore", "pipe", "pipe"] });
+      ownedGroup = worker.pid;
+      const report = await new Promise((resolve, reject) => {
+        let text = "";
+        worker.stdout.setEncoding("utf8");
+        worker.stdout.on("data", (chunk) => {
+          text += chunk;
+          const line = text.split("\n").find((entry) => entry.startsWith("{"));
+          if (line) { try { resolve(JSON.parse(line)); } catch { /* wait for a complete record */ } }
+        });
+        worker.once("error", reject);
+      });
+      assert.equal(report.event, "bounded-rejection", "the worker must report the bounded rejection");
+      assert.match(report.message, /cleanup failure: the owned process group did not reach a verified dead state/,
+        "an unverifiable owned-group cleanup must be named as its own cause");
+      assert.match(report.message, /exceeded the bounded run window/, "the primary cause must survive");
+      // Unverified cleanup retains scratch and ownership; nothing is deleted.
+      assert.equal(report.scratchRetained, true, "an unverified cleanup must retain the scratch");
+      assert.equal(existsSync(home), true, "the worker must not delete an unsafe scratch");
+      descendant = Number(readFileSync(pidFile, "utf8"));
+      assert.doesNotThrow(() => process.kill(descendant, 0), "an unverified cleanup must leave ownership intact");
+      // The load-bearing property: the process actually exits, bounded, without
+      // waiting on a pipe held by a descendant it could not kill.
+      const exitStart = Date.now();
+      const exited = await withBound(once(worker, "close").then(() => true), 5_000, "worker close bound expired").then(() => true, () => false);
+      const exitMs = Date.now() - exitStart;
+      assert.equal(exited, true, `worker hung for ${exitMs}ms after reporting an unverified cleanup`);
+      assert.equal(closeTracking(worker).isClosed, true, "the worker must reach a real close");
+    } finally {
+      if (descendant) { try { process.kill(descendant, "SIGKILL"); } catch {} }
+      if (worker) await terminateProcessGroup(worker, { graceMs: 200, cleanupTimeoutMs: 2_000 });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("fails a bounded run and reaps the owned descendant holding inherited pipes", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-child-descendant-home-"));
     const pidFile = join(home, "descendant.pid");
@@ -594,10 +447,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         extraEnv: { BIFROST_DESCENDANT_PID_FILE: pidFile },
       });
       await assert.rejects(
-        Promise.race([
-          run,
-          new Promise((_, reject) => { setTimeout(() => reject(new Error("runPi stayed pending after its bounded window and owned termination")), 30_000); }),
-        ]),
+        withBound(run, 30_000, "runPi stayed pending after its bounded window and owned termination"),
         /exceeded the bounded run window/,
         "a run whose owned descendant holds the pipes must fail, not stay pending",
       );
@@ -635,8 +485,9 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       // Same preload, same guard, same allowed-origin contract as runPi.
       // Without the preload (guard-removal mutation) nothing records the
       // forbidden attempts, so the record assertions below go RED.
-      const probe = await new Promise((resolve, reject) => {
-        const childProcess = spawnOwned(execPath, ["-e", `
+      const probe = await runGuardProbe({
+        command: execPath,
+        args: ["-e", `
           const net = require("node:net");
           const dgram = require("node:dgram");
           (async () => {
@@ -661,44 +512,14 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
               }),
             ]) { try { await attempt(); } catch {} }
           })();
-        `], {
-          stdio: ["ignore", "pipe", "pipe"],
-          cwd: ROOT,
-          env: {
-            PATH: process.env.PATH,
-            NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
-            BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
-            BIFROST_TEST_NETWORK_VIOLATIONS: violations,
-          },
-        });
-        let stderr = "";
-        let timedOut = false;
-        let settled = false;
-        const finish = (settle, value) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(killer);
-          settle(value);
-        };
-        childProcess.stderr.setEncoding("utf8");
-        childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
-        // Bounded termination so a leaking probe cannot hang the suite. The
-        // stop result is consumed, so an unverifiable cleanup fails the probe
-        // instead of leaving it pending forever.
-        const killer = setTimeout(() => {
-          timedOut = true;
-          void stopChild(childProcess, 1_000).then((closed) => {
-            const detail = `guard negative-control probe exceeded its bounded window (stderr=${stderr.length})`;
-            finish(reject, closed
-              ? new Error(detail)
-              : new Error(`${detail}; the owned process group did not reach a verified close`));
-          });
-        }, 30_000);
-        childProcess.once("error", (error) => { finish(reject, error); });
-        childProcess.once("close", (code) => {
-          if (timedOut) finish(reject, new Error(`guard negative-control probe exceeded its bounded window (stderr=${stderr.length})`));
-          else finish(resolve, { code, stderr });
-        });
+        `],
+        cwd: ROOT,
+        env: {
+          PATH: process.env.PATH,
+          NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
+          BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
+          BIFROST_TEST_NETWORK_VIOLATIONS: violations,
+        },
       });
       assert.equal(probe.code, 0, probe.stderr);
       const attempts = readFileSync(violations, "utf8");
