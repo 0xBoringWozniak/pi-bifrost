@@ -86,6 +86,7 @@ describe("independent catalog discovery properties", () => {
     fc.assert(fc.property(catalog, catalog, patterns, (before, after, queries) => {
       const available = modelsOf(before);
       const ctx = makeCtx(available);
+      ctx.modelRegistry.getAvailable = () => available.slice();
       findCandidates(ctx, queries);
       const replacement = modelsOf(after);
       available.splice(0, available.length, ...replacement);
