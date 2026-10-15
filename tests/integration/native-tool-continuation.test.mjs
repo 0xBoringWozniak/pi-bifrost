@@ -186,6 +186,7 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
     childEnv.BIFROST_TEST_DENY_ALL = "1";
     for (const name of credentials) assert.equal(isolatedEnv[name], undefined, `${name} must not enter child env`);
 
+    cleanupSafe = false;
     const probe = await runNode(["-e", `
       const net = require("node:net");
       const tls = require("node:tls");
@@ -217,6 +218,7 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
       })();
     `], { cwd: root, env: isolatedEnv });
     assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
+    cleanupSafe = probe.groupTerminated === true;
     const attempts = readFileSync(violations, "utf8");
     assert.match(attempts, /blocked fetch to https:\/\/127\.0\.0\.1:/);
     assert.match(attempts, /blocked fetch to http:\/\/127\.0\.0\.1:/);
@@ -226,7 +228,6 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
     writeFileSync(violations, "");
     cleanupSafe = false;
     const result = await runNode(["--test", "--experimental-strip-types", child], { cwd: root, env: childEnv });
-    cleanupSafe = result.groupTerminated === true;
     cleanupSafe = result.groupTerminated === true;
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(readFileSync(violations, "utf8"), "", "faux AgentSession made blocked outbound attempt");
