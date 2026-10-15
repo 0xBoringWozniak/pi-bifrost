@@ -221,13 +221,26 @@ function runGuardProbe({ command, args, cwd, env, windowMs = 30_000, graceMs = 1
     const lifecycle = closeTracking(childProcess);
     const settleClean = async (cause, value) => {
       const verified = await lifecycle.terminate(graceMs);
+      const ownedGroup = childProcess.pid;
+      const scratchPaths = [cwd];
       if (verified) {
-        if (value === undefined) finish(reject, new Error(cause));
-        else finish(resolve, value);
+        if (value === undefined) {
+          const error = new Error(cause);
+          error.ownedGroup = ownedGroup;
+          error.verified = true;
+          error.scratchPaths = scratchPaths;
+          finish(reject, error);
+        } else {
+          finish(resolve, { ...value, ownedGroup, verified: true, scratchPaths });
+        }
         return;
       }
       detachOwnedHandles(childProcess);
-      finish(reject, new Error(cleanupFailure(cause, false)));
+      const error = new Error(cleanupFailure(cause, false));
+      error.ownedGroup = ownedGroup;
+      error.verified = false;
+      error.scratchPaths = scratchPaths;
+      finish(reject, error);
     };
     const killer = setTimeout(() => {
       timedOut = true;
@@ -357,13 +370,26 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
     // the primary cause.
     const settleClean = async (cause, value) => {
       const verified = await lifecycle.terminate(terminationGraceMs);
+      const ownedGroup = childProcess.pid;
+      const scratchPaths = [home, work];
       if (verified) {
-        if (value === undefined) finish(reject, new Error(cause));
-        else finish(resolve, value);
+        if (value === undefined) {
+          const error = new Error(cause);
+          error.ownedGroup = ownedGroup;
+          error.verified = true;
+          error.scratchPaths = scratchPaths;
+          finish(reject, error);
+        } else {
+          finish(resolve, { ...value, ownedGroup, verified: true, scratchPaths });
+        }
         return;
       }
       detachOwnedHandles(childProcess);
-      finish(reject, new Error(cleanupFailure(cause, false)));
+      const error = new Error(cleanupFailure(cause, false));
+      error.ownedGroup = ownedGroup;
+      error.verified = false;
+      error.scratchPaths = scratchPaths;
+      finish(reject, error);
     };
     const timer = setTimeout(() => {
       timedOut = true;

@@ -15,6 +15,61 @@ import {
   setFakePort, startFakeServer, readStats, runGuardProbe, withBound, ROOT, OUTBOUND_GUARD,
 } from "../fixtures/child-auto-inline-harness.mjs";
 
+// Caller scratch may only be reclaimed after the owned process group it ran in
+// is independently proven gone. Success, assertion failure, or promise
+// settlement alone says nothing: only processGroupExists(ownedGroup) === false
+// proves the group is dead. When death cannot be verified the scratch is
+// retained with its ownership and paths, and the caller fails explicitly
+// rather than deleting evidence a live group may still be using.
+function removeScratchAfterVerifiedGroupDeath(paths, ownedGroup) {
+  const unique = [...new Set(paths)];
+  if (!Number.isInteger(ownedGroup) || ownedGroup <= 0) {
+    throw new Error(`refusing to delete scratch without owned-group ownership: ${unique.join(",")}`);
+  }
+  if (processGroupExists(ownedGroup)) {
+    throw new Error(`refusing to delete scratch while owned process group ${ownedGroup} still alive: ${unique.join(",")}`);
+  }
+  for (const path of unique) rmSync(path, { recursive: true, force: true });
+}
+
+// Finally-block safe path: when the associated run already failed, retain the
+// scratch while its group is alive and let the original failure (which carries
+// the owned group and the cleanup-failure cause) propagate. Only throw a new
+// retention failure when there is no pending error to preserve.
+function retainOrRemoveScratch({ paths, ownedGroup, runSettled, pendingError }) {
+  if (!runSettled) {
+    for (const path of [...new Set(paths)]) rmSync(path, { recursive: true, force: true });
+    return;
+  }
+  if (!Number.isInteger(ownedGroup) || ownedGroup <= 0) {
+    if (pendingError) return;
+    throw new Error(`refusing to delete scratch without owned-group ownership: ${[...new Set(paths)].join(",")}`);
+  }
+  if (processGroupExists(ownedGroup)) {
+    if (pendingError) return;
+    throw new Error(`refusing to delete scratch while owned process group ${ownedGroup} still alive: ${[...new Set(paths)].join(",")}`);
+  }
+  for (const path of [...new Set(paths)]) rmSync(path, { recursive: true, force: true });
+}
+
+// Best-effort descendant reaping for finally blocks: signal only the exact pid
+// recorded by this invocation, then verify its absence before the caller
+// deletes the scratch it ran in. Returns true only when no recorded descendant
+// remains alive.
+async function reapRecordedDescendant(pidFile, { timeoutMs = 2_000 } = {}) {
+  if (!existsSync(pidFile)) return true;
+  let pid = null;
+  try { pid = Number(readFileSync(pidFile, "utf8")); } catch { return false; }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, "SIGKILL"); } catch {}
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") return true; else throw error; }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  try { process.kill(pid, 0); return false; } catch (error) { return error.code === "ESRCH"; }
+}
+
 describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, concurrency: 1 }, () => {
   let server;
   let fakePort;
@@ -45,6 +100,9 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     ]) {
       const home = mkdtempSync(join(tmpdir(), "bifrost-child-auto-home-"));
       const work = mkdtempSync(join(tmpdir(), "bifrost-child-auto-work-"));
+      let ownedGroup = null;
+      let runSettled = false;
+      let pendingError = null;
       try {
         writeFixture({ home, work, port: server.port });
         const before = await readStats(server.port);
@@ -54,7 +112,10 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
           model: testCase.model,
           prompt: testCase.prompt,
           child: testCase.child,
-        });
+        }).then(
+          (value) => { runSettled = true; ownedGroup = value.ownedGroup; return value; },
+          (error) => { runSettled = true; ownedGroup = error?.ownedGroup ?? null; throw error; },
+        );
         assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
         assert.notEqual(result.stdout.trim(), "", "Pi produced no response through the fake provider");
         const after = await readStats(server.port);
@@ -66,9 +127,212 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         // asserts zero outbound violations. That absence alone is not proof
         // the guard blocks; the negative-control test below supplies it.
         assert.equal(result.violations, "", "network fence recorded a violation");
+      } catch (error) {
+        pendingError = error;
+        throw error;
       } finally {
-        rmSync(home, { recursive: true, force: true });
-        rmSync(work, { recursive: true, force: true });
+        retainOrRemoveScratch({ paths: [home, work], ownedGroup, runSettled, pendingError });
+      }
+    }
+  });
+
+  it("retains ordinary routing caller scratch when owned cleanup cannot be verified", async () => {
+    // Regression for the main-matrix P2: the ordinary routing caller must not
+    // delete home/work when runPi rejects with an unverified owned-group
+    // cleanup. Drives the actual caller finally path (runPi + retained
+    // ownership + verified-deletion helper), not a helper-only assertion,
+    // with denied group signals and a no-stdio descendant.
+    const home = mkdtempSync(join(tmpdir(), "bifrost-caller-retention-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-caller-retention-work-"));
+    const pidFile = join(home, "descendant.pid");
+    let ownedGroup = null;
+    let runSettled = false;
+    let pendingError = null;
+    let descendantPid = null;
+    let restored = false;
+    try {
+      writeFixture({ home, work, port: server.port });
+      setOwnedGroupSignalDenial(() => { throw new Error("controlled owned-group signal denial"); });
+      try {
+        await runPi({
+          home,
+          work,
+          model: "bifrost/auto",
+          prompt: "native faux dispatch marker",
+          child: "1",
+          command: execPath,
+          args: [NORMAL_CLOSE_CLI],
+          windowMs: 1_000,
+          terminationGraceMs: 200,
+          extraEnv: { BIFROST_DESCENDANT_PID_FILE: pidFile },
+        }).then(
+          (value) => { runSettled = true; ownedGroup = value.ownedGroup; return value; },
+          (error) => { runSettled = true; ownedGroup = error?.ownedGroup ?? null; throw error; },
+        );
+        assert.fail("runPi must reject when owned-group signals are denied");
+      } catch (error) {
+        if (error.message.includes("must reject when owned-group signals are denied")) throw error;
+        pendingError = error;
+        assert.match(error.message, /cleanup failure: the owned process group did not reach a verified dead state/,
+          "an unverifiable owned-group cleanup must be named as its own cause");
+        assert.ok(Number.isInteger(ownedGroup) && ownedGroup > 0, "the run must preserve owned-group ownership");
+        assert.deepEqual(error.scratchPaths, [home, work], "the run must preserve scratch ownership");
+        assert.equal(processGroupExists(ownedGroup), true, `owned process group ${ownedGroup} must still be alive`);
+        descendantPid = Number(readFileSync(pidFile, "utf8"));
+        assert.ok(Number.isInteger(descendantPid) && descendantPid > 0, "the fixture must record its descendant pid");
+        assert.doesNotThrow(() => process.kill(descendantPid, 0), "an unverified cleanup must leave ownership intact");
+      } finally {
+        setOwnedGroupSignalDenial(null);
+      }
+      // The actual caller finally path: with a pending cleanup failure and a
+      // live owned group it must retain, never delete.
+      retainOrRemoveScratch({ paths: [home, work], ownedGroup, runSettled, pendingError });
+      assert.equal(existsSync(home), true, "the ordinary caller must retain home while the owned group is alive");
+      assert.equal(existsSync(work), true, "the ordinary caller must retain work while the owned group is alive");
+      assert.equal(processGroupExists(ownedGroup), true, "the owned group must still be alive after the retained cleanup");
+      // Retention proven: clear the pending failure so safe restoration below
+      // can reclaim the scratch, then restore only creation-recorded resources.
+      pendingError = null;
+      try { process.kill(descendantPid, "SIGKILL"); } catch {}
+      try { process.kill(-ownedGroup, "SIGKILL"); } catch {}
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        let descendantGone = false;
+        try { process.kill(descendantPid, 0); } catch (check) { if (check.code === "ESRCH") descendantGone = true; else throw check; }
+        if (descendantGone && !processGroupExists(ownedGroup)) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.throws(() => process.kill(descendantPid, 0), (check) => check.code === "ESRCH",
+        `recorded descendant ${descendantPid} must be gone before scratch deletion`);
+      assert.equal(processGroupExists(ownedGroup), false, `owned process group ${ownedGroup} must be gone before scratch deletion`);
+      removeScratchAfterVerifiedGroupDeath([home, work], ownedGroup);
+      restored = true;
+      assert.equal(existsSync(home), false, "safe restoration must leave home removable after verified death");
+      assert.equal(existsSync(work), false, "safe restoration must leave work removable after verified death");
+    } catch (error) {
+      if (!pendingError) pendingError = error;
+      throw error;
+    } finally {
+      if (!restored && existsSync(home)) {
+        if (descendantPid) { try { process.kill(descendantPid, "SIGKILL"); } catch {} }
+        if (Number.isInteger(ownedGroup) && ownedGroup > 0) { try { process.kill(-ownedGroup, "SIGKILL"); } catch {} }
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          let descendantGone = descendantPid == null;
+          if (!descendantGone) {
+            try { process.kill(descendantPid, 0); } catch (check) { if (check.code === "ESRCH") descendantGone = true; }
+          }
+          const groupGone = !Number.isInteger(ownedGroup) || ownedGroup <= 0 || !processGroupExists(ownedGroup);
+          if (descendantGone && groupGone) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        let verifiedGone = true;
+        if (descendantPid) {
+          try { process.kill(descendantPid, 0); verifiedGone = false; } catch (check) { if (check.code !== "ESRCH") throw check; }
+        }
+        if (verifiedGone && Number.isInteger(ownedGroup) && ownedGroup > 0 && processGroupExists(ownedGroup)) verifiedGone = false;
+        if (verifiedGone) {
+          try {
+            if (Number.isInteger(ownedGroup) && ownedGroup > 0) removeScratchAfterVerifiedGroupDeath([home, work], ownedGroup);
+            else { rmSync(home, { recursive: true, force: true }); rmSync(work, { recursive: true, force: true }); }
+          } catch {}
+        }
+      } else if (!restored) {
+        if (existsSync(work)) { try { rmSync(work, { recursive: true, force: true }); } catch {} }
+      }
+    }
+  });
+
+  it("retains guard caller scratch when owned cleanup cannot be verified", async () => {
+    // Guard negative-control counterpart: the same unverified-cleanup
+    // retention for runGuardProbe, with denied signals and a no-stdio
+    // descendant, through the actual guard caller path.
+    const home = mkdtempSync(join(tmpdir(), "bifrost-guard-retention-home-"));
+    const pidFile = join(home, "descendant.pid");
+    let ownedGroup = null;
+    let runSettled = false;
+    let pendingError = null;
+    let descendantPid = null;
+    let restored = false;
+    try {
+      setOwnedGroupSignalDenial(() => { throw new Error("controlled owned-group signal denial"); });
+      try {
+        await runGuardProbe({
+          command: execPath,
+          args: [NORMAL_CLOSE_CLI],
+          cwd: home,
+          windowMs: 1_000,
+          graceMs: 200,
+          env: {
+            PATH: process.env.PATH,
+            HOME: home,
+            BIFROST_DESCENDANT_PID_FILE: pidFile,
+          },
+        }).then(
+          (value) => { runSettled = true; ownedGroup = value.ownedGroup; return value; },
+          (error) => { runSettled = true; ownedGroup = error?.ownedGroup ?? null; throw error; },
+        );
+        assert.fail("runGuardProbe must reject when owned-group signals are denied");
+      } catch (error) {
+        if (error.message.includes("must reject when owned-group signals are denied")) throw error;
+        pendingError = error;
+        assert.match(error.message, /cleanup failure: the owned process group did not reach a verified dead state/,
+          "an unverifiable guard cleanup must be named as its own cause");
+        assert.ok(Number.isInteger(ownedGroup) && ownedGroup > 0, "the probe must preserve owned-group ownership");
+        assert.equal(processGroupExists(ownedGroup), true, `owned process group ${ownedGroup} must still be alive`);
+        descendantPid = Number(readFileSync(pidFile, "utf8"));
+        assert.ok(Number.isInteger(descendantPid) && descendantPid > 0, "the fixture must record its descendant pid");
+        assert.doesNotThrow(() => process.kill(descendantPid, 0), "an unverified guard cleanup must leave ownership intact");
+      } finally {
+        setOwnedGroupSignalDenial(null);
+      }
+      retainOrRemoveScratch({ paths: [home], ownedGroup, runSettled, pendingError });
+      assert.equal(existsSync(home), true, "the guard caller must retain scratch while the owned group is alive");
+      assert.equal(processGroupExists(ownedGroup), true, "the owned group must still be alive after the retained guard cleanup");
+      pendingError = null;
+      try { process.kill(descendantPid, "SIGKILL"); } catch {}
+      try { process.kill(-ownedGroup, "SIGKILL"); } catch {}
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        let descendantGone = false;
+        try { process.kill(descendantPid, 0); } catch (check) { if (check.code === "ESRCH") descendantGone = true; else throw check; }
+        if (descendantGone && !processGroupExists(ownedGroup)) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.throws(() => process.kill(descendantPid, 0), (check) => check.code === "ESRCH",
+        `recorded descendant ${descendantPid} must be gone before scratch deletion`);
+      assert.equal(processGroupExists(ownedGroup), false, `owned process group ${ownedGroup} must be gone before scratch deletion`);
+      removeScratchAfterVerifiedGroupDeath([home], ownedGroup);
+      restored = true;
+      assert.equal(existsSync(home), false, "safe restoration must leave guard scratch removable after verified death");
+    } catch (error) {
+      if (!pendingError) pendingError = error;
+      throw error;
+    } finally {
+      if (!restored && existsSync(home)) {
+        if (descendantPid) { try { process.kill(descendantPid, "SIGKILL"); } catch {} }
+        if (Number.isInteger(ownedGroup) && ownedGroup > 0) { try { process.kill(-ownedGroup, "SIGKILL"); } catch {} }
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          let descendantGone = descendantPid == null;
+          if (!descendantGone) {
+            try { process.kill(descendantPid, 0); } catch (check) { if (check.code === "ESRCH") descendantGone = true; }
+          }
+          const groupGone = !Number.isInteger(ownedGroup) || ownedGroup <= 0 || !processGroupExists(ownedGroup);
+          if (descendantGone && groupGone) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        let verifiedGone = true;
+        if (descendantPid) {
+          try { process.kill(descendantPid, 0); verifiedGone = false; } catch (check) { if (check.code !== "ESRCH") throw check; }
+        }
+        if (verifiedGone && Number.isInteger(ownedGroup) && ownedGroup > 0 && processGroupExists(ownedGroup)) verifiedGone = false;
+        if (verifiedGone) {
+          try {
+            if (Number.isInteger(ownedGroup) && ownedGroup > 0) removeScratchAfterVerifiedGroupDeath([home], ownedGroup);
+            else rmSync(home, { recursive: true, force: true });
+          } catch {}
+        }
       }
     }
   });
@@ -144,6 +408,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     const stubborn = spawnOwned(execPath, ["-e",
       "process.on('SIGTERM', () => {}); process.stdout.write('stubborn-ready\\n'); setInterval(() => {}, 1000);"],
       { stdio: ["ignore", "pipe", "ignore"], cwd: scratch });
+    let pendingError = null;
     try {
       // Readiness comes from the child's observable ready record, no sleep.
       await new Promise((resolve, reject) => {
@@ -162,9 +427,18 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       assert.equal(processGroupExists(stubborn.pid), false, "the owned process group must be gone");
       rmSync(scratch, { recursive: true, force: true });
       assert.equal(existsSync(scratch), false, "scratch must be removable after the forced close");
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      await stopChild(stubborn, 300);
-      rmSync(scratch, { recursive: true, force: true });
+      if (existsSync(scratch)) {
+        const verified = await stopChild(stubborn, 300);
+        if (!verified || processGroupExists(stubborn.pid)) {
+          if (pendingError) return;
+          throw new Error(`refusing to delete scratch while owned process group ${stubborn.pid} still alive: ${scratch}`);
+        }
+        rmSync(scratch, { recursive: true, force: true });
+      }
     }
   });
 
@@ -177,6 +451,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
   it("settles a timed-out run only after the owned group is verified dead", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-pipe-race-home-"));
     const pidFile = join(home, "descendant.pid");
+    let pendingError = null;
     try {
       // The leader exits and its descendant releases the inherited pipes when
       // signalled but keeps running, so the close event lands while a member of
@@ -213,12 +488,18 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       // Verified cleanup means the scratch is safe to reclaim.
       rmSync(home, { recursive: true, force: true });
       assert.equal(existsSync(home), false, "verified cleanup must leave the scratch removable");
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      if (existsSync(pidFile)) {
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        try { process.kill(pid, "SIGKILL"); } catch {}
+      if (existsSync(home)) {
+        const reaped = await reapRecordedDescendant(pidFile);
+        if (!reaped) {
+          if (pendingError) return;
+          throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
+        }
+        rmSync(home, { recursive: true, force: true });
       }
-      rmSync(home, { recursive: true, force: true });
     }
   });
 
@@ -232,6 +513,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       "const d = spawn(process.execPath, ['-e', \"process.send({ pid: process.pid }); setInterval(() => {}, 1000);\"], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });",
       "d.once('message', (m) => process.stdout.write(JSON.stringify(m) + '\\n', () => process.exit(0)));",
     ].join("\n")], { stdio: ["ignore", "pipe", "ignore"], cwd: scratch });
+    let pendingError = null;
     try {
       const pid = await new Promise((resolve, reject) => {
         let seen = "";
@@ -253,9 +535,18 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         (error) => error.code === "ESRCH",
         `owned group descendant ${pid} survived behind a closed leader`,
       );
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      await stopChild(leader);
-      rmSync(scratch, { recursive: true, force: true });
+      if (existsSync(scratch)) {
+        const verified = await stopChild(leader);
+        if (!verified || processGroupExists(leader.pid)) {
+          if (pendingError) return;
+          throw new Error(`refusing to delete scratch while owned process group ${leader.pid} still alive: ${scratch}`);
+        }
+        rmSync(scratch, { recursive: true, force: true });
+      }
     }
   });
 
@@ -294,6 +585,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
   it("verifies the guard probe's owned group before it rejects or deletes scratch", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-guard-race-home-"));
     const pidFile = join(home, "descendant.pid");
+    let pendingError = null;
     try {
       // The guard probe driven against a fixture whose descendant keeps an
       // inherited pipe. A probe close handler that rejects before its own group
@@ -331,18 +623,25 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       assert.equal(existsSync(home), true, "the scratch must survive until the probe's cleanup is verified");
       rmSync(home, { recursive: true, force: true });
       assert.equal(existsSync(home), false, "verified cleanup must leave the scratch removable");
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      if (existsSync(pidFile)) {
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        try { process.kill(pid, "SIGKILL"); } catch {}
+      if (existsSync(home)) {
+        const reaped = await reapRecordedDescendant(pidFile);
+        if (!reaped) {
+          if (pendingError) return;
+          throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
+        }
+        rmSync(home, { recursive: true, force: true });
       }
-      rmSync(home, { recursive: true, force: true });
     }
   });
 
   it("cleans the owned group before a normal completion is reported", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-normal-close-home-"));
     const pidFile = join(home, "descendant.pid");
+    let pendingError = null;
     try {
       // Exit code 0 with a live descendant that owns no inherited pipes. A
       // clean exit and an observed close say nothing about it, so the run must
@@ -373,12 +672,18 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       // Only now is the scratch safe to reclaim.
       rmSync(home, { recursive: true, force: true });
       assert.equal(existsSync(home), false, "verified cleanup must leave the scratch removable");
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      if (existsSync(pidFile)) {
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        try { process.kill(pid, "SIGKILL"); } catch {}
+      if (existsSync(home)) {
+        const reaped = await reapRecordedDescendant(pidFile);
+        if (!reaped) {
+          if (pendingError) return;
+          throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
+        }
+        rmSync(home, { recursive: true, force: true });
       }
-      rmSync(home, { recursive: true, force: true });
     }
   });
 
@@ -388,6 +693,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     let worker;
     let ownedGroup;
     let descendant;
+    let pendingError = null;
     try {
       // The real runPi, in a real worker process, with the owned-group signal
       // step denied. The descendant survives and keeps the inherited pipe, so a
@@ -420,16 +726,49 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       const exitMs = Date.now() - exitStart;
       assert.equal(exited, true, `worker hung for ${exitMs}ms after reporting an unverified cleanup`);
       assert.equal(closeTracking(worker).isClosed, true, "the worker must reach a real close");
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      if (descendant) { try { process.kill(descendant, "SIGKILL"); } catch {} }
-      if (worker) await terminateProcessGroup(worker, { graceMs: 200, cleanupTimeoutMs: 2_000 });
-      rmSync(home, { recursive: true, force: true });
+      if (existsSync(home)) {
+        if (descendant == null && existsSync(pidFile)) {
+          try {
+            const recorded = Number(readFileSync(pidFile, "utf8"));
+            if (Number.isInteger(recorded) && recorded > 0) descendant = recorded;
+          } catch {}
+        }
+        if (descendant) { try { process.kill(descendant, "SIGKILL"); } catch {} }
+        if (worker) await terminateProcessGroup(worker, { graceMs: 200, cleanupTimeoutMs: 2_000 });
+        // SIGKILL needs a bounded reap window before absence can be verified;
+        // checking synchronously would mistake a dying pid for a live leak.
+        const deadline = Date.now() + 5_000;
+        let descendantAlive = false;
+        let groupAlive = false;
+        while (Date.now() < deadline) {
+          descendantAlive = false;
+          if (descendant) {
+            try { process.kill(descendant, 0); descendantAlive = true; } catch (check) { if (check.code !== "ESRCH") throw check; }
+          }
+          groupAlive = worker ? processGroupExists(worker.pid) : false;
+          if (!descendantAlive && !groupAlive) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        if (descendantAlive || groupAlive) {
+          if (pendingError) return;
+          throw new Error(`refusing to delete scratch while owned resources still alive (descendant=${descendant}, workerGroup=${worker?.pid}): ${home}`);
+        }
+        rmSync(home, { recursive: true, force: true });
+      } else if (worker && processGroupExists(worker.pid)) {
+        if (pendingError) return;
+        throw new Error(`refusing to finish while owned worker group ${worker.pid} still alive`);
+      }
     }
   });
 
   it("fails a bounded run and reaps the owned descendant holding inherited pipes", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-child-descendant-home-"));
     const pidFile = join(home, "descendant.pid");
+    let pendingError = null;
     try {
       // The stand-in CLI exits while a descendant it spawned keeps the
       // inherited stdout pipe open, so the runner's close never arrives on its
@@ -459,17 +798,26 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         (error) => error.code === "ESRCH",
         `owned descendant ${pid} must be terminated, not left alive`,
       );
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      if (existsSync(pidFile)) {
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        try { process.kill(pid, "SIGKILL"); } catch {}
+      if (existsSync(home)) {
+        const reaped = await reapRecordedDescendant(pidFile);
+        if (!reaped) {
+          if (pendingError) return;
+          throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
+        }
+        rmSync(home, { recursive: true, force: true });
       }
-      rmSync(home, { recursive: true, force: true });
     }
   });
 
   it("records forbidden fetch, socket, and UDP attempts through the same preloaded guard", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-guard-negative-home-"));
+    let ownedGroup = null;
+    let runSettled = false;
+    let pendingError = null;
     try {
       const violations = join(home, "test-network-violations.log");
       const forbiddenPort = alternatePort(fakePort);
@@ -520,7 +868,10 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
           BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
           BIFROST_TEST_NETWORK_VIOLATIONS: violations,
         },
-      });
+      }).then(
+        (value) => { runSettled = true; ownedGroup = value.ownedGroup; return value; },
+        (error) => { runSettled = true; ownedGroup = error?.ownedGroup ?? null; throw error; },
+      );
       assert.equal(probe.code, 0, probe.stderr);
       const attempts = readFileSync(violations, "utf8");
       // Exactly three violations: the guard records the forbidden attempt it
@@ -533,8 +884,14 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         `blocked socket connection to 127.0.0.1:${forbiddenPort}`,
         "blocked UDP datagram to 127.0.0.1",
       ], "forbidden fetch, socket, and UDP attempts must each be recorded exactly once");
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      // The probe runs with cwd ROOT but records violations into home: the
+      // home scratch may only be reclaimed after the probe's owned group is
+      // independently proven gone, exactly like the main routing caller.
+      retainOrRemoveScratch({ paths: [home], ownedGroup, runSettled, pendingError });
     }
   });
 });
