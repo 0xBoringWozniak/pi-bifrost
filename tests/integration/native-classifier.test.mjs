@@ -223,6 +223,36 @@ it("routes real AgentSession through Pi-native classifier behind a proven deny-a
     assert.match(attempts, /blocked socket connection to 127\.0\.0\.1:/);
     assert.match(attempts, /blocked UDP datagram to 127\.0\.0\.1/);
 
+    writeFileSync(violations, "");
+    const denyAllProbe = await runNode(["-e", `
+      const net = require("node:net");
+      const dgram = require("node:dgram");
+      (async () => {
+        let allowedOriginReached = false;
+        try {
+          await fetch("http://127.0.0.1:${port}");
+          allowedOriginReached = true;
+        } catch {}
+        try {
+          const socket = new net.Socket();
+          socket.on("error", () => {});
+          socket.connect({ port: ${port}, host: "127.0.0.1" });
+          socket.destroy();
+        } catch {}
+        try {
+          const udp = dgram.createSocket("udp4");
+          udp.on("error", () => {});
+          udp.send(Buffer.from("fixture"), ${port}, "127.0.0.1", () => { try { udp.close(); } catch {} });
+        } catch {}
+        if (allowedOriginReached) process.exitCode = 10;
+      })();
+    `], { cwd: root, env: childEnv });
+    assert.equal(denyAllProbe.status, 0, `${denyAllProbe.stdout}\n${denyAllProbe.stderr}`);
+    const denyAllAttempts = readFileSync(violations, "utf8");
+    assert.match(denyAllAttempts, new RegExp(`blocked fetch to http://127\\.0\\.0\\.1:${port}`));
+    assert.match(denyAllAttempts, new RegExp(`blocked socket connection to 127\\.0\\.0\\.1:${port}`));
+    assert.match(denyAllAttempts, /blocked UDP datagram to 127\.0\.0\.1/);
+
     let runCounter = 0;
     async function runChild(extraEnv) {
       runCounter += 1;

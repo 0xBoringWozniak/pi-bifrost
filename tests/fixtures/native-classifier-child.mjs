@@ -69,7 +69,7 @@ it("routes real AgentSession through Pi-native classifier to a different physica
       "fixture-classify": {
         classify: async (model, context) => {
           classifyCalls += 1;
-          seen.push({ provider: model.provider, id: model.id, api: model.api, state: context.state, questions: Object.keys(context.questions) });
+          seen.push({ provider: model.provider, id: model.id, api: model.api, state: context.state, questions: context.questions });
           if (classifyMode === "error") {
             return { api: "fixture-classify", provider: model.provider, model: model.id, answers: {}, stopReason: "error", errorMessage: "HTTP 402 Payment Required", timestamp: Date.now() };
           }
@@ -159,8 +159,21 @@ it("routes real AgentSession through Pi-native classifier to a different physica
   assert.equal(seen[0].provider, "fixture-class");
   assert.equal(seen[0].id, "fixture-jev");
   assert.equal(seen[0].api, "fixture-classify");
-  assert.deepEqual(seen[0].questions, ["tier"]);
-  assert.ok(seen[0].state && typeof seen[0].state.prompt === "string" && seen[0].state.prompt.length > 0);
+  assert.deepEqual(seen[0], {
+    provider: "fixture-class",
+    id: "fixture-jev",
+    api: "fixture-classify",
+    state: { prompt: "native classifier dispatch marker alpha" },
+    questions: { tier: {
+      type: "choice",
+      instructions: "Which model tier best fits this coding-agent request? Judge task complexity and consequence, not stated preference or price.",
+      criteria: {
+        quick: "Bounded, reversible, obvious work such as formatting, lookup, or a small mechanical edit. Not complex debugging, architecture, or security analysis.",
+        general: "Normal implementation, tests, API changes, or moderate reasoning with clear scope. Not purely mechanical or unusually ambiguous and consequential work.",
+        frontier: "Complex debugging, architecture, security, concurrency, high ambiguity, or high-consequence work. Not routine bounded edits.",
+      },
+    } },
+  });
   assert.equal(session.getLastAssistantText(), "classified general response");
   assert.deepEqual(invocations, ["faux/physical-capable"], "classifier judgment must move dispatch off the initial physical model");
   assert.equal(session.model.provider, "faux");
@@ -169,12 +182,22 @@ it("routes real AgentSession through Pi-native classifier to a different physica
 
   classifyMode = "error";
   try {
+    console.error = (...args) => { errors.push(args.join(" ")); originalError(...args); };
     await session.prompt("native classifier dispatch marker beta");
   } finally {
+    console.error = originalError;
     classifyMode = "success";
   }
   assert.equal(classifyCalls, 2, "classifier error turn must still invoke the classifier");
+  assert.deepEqual(seen[1], {
+    provider: "fixture-class",
+    id: "fixture-jev",
+    api: "fixture-classify",
+    state: { prompt: "native classifier dispatch marker beta" },
+    questions: seen[0].questions,
+  });
   assert.equal(session.getLastAssistantText(), "fallback quick response");
+  assert.ok(errors.some((message) => /pi-native classifier.*configured default tier/i.test(message)), `visible classifier failure fallback warning missing: ${errors.join("\\n")}`);
   assert.deepEqual(invocations, ["faux/physical-capable", "faux/physical-fast"], "classifier error must fall back to the configured default without replay");
   assert.equal(faux.state.callCount, 2, "fallback must generate exactly once");
   assert.equal(faux.getPendingResponseCount(), 1, "inline response must remain queued until the inline turn");
