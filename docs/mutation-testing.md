@@ -46,8 +46,16 @@ every mutant, its replacement, status, and location.
 
 ## Measured results (Node v24.14.0, macOS, 10 cores)
 
-Focused binding, 5 test files (~0.6 s per mutant run), 3 min 24 s total,
-0 timeouts, 0 runtime errors, 0 uncovered mutants:
+Focused binding, 5 test files (~0.6 s per mutant run), 3 min 24 s total.
+Stryker-reported statuses: 0 Timeout, 0 RuntimeError, 0 CompileError,
+0 NoCoverage. These are Stryker-reported statuses under the command runner,
+not cause classifications: any nonzero bound-command exit counts as Killed,
+so Killed includes assertion failures, thrown exceptions, and startup
+failures alike; with `coverageAnalysis: "off"` coverage is unmeasured, so a
+zero NoCoverage count does not prove every mutant executed. Scores below use
+Stryker's definition, Killed + Timeout over Killed + Timeout + Survived +
+NoCoverage (RuntimeError/CompileError excluded); with Timeout and NoCoverage
+at zero the denominator is exactly the mutant count:
 
 | File | Mutants | Killed | Survived | Score |
 | --- | --- | --- | --- | --- |
@@ -59,7 +67,8 @@ Focused binding, 5 test files (~0.6 s per mutant run), 3 min 24 s total,
 
 The `classifier-semantics.ts` score is binding-sensitive. Adding its third
 direct consumer (`tests/classifier-effective-validation.test.ts`) raises the
-score from 26.75% to 51.59% (81 killed / 76 survived, 0 timeouts, 38 s):
+score from 26.75% to 51.59% (81 killed / 76 survived, 0 Stryker-reported
+timeouts, 38 s):
 
 | File | Binding | Mutants | Killed | Survived | Score |
 | --- | --- | --- | --- | --- | --- |
@@ -75,9 +84,17 @@ bound, so even 51.59% is a lower bound for this module.
 ## Boundary/transition kill proof
 
 377 killed mutants are comparator/conditional/logical mutations on
-boundary and state-transition lines. The committed extract
+boundary and state-transition lines: every Killed mutant with mutator in
+`{EqualityOperator, ConditionalExpression, LogicalOperator}`
+(92 + 203 + 82 = 377). The committed extract
 [`mutation-evidence-62/boundary-kills-focused-binding.jsonl`](mutation-evidence-62/boundary-kills-focused-binding.jsonl)
-lists file, line, mutator, and the source line for each. Confirmed examples:
+lists mutant ID, exact start/end range, mutator, replacement, status, and
+the source line for each, so every row is individually identifiable (the
+earlier revision of this extract omitted IDs and left 105 rows
+indistinguishable). Run provenance — source/config/lock hashes, versions,
+command, raw totals, and report hashes — is in
+[`mutation-evidence-62/run-manifest.json`](mutation-evidence-62/run-manifest.json).
+Confirmed examples:
 
 - `cache.ts` TTL freshness (`lastUsed >= cutoff` in `loadCache` and in the
   `lookupCache` usable check): 12 killed mutants.
@@ -98,8 +115,8 @@ fail) and the restore returning 29/29 green, with no test edits.
 
 ## Surviving-mutant evidence
 
-All 487 focused-binding survivors (file, line, mutator, replacement, source
-line) are committed in
+All 487 focused-binding survivors (mutant ID, exact start/end range,
+mutator, replacement, status, source line) are committed in
 [`mutation-evidence-62/survivors-focused-binding.jsonl`](mutation-evidence-62/survivors-focused-binding.jsonl).
 Notable real survivors worth targeted tests (for the test lanes, not patched
 here):
@@ -114,8 +131,24 @@ here):
 
 ## Limitations
 
-- `coverageAnalysis: "off"` means no per-test attribution; a mutant is killed
-  only if the whole bound command exits non-zero. Equivalent-mutant candidates
+- Mutation outcomes can be stochastic, so no deterministic replay of a
+  historical status or exact score is promised. The recorded survivor
+  `routing.ts` mutant 839 (`ConditionalExpression` at lines 162–164,
+  replacement `case "largest_context":`, which drops the return and falls
+  through to the unseeded `random` strategy) is Killed or Survived depending
+  on the run: an independent 16-trial replay of the identical 5-file command
+  produced 12 nonzero exits and 4 zero exits (surviving trials 6, 8, 11,
+  13; 126 tests each), and a worktree repeat produced 7 kills / 3 survivals
+  over 10 trials (surviving trials 1, 8, 9). The owning tests stub
+  `Math.random` only for the explicit `random` strategy, not for this
+  fallthrough. Repeated outcomes are preserved in
+  [`mutation-evidence-62/run-manifest.json`](mutation-evidence-62/run-manifest.json)
+  (`stochasticMutants`); any rerun establishes a new outcome.
+- `coverageAnalysis: "off"` means no per-test attribution; a mutant is
+  reported Killed if the whole bound command exits non-zero, whether that
+  exit came from an assertion failure, a thrown exception (for example a
+  `TypeError` from an optional-chain removal), or a startup failure.
+  Equivalent-mutant candidates
   are included in the survivor counts and were not audited exhaustively.
 - Focused binding undercounts kills (measured: +25 percentage points on
   `classifier-semantics.ts` with one more consumer file). Widening the binding
@@ -134,7 +167,14 @@ Exact commands, versions, config files, and the committed evidence extracts
 above are sufficient to replay both campaigns. Full JSON reports from the
 recorded runs are local artifacts under `evidence/mutation-62/` (gitignored,
 regenerable); the compact extracts in `docs/mutation-evidence-62/` are the
-committed record. Measured failure mode to reproduce the caution: at the
+committed record, bound to those report bytes by
+[`mutation-evidence-62/run-manifest.json`](mutation-evidence-62/run-manifest.json)
+(report hashes, source/config/lock hashes, versions, command, raw totals).
+Fields the Stryker JSON report does not record (VCS revision at run time,
+worker concurrency) are marked not-recorded in the manifest, not
+reconstructed. Because stochastic mutants (see Limitations) make reruns land
+on new outcomes, a replay establishes a new run; it does not necessarily
+reconstruct the recorded statuses. Measured failure mode to reproduce the caution: at the
 default `timeoutFactor: 1.5` + `timeoutMS: 5000`, binding 22 consumer test
 files (~12.4 s per run) under 9 workers made every mutant report as a timeout;
 the per-run budget must exceed the contended suite duration, not the idle one.
