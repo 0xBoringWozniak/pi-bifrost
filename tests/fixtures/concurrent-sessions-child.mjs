@@ -40,6 +40,13 @@ const [{ createAgentSession, ModelRuntime, DefaultResourceLoader, SessionManager
   import("@earendil-works/pi-ai"),
 ]);
 const { default: bifrostExtension } = await import(join(root, "index.ts"));
+const { reliabilityPath } = await import(join(root, "reliability.ts"));
+const { runtimeStatePath, loadRuntimeState } = await import(join(root, "runtime-state.ts"));
+
+const STANDBY_A = "session-a-standby";
+const STANDBY_B = "session-b-standby";
+const TARGET_A = "faux-a/session-a-model";
+const TARGET_B = "faux-b/session-b-model";
 
 function deferred() {
   let resolve;
@@ -64,46 +71,105 @@ let sessionA;
 let sessionB;
 let loaderA;
 let loaderB;
-const report = { invocations: [], events: [], host: {}, cancellation: {} };
+// Ownership records are append-only: setup() never overwrites them, teardown
+// disposes every recorded session even when a later setup replaces live refs.
+const ownedSessions = [];
+const disposedSessions = new Set();
+const ownedRuntimes = [];
+const report = { invocations: [], events: [], host: {}, cancellation: {}, storage: {} };
+
+function trackSession(session) {
+  ownedSessions.push(session);
+  const original = session.dispose.bind(session);
+  session.dispose = () => {
+    disposedSessions.add(session);
+    return original();
+  };
+  return session;
+}
+
+function teardownLivePair() {
+  try { sessionA?.dispose(); } catch {}
+  try { sessionB?.dispose(); } catch {}
+  try { if (runtimeA) runtimeA.unregisterProvider("faux-a"); } catch {}
+  try { if (runtimeB && runtimeB !== runtimeA) runtimeB.unregisterProvider("faux-b"); } catch {}
+  sessionA = sessionB = loaderA = loaderB = undefined;
+  runtimeA = runtimeB = undefined;
+}
 
 async function setup() {
-  runtimeA = await ModelRuntime.create({ authPath: join(agentA, "auth.json"), modelsPath: null, refreshOnCreate: false });
-  runtimeB = await ModelRuntime.create({ authPath: join(agentB, "auth.json"), modelsPath: null, refreshOnCreate: false });
-  fauxA = fauxProvider({ provider: "faux-a", models: [{ id: "session-a-model" }] });
-  fauxB = fauxProvider({ provider: "faux-b", models: [{ id: "session-b-model" }] });
-  runtimeA.registerNativeProvider(fauxA.provider);
-  runtimeB.registerNativeProvider(fauxB.provider);
-  await runtimeA.setRuntimeApiKey("faux-a", "fixture-only");
-  await runtimeB.setRuntimeApiKey("faux-b", "fixture-only");
-  await runtimeA.refresh({ allowNetwork: false });
-  await runtimeB.refresh({ allowNetwork: false });
-  loaderA = new DefaultResourceLoader({ cwd, agentDir: agentA, extensionFactories: [bifrostExtension] });
-  loaderB = new DefaultResourceLoader({ cwd, agentDir: agentB, extensionFactories: [bifrostExtension] });
-  await loaderA.reload();
-  await loaderB.reload();
-  ({ session: sessionA } = await createAgentSession({ cwd, agentDir: agentA, modelRuntime: runtimeA, model: runtimeA.getModel("faux-a", "session-a-model"), noTools: "all", resourceLoader: loaderA, sessionManager: SessionManager.inMemory(cwd) }));
-  ({ session: sessionB } = await createAgentSession({ cwd, agentDir: agentB, modelRuntime: runtimeB, model: runtimeB.getModel("faux-b", "session-b-model"), noTools: "all", resourceLoader: loaderB, sessionManager: SessionManager.inMemory(cwd) }));
-  await sessionA.bindExtensions({ mode: "print" });
-  await sessionB.bindExtensions({ mode: "print" });
+  // Dispose the previous live pair before replacing refs so no session leaks.
+  teardownLivePair();
+  let nextRuntimeA;
+  let nextRuntimeB;
+  let nextSessionA;
+  let nextSessionB;
+  try {
+    nextRuntimeA = await ModelRuntime.create({ authPath: join(agentA, "auth.json"), modelsPath: null, refreshOnCreate: false });
+    nextRuntimeB = await ModelRuntime.create({ authPath: join(agentB, "auth.json"), modelsPath: null, refreshOnCreate: false });
+    const nextFauxA = fauxProvider({ provider: "faux-a", models: [{ id: "session-a-model" }, { id: STANDBY_A }] });
+    const nextFauxB = fauxProvider({ provider: "faux-b", models: [{ id: "session-b-model" }, { id: STANDBY_B }] });
+    nextRuntimeA.registerNativeProvider(nextFauxA.provider);
+    nextRuntimeB.registerNativeProvider(nextFauxB.provider);
+    await nextRuntimeA.setRuntimeApiKey("faux-a", "fixture-only");
+    await nextRuntimeB.setRuntimeApiKey("faux-b", "fixture-only");
+    await nextRuntimeA.refresh({ allowNetwork: false });
+    await nextRuntimeB.refresh({ allowNetwork: false });
+    const nextLoaderA = new DefaultResourceLoader({ cwd, agentDir: agentA, extensionFactories: [bifrostExtension] });
+    const nextLoaderB = new DefaultResourceLoader({ cwd, agentDir: agentB, extensionFactories: [bifrostExtension] });
+    await nextLoaderA.reload();
+    await nextLoaderB.reload();
+    // Start each session on a different eligible physical model from its own
+    // registry. Bifrost must repair the selection to the rule target before
+    // generation; without Bifrost the standby identity reaches the provider
+    // and the assertions below fail.
+    ({ session: nextSessionA } = await createAgentSession({ cwd, agentDir: agentA, modelRuntime: nextRuntimeA, model: nextRuntimeA.getModel("faux-a", STANDBY_A), noTools: "all", resourceLoader: nextLoaderA, sessionManager: SessionManager.inMemory(cwd) }));
+    ({ session: nextSessionB } = await createAgentSession({ cwd, agentDir: agentB, modelRuntime: nextRuntimeB, model: nextRuntimeB.getModel("faux-b", STANDBY_B), noTools: "all", resourceLoader: nextLoaderB, sessionManager: SessionManager.inMemory(cwd) }));
+    trackSession(nextSessionA);
+    trackSession(nextSessionB);
+    await nextSessionA.bindExtensions({ mode: "print" });
+    await nextSessionB.bindExtensions({ mode: "print" });
+    runtimeA = nextRuntimeA;
+    runtimeB = nextRuntimeB;
+    ownedRuntimes.push(nextRuntimeA, nextRuntimeB);
+    fauxA = nextFauxA;
+    fauxB = nextFauxB;
+    loaderA = nextLoaderA;
+    loaderB = nextLoaderB;
+    sessionA = nextSessionA;
+    sessionB = nextSessionB;
+  } catch (error) {
+    try { nextSessionA?.dispose(); } catch {}
+    try { nextSessionB?.dispose(); } catch {}
+    try { nextRuntimeA?.unregisterProvider("faux-a"); } catch {}
+    try { if (nextRuntimeB && nextRuntimeB !== nextRuntimeA) nextRuntimeB.unregisterProvider("faux-b"); } catch {}
+    throw error;
+  }
 }
 
 function installSuccessResponses() {
   const arrive = barrier(2);
   fauxA.setResponses([async (context, _options, _state, model) => {
+    // Exact physical identity: the provider must observe Bifrost's repaired
+    // target, never the standby the session started on.
+    assert.equal(model.provider, "faux-a");
+    assert.equal(model.id, "session-a-model");
     const text = contextText(context);
     assert.match(text, /session a dispatch marker/);
     assert.doesNotMatch(text, /session b dispatch marker/);
-    report.invocations.push({ session: "a", model: `${model.provider}/${model.id}`, text });
+    report.invocations.push({ session: "a", model: `${model.provider}/${model.id}` });
     report.events.push("a:arrived");
     await arrive();
     report.events.push("a:released");
     return fauxAssistantMessage(fauxText("session-a response"));
   }]);
   fauxB.setResponses([async (context, _options, _state, model) => {
+    assert.equal(model.provider, "faux-b");
+    assert.equal(model.id, "session-b-model");
     const text = contextText(context);
     assert.match(text, /session b dispatch marker/);
     assert.doesNotMatch(text, /session a dispatch marker/);
-    report.invocations.push({ session: "b", model: `${model.provider}/${model.id}`, text });
+    report.invocations.push({ session: "b", model: `${model.provider}/${model.id}` });
     report.events.push("b:arrived");
     await arrive();
     report.events.push("b:released");
@@ -113,19 +179,38 @@ function installSuccessResponses() {
 
 it("dispatches concurrent native sessions to explicit physical identities without cross-session delivery", { timeout: 30_000 }, async () => {
   await setup();
+  // Pre-generation selection: both sessions start on their standby decoy.
+  assert.equal(sessionA.model.provider, "faux-a");
+  assert.equal(sessionA.model.id, STANDBY_A);
+  assert.equal(sessionB.model.provider, "faux-b");
+  assert.equal(sessionB.model.id, STANDBY_B);
+  const base = report.invocations.length;
   installSuccessResponses();
   await Promise.all([
     sessionA.prompt("session a dispatch marker alpha"),
     sessionB.prompt("session b dispatch marker beta"),
   ]);
-  assert.equal(sessionA.getLastAssistantText(), "session-a response");
-  assert.equal(sessionB.getLastAssistantText(), "session-b response");
+  // Bifrost repaired the selection before generation.
   assert.equal(sessionA.model.provider, "faux-a");
   assert.equal(sessionA.model.id, "session-a-model");
   assert.equal(sessionB.model.provider, "faux-b");
   assert.equal(sessionB.model.id, "session-b-model");
-  assert.deepEqual(fauxA.state.callCount, 1);
-  assert.deepEqual(fauxB.state.callCount, 1);
+  assert.equal(sessionA.getLastAssistantText(), "session-a response");
+  assert.equal(sessionB.getLastAssistantText(), "session-b response");
+  assert.equal(fauxA.state.callCount, 1);
+  assert.equal(fauxB.state.callCount, 1);
+  // Exact per-session physical invocation sequences: one target invocation
+  // each, no standby and no cross-session delivery.
+  const fresh = report.invocations.slice(base);
+  assert.deepEqual(
+    fresh.filter(({ session }) => session === "a").map(({ session, model }) => ({ session, model })),
+    [{ session: "a", model: TARGET_A }],
+  );
+  assert.deepEqual(
+    fresh.filter(({ session }) => session === "b").map(({ session, model }) => ({ session, model })),
+    [{ session: "b", model: TARGET_B }],
+  );
+  assert.ok(fresh.every(({ model }) => model === TARGET_A || model === TARGET_B));
   const arrival = report.events.filter((event) => event.endsWith(":arrived"));
   const release = report.events.filter((event) => event.endsWith(":released"));
   assert.equal(arrival.length, 2);
@@ -134,37 +219,103 @@ it("dispatches concurrent native sessions to explicit physical identities withou
   report.host.separateRuntimeRegistries = runtimeA.getModel("faux-b", "session-b-model") === undefined
     && runtimeB.getModel("faux-a", "session-a-model") === undefined;
   assert.equal(report.host.separateRuntimeRegistries, true);
+
+  // Storage ownership: the two sessions intentionally share one workspace
+  // policy file (persisted Bifrost policy), while registries, models and pins
+  // stay session-local. Separate agentDir values isolate Pi auth paths only;
+  // Bifrost config/storage resolve from cwd and are shared by design.
+  const projectConfig = JSON.parse(readFileSync(join(cwd, ".pi", "bifrost.json"), "utf8"));
+  assert.equal(projectConfig.enabled, true);
+  assert.ok(projectConfig.rules.some((rule) => rule.model === TARGET_A));
+  assert.ok(projectConfig.rules.some((rule) => rule.model === TARGET_B));
+  assert.equal(reliabilityPath(cwd), join(cwd, ".pi", "bifrost-reliability.json"));
+  assert.equal(runtimeStatePath(cwd), join(cwd, ".pi", "bifrost-state.json"));
+  const probeStatePath = join(scratch, "pin-probe-state.json");
+  writeFileSync(probeStatePath, JSON.stringify({ enabled: true, pinned: true, classifierEnabled: false }));
+  assert.equal(loadRuntimeState(probeStatePath).pinned, false, "pinned stays session-local per ADR 0015");
+  report.storage = {
+    sharedWorkspacePolicy: true,
+    sharedReliabilityPath: reliabilityPath(cwd),
+    pinSessionLocal: true,
+    separateRuntimeRegistries: true,
+  };
 });
 
-it("cancels one native session without affecting other session and cleans pending work", { timeout: 30_000 }, async () => {
+it("cancels one native session while the other session stays active and cleans pending work", { timeout: 30_000 }, async () => {
   await setup();
-  const entered = deferred();
-  const release = deferred();
-  fauxA.setResponses([async () => { entered.resolve(); await release.promise; return fauxAssistantMessage(fauxText("must not be delivered")); }]);
-  fauxB.setResponses([fauxAssistantMessage(fauxText("session-b survives cancellation"))]);
-  const cancelledPrompt = sessionA.prompt("session a dispatch marker cancel");
-  await entered.promise;
+  assert.equal(sessionA.model.id, STANDBY_A);
+  assert.equal(sessionB.model.id, STANDBY_B);
+  const base = report.invocations.length;
+  const enteredA = deferred();
+  const gateA = deferred();
+  const enteredB = deferred();
+  const gateB = deferred();
+  let settledB = false;
+  fauxA.setResponses([async (_context, _options, _state, model) => {
+    assert.equal(model.provider, "faux-a");
+    assert.equal(model.id, "session-a-model");
+    report.invocations.push({ session: "a", model: `${model.provider}/${model.id}` });
+    report.events.push("cancel-a:arrived");
+    enteredA.resolve();
+    await gateA.promise;
+    report.events.push("cancel-a:released");
+    return fauxAssistantMessage(fauxText("must not be delivered"));
+  }]);
+  fauxB.setResponses([async (_context, _options, _state, model) => {
+    assert.equal(model.provider, "faux-b");
+    assert.equal(model.id, "session-b-model");
+    report.invocations.push({ session: "b", model: `${model.provider}/${model.id}` });
+    report.events.push("cancel-b:arrived");
+    enteredB.resolve();
+    await gateB.promise;
+    report.events.push("cancel-b:released");
+    return fauxAssistantMessage(fauxText("session-b survives cancellation"));
+  }]);
+  // Both sessions enter their own provider callbacks concurrently.
+  const promptA = sessionA.prompt("session a dispatch marker cancel");
+  const promptB = sessionB.prompt("session b dispatch marker survives");
+  void promptB.then(() => { settledB = true; }, () => { settledB = true; });
+  await Promise.all([enteredA.promise, enteredB.promise]);
+  assert.ok(report.events.includes("cancel-a:arrived"));
+  assert.ok(report.events.includes("cancel-b:arrived"));
+  // Abort only A while B remains gated inside its own provider callback.
   const abortPromise = sessionA.abort();
-  release.resolve();
-  await Promise.allSettled([cancelledPrompt, abortPromise]);
-  await sessionB.prompt("session b dispatch marker survives");
+  await Promise.resolve();
+  assert.equal(settledB, false, "session B must still be active while A is aborted");
+  gateB.resolve();
+  const outcomeB = await promptB;
+  void outcomeB;
+  gateA.resolve();
+  const [settledA] = await Promise.all([Promise.allSettled([promptA, abortPromise])]);
+  assert.ok(settledA.every((result) => result.status === "fulfilled" || result.status === "rejected"));
   assert.equal(sessionB.getLastAssistantText(), "session-b survives cancellation");
   assert.notEqual(sessionA.getLastAssistantText(), "must not be delivered");
+  assert.equal(fauxA.state.callCount, 1);
+  assert.equal(fauxB.state.callCount, 1);
   assert.equal(fauxA.getPendingResponseCount(), 0);
   assert.equal(fauxB.getPendingResponseCount(), 0);
-  report.cancellation = { sessionASettled: true, sessionBUnaffected: true };
+  const fresh = report.invocations.slice(base);
+  assert.deepEqual(
+    fresh.filter(({ session }) => session === "a").map(({ session, model }) => ({ session, model })),
+    [{ session: "a", model: TARGET_A }],
+  );
+  assert.deepEqual(
+    fresh.filter(({ session }) => session === "b").map(({ session, model }) => ({ session, model })),
+    [{ session: "b", model: TARGET_B }],
+  );
+  report.cancellation = { sessionAOutcome: settledA.map((result) => result.status), sessionBUnaffected: settledB && sessionB.getLastAssistantText() === "session-b survives cancellation" };
+  assert.equal(report.cancellation.sessionBUnaffected, true);
 });
 
 after(() => {
-  sessionA?.dispose();
-  sessionB?.dispose();
+  teardownLivePair();
+  assert.equal(ownedSessions.length, 4, `expected 4 created sessions, saw ${ownedSessions.length}`);
+  assert.equal(disposedSessions.size, ownedSessions.length, `disposed ${disposedSessions.size}/${ownedSessions.length} created sessions`);
   report.cleanup = {
     fauxAPending: fauxA?.getPendingResponseCount() ?? null,
     fauxBPending: fauxB?.getPendingResponseCount() ?? null,
   };
   writeFileSync(join(scratch, "concurrent-report.json"), `${JSON.stringify(report, null, 2)}\n`);
-  if (runtimeA) runtimeA.unregisterProvider("faux-a");
-  if (runtimeB) runtimeB.unregisterProvider("faux-b");
   if (previous.HOME === undefined) delete process.env.HOME; else process.env.HOME = previous.HOME;
   if (previous.PI_CODING_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.PI_CODING_AGENT_DIR;
   process.chdir(previous.cwd);
