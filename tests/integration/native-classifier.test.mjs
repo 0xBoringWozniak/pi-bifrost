@@ -224,6 +224,7 @@ it("routes real AgentSession through Pi-native classifier behind a proven deny-a
     assert.match(attempts, /blocked UDP datagram to 127\.0\.0\.1/);
 
     writeFileSync(violations, "");
+    cleanupSafe = false;
     const denyAllProbe = await runNode(["-e", `
       const net = require("node:net");
       const dgram = require("node:dgram");
@@ -247,6 +248,7 @@ it("routes real AgentSession through Pi-native classifier behind a proven deny-a
         if (allowedOriginReached) process.exitCode = 10;
       })();
     `], { cwd: root, env: childEnv });
+    cleanupSafe = denyAllProbe.groupTerminated === true;
     assert.equal(denyAllProbe.status, 0, `${denyAllProbe.stdout}\n${denyAllProbe.stderr}`);
     const denyAllAttempts = readFileSync(violations, "utf8");
     assert.match(denyAllAttempts, new RegExp(`blocked fetch to http://127\\.0\\.0\\.1:${port}`));
