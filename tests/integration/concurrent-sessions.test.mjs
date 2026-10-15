@@ -253,9 +253,11 @@ it("proves concurrent native AgentSession dispatch and isolation behind non-vacu
   const liveGroups = ownedGroups.filter((groupId) => groupId !== undefined && process.platform !== "win32" && processGroupExists(groupId));
   // Scratch safety is driven by observed group absence, never by assertion
   // success: any still-observable owned group retains the scratch and is
-  // named in the error. Clean runs remove it below.
+  // named in the error. Clean runs remove it below. A file receipt preserves
+  // owned-group ownership independently of stdout parsing for outer supervisors.
   let cleanupError;
   if (liveGroups.length) {
+    try { writeFileSync(join(scratch, "owned-groups.json"), JSON.stringify({ ownedGroups, liveGroups })); } catch {}
     const flags = [["probe", probe], ["child", result]]
       .filter(([, run]) => run && (run.cleanupFailed || run.hardBoundHit))
       .map(([label, run]) => `${label}:cleanupFailed=${run.cleanupFailed},hardBoundHit=${run.hardBoundHit}`)
@@ -274,8 +276,10 @@ it("proves concurrent native AgentSession dispatch and isolation behind non-vacu
   if (cleanupError) throw cleanupError;
 });
 
-it("bounds a hanging descendant group and retains scratch while the group stays active", { timeout: 30_000 }, async () => {
-  if (process.platform === "win32") return;
+it("bounds a hanging descendant group and retains scratch while the group stays active", {
+  timeout: 30_000,
+  skip: process.platform === "win32" ? "POSIX-only: process-group lifecycle requires POSIX killpg semantics" : false,
+}, async () => {
   const hanging = await runIsolatedNode(["-e", `
     const { spawn } = require("node:child_process");
     spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
@@ -288,46 +292,96 @@ it("bounds a hanging descendant group and retains scratch while the group stays 
   assert.ok(hanging.durationMs < 15_000, `caller not bounded: ${hanging.durationMs}ms`);
 });
 
-it("fails bounded with scratch retained when the owned group kill is denied", { timeout: 30_000 }, async () => {
-  if (process.platform === "win32") return;
+it("fails bounded with scratch retained when the owned group kill is denied", {
+  timeout: 30_000,
+  skip: process.platform === "win32" ? "POSIX-only: process-group lifecycle requires POSIX killpg semantics" : false,
+}, async () => {
   // Actual caller path with real PIDs, pipes, wall time and scratch; only the
   // group kill signal is denied. Settlement must not depend on close.
+  // Cleanup ownership (denied.groupId) is acquired before any assertion; the
+  // bounded restoration below runs even when assertions throw.
   const scratch = mkdtempSync(join(tmpdir(), "bifrost-concurrent-denied-"));
   const startedAt = Date.now();
-  const denied = await runIsolatedNode(["-e", `
+  let denied;
+  let bodyError;
+  let ownedGroupId;
+  try {
+    denied = await runIsolatedNode(["-e", `
     const { spawn } = require("node:child_process");
     spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
     setInterval(() => {}, 1000);
   `], {
-    cwd: root,
-    env: { PATH: process.env.PATH },
-    timeoutMs: 1_500,
-    graceMs: 500,
-    cleanupTimeoutMs: 1_000,
-    drainMs: 500,
-    marginMs: 2_000,
-    signalGroup: () => {},
-  });
-  const wallMs = Date.now() - startedAt;
-  assert.equal(denied.timedOut, true);
-  assert.equal(denied.hardBoundHit, true, `denied-kill caller for group ${denied.groupId} settled via close instead of the wall bound`);
-  assert.equal(denied.cleanupFailed, true, `denied kill of owned group ${denied.groupId} reported success`);
-  assert.equal(denied.groupGone, false, `owned group ${denied.groupId} gone despite denied kill`);
-  assert.ok(denied.durationMs < 15_000 && wallMs < 15_000, `denied-kill caller not bounded: runner ${denied.durationMs}ms, wall ${wallMs}ms`);
-  assert.equal(removeScratchWhenGroupGone(scratch, [denied.groupId]), false, "active-group scratch was removed");
-  assert.equal(existsSync(scratch), true, `scratch for live group ${denied.groupId} missing`);
-  // Restoration signals only the owned group, then scratch goes away once the
-  // group is confirmed gone.
-  try { process.kill(-denied.groupId, "SIGKILL"); } catch {}
-  const deadline = Date.now() + 5_000;
-  while (processGroupExists(denied.groupId) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.equal(processGroupExists(denied.groupId), false, `owned group ${denied.groupId} survived restoration`);
-  assert.equal(removeScratchWhenGroupGone(scratch, [denied.groupId]), true, `scratch for group ${denied.groupId} retained after group exit`);
-  assert.equal(existsSync(scratch), false, "scratch not removed after cleanup");
+      cwd: root,
+      env: { PATH: process.env.PATH },
+      timeoutMs: 1_500,
+      graceMs: 500,
+      cleanupTimeoutMs: 1_000,
+      drainMs: 500,
+      marginMs: 2_000,
+      signalGroup: () => {},
+    });
+    ownedGroupId = denied.groupId;
+    if (process.env.BIFROST_TEST_INJECT_DIRECT_FAILURE === "1") {
+      throw new Error(`injected direct assertion failure, owned group ${ownedGroupId}`);
+    }
+    const wallMs = Date.now() - startedAt;
+    assert.equal(denied.timedOut, true);
+    assert.equal(denied.hardBoundHit, true, `denied-kill caller for group ${denied.groupId} settled via close instead of the wall bound`);
+    assert.equal(denied.cleanupFailed, true, `denied kill of owned group ${denied.groupId} reported success`);
+    assert.equal(denied.groupGone, false, `owned group ${denied.groupId} gone despite denied kill`);
+    assert.ok(denied.durationMs < 15_000 && wallMs < 15_000, `denied-kill caller not bounded: runner ${denied.durationMs}ms, wall ${wallMs}ms`);
+    assert.equal(removeScratchWhenGroupGone(scratch, [denied.groupId]), false, "active-group scratch was removed");
+    assert.equal(existsSync(scratch), true, `scratch for live group ${denied.groupId} missing`);
+    // Restoration signals only the owned group, then scratch goes away once the
+    // group is confirmed gone.
+    try { process.kill(-denied.groupId, "SIGKILL"); } catch {}
+    const deadline = Date.now() + 5_000;
+    while (processGroupExists(denied.groupId) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(processGroupExists(denied.groupId), false, `owned group ${denied.groupId} survived restoration`);
+    assert.equal(removeScratchWhenGroupGone(scratch, [denied.groupId]), true, `scratch for group ${denied.groupId} retained after group exit`);
+    assert.equal(existsSync(scratch), false, "scratch not removed after cleanup");
+  } catch (error) {
+    bodyError = error;
+  }
+  // Failure-safe finalizer: restore only the creation-proven owned group,
+  // retain scratch while absence cannot be established, preserve both errors.
+  let cleanupError;
+  if (ownedGroupId !== undefined) {
+    try {
+      if (processGroupExists(ownedGroupId)) {
+        try { process.kill(-ownedGroupId, "SIGKILL"); } catch {}
+        const deadline = Date.now() + 5_000;
+        while (processGroupExists(ownedGroupId) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      if (processGroupExists(ownedGroupId)) {
+        cleanupError = new Error(`cleanup failed: owned group ${ownedGroupId} still observable after bounded restoration`);
+      } else if (existsSync(scratch)) {
+        try {
+          if (!removeScratchWhenGroupGone(scratch, [ownedGroupId])) {
+            cleanupError = new Error(`scratch retained: group absence changed during removal for group ${ownedGroupId}`);
+          }
+        } catch (error) {
+          cleanupError = error instanceof Error ? error : new Error(String(error));
+        }
+      }
+    } catch (error) {
+      cleanupError ??= error instanceof Error ? error : new Error(String(error));
+    }
+  } else if (existsSync(scratch)) {
+    cleanupError = new Error(`cleanup failed: caller settlement threw before ownership acquired; scratch retained at ${scratch}`);
+  }
+  if (bodyError) {
+    if (cleanupError) process.stderr.write(`concurrent-sessions direct-proof cleanup: ${cleanupError.message}\n`);
+    if (cleanupError) bodyError.message += ` [cleanup: ${cleanupError.message}]`;
+    throw bodyError;
+  }
+  if (cleanupError) throw cleanupError;
 });
 
-it("settles children whose descendants outlive them via inherited or no stdio", { timeout: 30_000 }, async () => {
-  if (process.platform === "win32") return;
+it("settles children whose descendants outlive them via inherited or no stdio", {
+  timeout: 30_000,
+  skip: process.platform === "win32" ? "POSIX-only: process-group lifecycle requires POSIX killpg semantics" : false,
+}, async () => {
   // The descendant inherits the leader's pipes, so close never arrives; the
   // caller settles on the bounded exit drain and still cleans the group.
   const inherited = await runIsolatedNode(["-e", `
@@ -359,61 +413,340 @@ it("settles children whose descendants outlive them via inherited or no stdio", 
 
 it("fails the whole parent bounded with scratch retained while denied-kill groups stay alive", {
   timeout: 220_000,
-  skip: process.env.BIFROST_INNER_PROOF === "1",
+  skip: process.env.BIFROST_INNER_PROOF === "1"
+    ? "inner proof recursion: outer supervisor does not run inside itself"
+    : process.platform === "win32"
+      ? "POSIX-only: process-group lifecycle requires POSIX killpg semantics"
+      : false,
 }, async () => {
-  if (process.platform === "win32") return;
   // Whole-parent proof: run this exact file's main caller test as a subprocess
   // with every owned-group signal denied and the fixture stalled. The inner
   // main caller must exit by itself with an explicit failure while its group
   // stays alive and its scratch is retained. Other lifecycle controls keep
   // their independent assertions; only the main caller runs here.
-  // Restoration below signals only the group IDs the inner run reported.
+  // Direct cleanup ownership (inner.groupId) is acquired before any assertion;
+  // reported grandchild IDs are unioned from stdout diagnostics and the file
+  // receipt so a missing/malformed diagnostic cannot bypass restoration.
+  // Restoration signals only creation/receipt-proven groups.
   const retainBase = mkdtempSync(join(tmpdir(), "bifrost-concurrent-outer-"));
   const selfPath = fileURLToPath(import.meta.url);
-  const inner = await runIsolatedNode(["--test", "--experimental-strip-types", "--test-name-pattern=non-vacuous", selfPath], {
-    cwd: root,
-    env: {
-      PATH: process.env.PATH,
-      TMPDIR: retainBase,
-      BIFROST_TEST_DENY_GROUP_KILL: "1",
-      BIFROST_TEST_HANG_CHILD: "1",
-      BIFROST_TEST_CALLER_TIMEOUT_MS: "10000",
-      BIFROST_INNER_PROOF: "1",
-    },
-    timeoutMs: 150_000,
-    graceMs: 3_000,
-    cleanupTimeoutMs: 5_000,
-  });
-  assert.equal(inner.timedOut, false, `inner parent needed the outer kill after ${inner.durationMs}ms`);
-  assert.equal(inner.hardBoundHit, false, "inner parent needed the outer hard wall bound");
-  assert.equal(inner.status, 1, `inner parent exit not an explicit failure: status=${inner.status}\n${inner.stdout}\n${inner.stderr}`);
-  assert.ok(inner.durationMs < 200_000, `whole-parent proof not bounded: ${inner.durationMs}ms`);
-  const combined = `${inner.stdout}\n${inner.stderr}`;
-  const retainedMatch = /scratch retained: owned groups still active ([\d, ]+)/.exec(combined);
-  assert.ok(retainedMatch, `inner parent did not report live owned groups:\n${combined.slice(-2000)}`);
-  const groupIds = [...new Set(retainedMatch[1].split(",").map((part) => Number(part.trim())).filter((id) => Number.isFinite(id) && id > 0))];
-  assert.ok(groupIds.length > 0, "no owned group IDs reported by the inner parent");
-  for (const groupId of groupIds) {
-    assert.equal(processGroupExists(groupId), true, `reported owned group ${groupId} is not actually alive`);
+  let inner;
+  let bodyError;
+  let ownedDirect;
+  let groupIds = [];
+  let mainScratchDirs = [];
+  try {
+    inner = await runIsolatedNode(["--test", "--experimental-strip-types", "--test-name-pattern=non-vacuous", selfPath], {
+      cwd: root,
+      env: {
+        PATH: process.env.PATH,
+        TMPDIR: retainBase,
+        BIFROST_TEST_DENY_GROUP_KILL: "1",
+        BIFROST_TEST_HANG_CHILD: "1",
+        BIFROST_TEST_CALLER_TIMEOUT_MS: "10000",
+        BIFROST_INNER_PROOF: "1",
+      },
+      timeoutMs: 150_000,
+      graceMs: 3_000,
+      cleanupTimeoutMs: 5_000,
+    });
+    ownedDirect = inner.groupId;
+    if (process.env.BIFROST_TEST_INJECT_OUTER_FAILURE === "1") {
+      throw new Error(`injected outer assertion failure, direct group ${ownedDirect}`);
+    }
+    assert.equal(inner.timedOut, false, `inner parent needed the outer kill after ${inner.durationMs}ms`);
+    assert.equal(inner.hardBoundHit, false, "inner parent needed the outer hard wall bound");
+    assert.equal(inner.status, 1, `inner parent exit not an explicit failure: status=${inner.status}\n${inner.stdout}\n${inner.stderr}`);
+    assert.ok(inner.durationMs < 200_000, `whole-parent proof not bounded: ${inner.durationMs}ms`);
+    const combined = `${inner.stdout}\n${inner.stderr}`;
+    // Malformed-diagnostic control: ignore stdout text so ownership must come
+    // from the direct group ID and the file receipt, not the regex.
+    const combinedForParse = process.env.BIFROST_TEST_INJECT_OUTER_MALFORMED === "1" ? "" : combined;
+    const retainedMatch = /scratch retained: owned groups still active ([\d, ]+)/.exec(combinedForParse);
+    let parseError;
+    let stdoutGroups = [];
+    if (!retainedMatch) {
+      parseError = new Error(`inner parent did not report live owned groups:\n${combined.slice(-2000)}`);
+    } else {
+      stdoutGroups = [...new Set(retainedMatch[1].split(",").map((part) => Number(part.trim())).filter((id) => Number.isFinite(id) && id > 0))];
+      if (!stdoutGroups.length) parseError = new Error("no owned group IDs reported by the inner parent");
+    }
+    const scratchDirs = readdirSync(retainBase, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"))
+      .map((entry) => join(retainBase, entry.name));
+    const mainScratch = scratchDirs.filter((dir) => existsSync(join(dir, "network-violations.log")));
+    assert.equal(mainScratch.length, 1, `expected one retained main scratch, saw ${scratchDirs.join(",")}`);
+    mainScratchDirs = mainScratch;
+    // File-receipt channel: inner cleanup writes owned-groups.json into its
+    // scratch independently of stdout text. Only liveGroups prove denied
+    // groups still alive; ownedGroups may include already-cleaned probe groups.
+    let fileGroups = [];
+    for (const dir of mainScratch) {
+      try {
+        const receipt = JSON.parse(readFileSync(join(dir, "owned-groups.json"), "utf8"));
+        for (const id of [...(receipt.liveGroups ?? [])]) {
+          if (Number.isFinite(id) && id > 0) fileGroups.push(id);
+        }
+      } catch {}
+    }
+    groupIds = [...new Set([...stdoutGroups, ...fileGroups].filter((id) => Number.isFinite(id) && id > 0))];
+    // Direct caller group is creation-proven but expected gone after inner
+    // settlement (outer caller terminates it); grandchild liveness below
+    // proves the denied groups stayed alive. Direct is still restored in the
+    // finalizer if observable.
+    if (ownedDirect !== undefined && processGroupExists(ownedDirect)) groupIds.push(ownedDirect);
+    groupIds = [...new Set(groupIds)];
+    if (process.env.BIFROST_TEST_INJECT_OUTER_MALFORMED === "1" && parseError) {
+      // Ownership must not be tied to the regex: direct + file receipt still
+      // identify owned groups; record the diagnostic failure without losing it.
+      bodyError = parseError;
+    } else if (parseError) {
+      throw parseError;
+    }
+    if (bodyError) throw bodyError;
+    assert.ok(groupIds.length > 0, "no owned group IDs reported by the inner parent");
+    for (const groupId of groupIds) {
+      assert.equal(processGroupExists(groupId), true, `reported owned group ${groupId} is not actually alive`);
+    }
+    // The stalled child never reaches teardown, so no report is written; the
+    // violations log proves this is the main parent scratch.
+    for (const groupId of groupIds) {
+      try { process.kill(-groupId, "SIGKILL"); } catch {}
+    }
+    const deadline = Date.now() + 5_000;
+    while (groupIds.some((groupId) => processGroupExists(groupId)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    for (const groupId of groupIds) {
+      assert.equal(processGroupExists(groupId), false, `owned group ${groupId} survived restoration`);
+    }
+    assert.equal(removeScratchWhenGroupGone(mainScratch[0], groupIds), true, "scratch retained after owned groups exited");
+    assert.equal(existsSync(mainScratch[0]), false, "scratch not removed after cleanup");
+    rmSync(retainBase, { recursive: true, force: true });
+  } catch (error) {
+    bodyError ??= error instanceof Error ? error : new Error(String(error));
+    // Fallback ownership when parsing threw before groupIds were built: the
+    // direct caller group is creation-proven only if still observable; file
+    // receipts are best-effort. Never invent grandchild IDs.
+    if (!groupIds.length && ownedDirect !== undefined && processGroupExists(ownedDirect)) groupIds = [ownedDirect];
+    if (!mainScratchDirs.length) {
+      try {
+        const scratchDirs = readdirSync(retainBase, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"))
+          .map((entry) => join(retainBase, entry.name));
+        const found = scratchDirs.filter((dir) => existsSync(join(dir, "network-violations.log")));
+        if (found.length) mainScratchDirs = found;
+        for (const dir of found) {
+          try {
+            const receipt = JSON.parse(readFileSync(join(dir, "owned-groups.json"), "utf8"));
+            for (const id of [...(receipt.liveGroups ?? [])]) {
+              if (Number.isFinite(id) && id > 0 && !groupIds.includes(id)) groupIds.push(id);
+            }
+          } catch {}
+        }
+      } catch {}
+    }
   }
-  const scratchDirs = readdirSync(retainBase, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"))
-    .map((entry) => join(retainBase, entry.name));
-  const mainScratch = scratchDirs.filter((dir) => existsSync(join(dir, "network-violations.log")));
-  assert.equal(mainScratch.length, 1, `expected one retained main scratch, saw ${scratchDirs.join(",")}`);
-  // The stalled child never reaches teardown, so no report is written; the
-  // violations log proves this is the main parent scratch.
-  for (const groupId of groupIds) {
-    try { process.kill(-groupId, "SIGKILL"); } catch {}
+  // Failure-safe finalizer: restore only proven groups, retain scratch while
+  // any proven group stays observable, preserve both primary and cleanup errors.
+  let cleanupError;
+  try {
+    for (const groupId of groupIds) {
+      try { if (processGroupExists(groupId)) process.kill(-groupId, "SIGKILL"); } catch {}
+    }
+    const deadline = Date.now() + 5_000;
+    while (groupIds.some((groupId) => processGroupExists(groupId)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const live = groupIds.filter((groupId) => processGroupExists(groupId));
+    if (live.length) {
+      cleanupError = new Error(`cleanup failed: owned groups still observable after bounded restoration ${live.join(",")}`);
+    } else if (mainScratchDirs.length && !groupIds.length) {
+      cleanupError = new Error(`scratch retained: ownership incomplete, no proven group IDs for ${mainScratchDirs.join(",")}`);
+    } else if (mainScratchDirs.length) {
+      for (const dir of mainScratchDirs) {
+        try {
+          if (existsSync(dir) && !removeScratchWhenGroupGone(dir, groupIds)) {
+            cleanupError = new Error(`scratch retained: group absence changed during removal for groups ${groupIds.join(",")}`);
+          }
+        } catch (error) {
+          cleanupError = error instanceof Error ? error : new Error(String(error));
+        }
+      }
+      if (!cleanupError && existsSync(retainBase)) {
+        try {
+          const remaining = readdirSync(retainBase, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"));
+          if (!remaining.length) rmSync(retainBase, { recursive: true, force: true });
+        } catch {}
+      }
+    } else if (existsSync(retainBase)) {
+      // Ownership incomplete (no scratch identified): retain base for inspection.
+      try {
+        const remaining = readdirSync(retainBase, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"));
+        if (remaining.length || groupIds.some((id) => processGroupExists(id))) {
+          cleanupError = new Error(`scratch retained: ownership incomplete, retained base ${retainBase} groups ${groupIds.join(",")}`);
+        } else {
+          rmSync(retainBase, { recursive: true, force: true });
+        }
+      } catch (error) {
+        cleanupError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+  } catch (error) {
+    cleanupError ??= error instanceof Error ? error : new Error(String(error));
   }
-  const deadline = Date.now() + 5_000;
-  while (groupIds.some((groupId) => processGroupExists(groupId)) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
+  if (bodyError) {
+    if (cleanupError) process.stderr.write(`concurrent-sessions outer-proof cleanup: ${cleanupError.message}\n`);
+    if (cleanupError) bodyError.message += ` [cleanup: ${cleanupError.message}]`;
+    throw bodyError;
   }
-  for (const groupId of groupIds) {
-    assert.equal(processGroupExists(groupId), false, `owned group ${groupId} survived restoration`);
+  if (cleanupError) throw cleanupError;
+});
+
+it("restores the denied-kill group after an injected direct assertion failure", {
+  timeout: 60_000,
+  skip: process.env.BIFROST_INNER_PROOF === "1"
+    ? "inner proof recursion"
+    : process.platform === "win32"
+      ? "POSIX-only: process-group lifecycle requires POSIX killpg semantics"
+      : false,
+}, async () => {
+  // Source-bound fault proof: run the actual denied-kill proof with failure
+  // injected immediately after real caller settlement, without removing
+  // cleanup logic. The proof process must fail bounded while its own
+  // finalizer leaves no owned group or scratch behind.
+  const retainBase = mkdtempSync(join(tmpdir(), "bifrost-concurrent-supervisor-direct-"));
+  const selfPath = fileURLToPath(import.meta.url);
+  let proof;
+  let bodyError;
+  let reported = [];
+  try {
+    proof = await runIsolatedNode(["--test", "--experimental-strip-types", "--test-name-pattern=fails bounded with scratch retained when the owned group kill is denied", selfPath], {
+      cwd: root,
+      env: {
+        PATH: process.env.PATH,
+        TMPDIR: retainBase,
+        BIFROST_TEST_INJECT_DIRECT_FAILURE: "1",
+        BIFROST_INNER_PROOF: "1",
+      },
+      timeoutMs: 30_000,
+      graceMs: 2_000,
+      cleanupTimeoutMs: 3_000,
+    });
+    assert.equal(proof.timedOut, false, `injected direct proof needed the supervisor kill after ${proof.durationMs}ms`);
+    assert.equal(proof.hardBoundHit, false, "injected direct proof needed the hard wall bound");
+    assert.equal(proof.status, 1, `injected direct proof did not fail as injected: status=${proof.status}\n${proof.stdout}\n${proof.stderr}`);
+    assert.ok(proof.durationMs < 45_000, `injected direct proof not bounded: ${proof.durationMs}ms`);
+    const combined = `${proof.stdout}\n${proof.stderr}`;
+    assert.match(combined, /injected direct assertion failure/, "proof did not take the injected assertion-failure path");
+    const match = /owned group (\d+)/.exec(combined);
+    if (match) reported = [Number(match[1])].filter((id) => Number.isFinite(id) && id > 0);
+    assert.ok(reported.length > 0, "injected proof did not report its owned group");
+    for (const groupId of reported) {
+      assert.equal(processGroupExists(groupId), false, `injected-failure group ${groupId} survived the proof finalizer`);
+    }
+    const remaining = existsSync(retainBase)
+      ? readdirSync(retainBase, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-denied-"))
+      : [];
+    assert.equal(remaining.length, 0, `injected-proof scratch remains: ${remaining.map((e) => e.name).join(",")}`);
+  } catch (error) {
+    bodyError = error instanceof Error ? error : new Error(String(error));
   }
-  assert.equal(removeScratchWhenGroupGone(mainScratch[0], groupIds), true, "scratch retained after owned groups exited");
-  assert.equal(existsSync(mainScratch[0]), false, "scratch not removed after cleanup");
-  rmSync(retainBase, { recursive: true, force: true });
+  let supervisorError;
+  try {
+    for (const groupId of reported) {
+      try { if (processGroupExists(groupId)) process.kill(-groupId, "SIGKILL"); } catch {}
+    }
+    const deadline = Date.now() + 5_000;
+    while (reported.some((id) => processGroupExists(id)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const live = reported.filter((id) => processGroupExists(id));
+    if (live.length) supervisorError = new Error(`supervisor cleanup failed for groups ${live.join(",")}`);
+    else if (existsSync(retainBase)) rmSync(retainBase, { recursive: true, force: true });
+  } catch (error) {
+    supervisorError ??= error instanceof Error ? error : new Error(String(error));
+  }
+  if (bodyError) {
+    if (supervisorError) process.stderr.write(`direct supervisor cleanup: ${supervisorError.message}\n`);
+    throw bodyError;
+  }
+  if (supervisorError) throw supervisorError;
+});
+
+it("restores outer groups when the diagnostic is missing or malformed", {
+  timeout: 300_000,
+  skip: process.env.BIFROST_INNER_PROOF === "1"
+    ? "inner proof recursion"
+    : process.platform === "win32"
+      ? "POSIX-only: process-group lifecycle requires POSIX killpg semantics"
+      : false,
+}, async () => {
+  // Outer ownership must not be tied to the stdout regex: run the actual
+  // whole-parent proof with a malformed diagnostic so group IDs must come
+  // from the direct caller ID and the file receipt. The proof fails with the
+  // diagnostic error while its own finalizer still restores every proven group.
+  const retainBase = mkdtempSync(join(tmpdir(), "bifrost-concurrent-supervisor-outer-"));
+  const selfPath = fileURLToPath(import.meta.url);
+  let proof;
+  let bodyError;
+  let reported = [];
+  try {
+    proof = await runIsolatedNode(["--test", "--experimental-strip-types", "--test-name-pattern=fails the whole parent bounded", selfPath], {
+      cwd: root,
+      env: {
+        PATH: process.env.PATH,
+        TMPDIR: retainBase,
+        BIFROST_TEST_INJECT_OUTER_MALFORMED: "1",
+      },
+      timeoutMs: 240_000,
+      graceMs: 5_000,
+      cleanupTimeoutMs: 5_000,
+    });
+    assert.equal(proof.timedOut, false, `malformed outer proof needed the supervisor kill after ${proof.durationMs}ms`);
+    assert.equal(proof.status, 1, `malformed outer proof did not fail as expected: status=${proof.status}\n${proof.stdout}\n${proof.stderr}`);
+    const combined = `${proof.stdout}\n${proof.stderr}`;
+    assert.match(combined, /did not report live owned groups/, "proof did not take the malformed-diagnostic path");
+    const ids = [...combined.matchAll(/(?:owned group|groups?)[^\d]*(\d{2,7})/gi)].map((m) => Number(m[1])).filter((id) => Number.isFinite(id) && id > 0);
+    reported = [...new Set(ids)];
+    for (const groupId of reported) {
+      assert.equal(processGroupExists(groupId), false, `malformed-proof group ${groupId} survived the proof finalizer`);
+    }
+    const remaining = existsSync(retainBase)
+      ? readdirSync(retainBase, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"))
+      : [];
+    assert.equal(remaining.length, 0, `malformed-proof scratch remains: ${remaining.map((e) => e.name).join(",")}`);
+  } catch (error) {
+    bodyError = error instanceof Error ? error : new Error(String(error));
+  }
+  let supervisorError;
+  try {
+    for (const groupId of reported) {
+      try { if (processGroupExists(groupId)) process.kill(-groupId, "SIGKILL"); } catch {}
+    }
+    const deadline = Date.now() + 5_000;
+    while (reported.some((id) => processGroupExists(id)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const live = reported.filter((id) => processGroupExists(id));
+    if (live.length) supervisorError = new Error(`supervisor cleanup failed for groups ${live.join(",")}`);
+    else if (existsSync(retainBase)) {
+      const remaining = readdirSync(retainBase, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"));
+      if (!remaining.length) rmSync(retainBase, { recursive: true, force: true });
+      else {
+        for (const entry of remaining) {
+          try { process.kill(-Number(entry.name.split("-").pop()), "SIGKILL"); } catch {}
+        }
+      }
+    }
+  } catch (error) {
+    supervisorError ??= error instanceof Error ? error : new Error(String(error));
+  }
+  if (bodyError) {
+    if (supervisorError) process.stderr.write(`outer supervisor cleanup: ${supervisorError.message}\n`);
+    throw bodyError;
+  }
+  if (supervisorError) throw supervisorError;
 });
