@@ -736,9 +736,7 @@ it("restores outer groups when the diagnostic is missing or malformed", {
       const remaining = readdirSync(retainBase, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"));
       if (!remaining.length) rmSync(retainBase, { recursive: true, force: true });
       else {
-        for (const entry of remaining) {
-          try { process.kill(-Number(entry.name.split("-").pop()), "SIGKILL"); } catch {}
-        }
+        process.stderr.write("outer supervisor retained scratch with incomplete process ownership\n");
       }
     }
   } catch (error) {
