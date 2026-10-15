@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execPath } from "node:process";
 import { dirname, join } from "node:path";
@@ -52,11 +52,23 @@ function runIsolatedNode(args, {
     let exitSignal;
     let finished = false;
     let termination;
-    const terminateOptions = signalGroup ? { graceMs, cleanupTimeoutMs, signalGroup } : { graceMs, cleanupTimeoutMs };
+    // Whole-parent denial control: with BIFROST_TEST_DENY_GROUP_KILL=1 the
+    // caller runs its real PIDs, pipes, deadlines and scratch while every
+    // owned-group signal is swallowed. An explicit signalGroup always wins.
+    const denyGroupKill = signalGroup === undefined && process.env.BIFROST_TEST_DENY_GROUP_KILL === "1";
+    const terminateOptions = signalGroup
+      ? { graceMs, cleanupTimeoutMs, signalGroup }
+      : denyGroupKill
+        ? { graceMs, cleanupTimeoutMs, signalGroup: () => {} }
+        : { graceMs, cleanupTimeoutMs };
     const terminate = () => termination ??= terminateProcessGroup(childProcess, terminateOptions).catch(() => false);
     const destroyOwnedHandles = () => {
       try { childProcess.stdout.destroy(); } catch {}
       try { childProcess.stderr.destroy(); } catch {}
+      // A still-running child handle keeps the whole runner alive even with
+      // its pipes destroyed; release it on failure paths without claiming
+      // the group is dead (group death is only ever observed, below).
+      try { childProcess.unref(); } catch {}
       childProcess.removeAllListeners("error");
       childProcess.removeAllListeners("close");
       childProcess.removeAllListeners("exit");
@@ -141,6 +153,11 @@ function scrubbedEnv(scratch, port, violations) {
     BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${port}`,
     BIFROST_TEST_NETWORK_VIOLATIONS: violations,
     NODE_OPTIONS: `--require=${guard}`,
+    // Test-control passthrough for the whole-parent denial proof only; never
+    // a secret, never on in normal runs.
+    ...(process.env.BIFROST_TEST_HANG_CHILD === undefined
+      ? {}
+      : { BIFROST_TEST_HANG_CHILD: process.env.BIFROST_TEST_HANG_CHILD }),
   };
 }
 
@@ -198,7 +215,13 @@ it("proves concurrent native AgentSession dispatch and isolation behind non-vacu
     assert.match(probeLog, /blocked UDP datagram/);
     writeFileSync(violations, "");
 
-    result = await runIsolatedNode(["--test", "--experimental-strip-types", child], { cwd: root, env, timeoutMs: 60_000 });
+    // Caller deadline: 60s default; the whole-parent denial proof shortens it
+    // below the fixture's own test timeouts via BIFROST_TEST_CALLER_TIMEOUT_MS
+    // so the caller (not the fixture) settles the stalled child first.
+    const callerTimeoutMs = process.env.BIFROST_TEST_CALLER_TIMEOUT_MS === undefined
+      ? 60_000
+      : Math.max(1_000, Number(process.env.BIFROST_TEST_CALLER_TIMEOUT_MS) || 60_000);
+    result = await runIsolatedNode(["--test", "--experimental-strip-types", child], { cwd: root, env, timeoutMs: callerTimeoutMs });
     ownedGroups.push(result.groupId);
     assert.equal(result.timedOut, false, `child group ${result.groupId} exceeded its deadline after ${result.durationMs}ms`);
     assert.equal(result.hardBoundHit, false, `child group ${result.groupId} needed the hard wall bound`);
@@ -228,14 +251,16 @@ it("proves concurrent native AgentSession dispatch and isolation behind non-vacu
     if (server) await new Promise((resolve) => server.close(() => resolve()));
   } catch {}
   const liveGroups = ownedGroups.filter((groupId) => groupId !== undefined && process.platform !== "win32" && processGroupExists(groupId));
+  // Scratch safety is driven by observed group absence, never by assertion
+  // success: any still-observable owned group retains the scratch and is
+  // named in the error. Clean runs remove it below.
   let cleanupError;
-  for (const [label, run] of [["probe", probe], ["child", result]]) {
-    if (run && (run.cleanupFailed || run.hardBoundHit)) {
-      cleanupError = new Error(`${label} group ${run.groupId} unsettled (cleanupFailed=${run.cleanupFailed}, hardBoundHit=${run.hardBoundHit}); scratch retained`);
-    }
-  }
-  if (!cleanupError && liveGroups.length) {
-    cleanupError = new Error(`scratch retained: owned groups still active ${liveGroups.join(",")}`);
+  if (liveGroups.length) {
+    const flags = [["probe", probe], ["child", result]]
+      .filter(([, run]) => run && (run.cleanupFailed || run.hardBoundHit))
+      .map(([label, run]) => `${label}:cleanupFailed=${run.cleanupFailed},hardBoundHit=${run.hardBoundHit}`)
+      .join("; ");
+    cleanupError = new Error(`scratch retained: owned groups still active ${liveGroups.join(",")}${flags ? ` (${flags})` : ""}`);
   }
   if (!cleanupError) {
     if (!removeScratchWhenGroupGone(scratch, ownedGroups)) {
@@ -330,4 +355,65 @@ it("settles children whose descendants outlive them via inherited or no stdio", 
   assert.equal(nostriod.groupGone, true, `no-stdio group ${nostriod.groupId} still observable`);
   assert.match(nostriod.stdout, /leader-done/);
   assert.ok(nostriod.durationMs < 15_000, `no-stdio caller not bounded: ${nostriod.durationMs}ms`);
+});
+
+it("fails the whole parent bounded with scratch retained while denied-kill groups stay alive", {
+  timeout: 220_000,
+  skip: process.env.BIFROST_INNER_PROOF === "1",
+}, async () => {
+  if (process.platform === "win32") return;
+  // Whole-parent proof: run this exact file's main caller test as a subprocess
+  // with every owned-group signal denied and the fixture stalled. The inner
+  // main caller must exit by itself with an explicit failure while its group
+  // stays alive and its scratch is retained. Other lifecycle controls keep
+  // their independent assertions; only the main caller runs here.
+  // Restoration below signals only the group IDs the inner run reported.
+  const retainBase = mkdtempSync(join(tmpdir(), "bifrost-concurrent-outer-"));
+  const selfPath = fileURLToPath(import.meta.url);
+  const inner = await runIsolatedNode(["--test", "--experimental-strip-types", "--test-name-pattern=non-vacuous", selfPath], {
+    cwd: root,
+    env: {
+      PATH: process.env.PATH,
+      TMPDIR: retainBase,
+      BIFROST_TEST_DENY_GROUP_KILL: "1",
+      BIFROST_TEST_HANG_CHILD: "1",
+      BIFROST_TEST_CALLER_TIMEOUT_MS: "10000",
+      BIFROST_INNER_PROOF: "1",
+    },
+    timeoutMs: 150_000,
+    graceMs: 3_000,
+    cleanupTimeoutMs: 5_000,
+  });
+  assert.equal(inner.timedOut, false, `inner parent needed the outer kill after ${inner.durationMs}ms`);
+  assert.equal(inner.hardBoundHit, false, "inner parent needed the outer hard wall bound");
+  assert.equal(inner.status, 1, `inner parent exit not an explicit failure: status=${inner.status}\n${inner.stdout}\n${inner.stderr}`);
+  assert.ok(inner.durationMs < 200_000, `whole-parent proof not bounded: ${inner.durationMs}ms`);
+  const combined = `${inner.stdout}\n${inner.stderr}`;
+  const retainedMatch = /scratch retained: owned groups still active ([\d, ]+)/.exec(combined);
+  assert.ok(retainedMatch, `inner parent did not report live owned groups:\n${combined.slice(-2000)}`);
+  const groupIds = [...new Set(retainedMatch[1].split(",").map((part) => Number(part.trim())).filter((id) => Number.isFinite(id) && id > 0))];
+  assert.ok(groupIds.length > 0, "no owned group IDs reported by the inner parent");
+  for (const groupId of groupIds) {
+    assert.equal(processGroupExists(groupId), true, `reported owned group ${groupId} is not actually alive`);
+  }
+  const scratchDirs = readdirSync(retainBase, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("bifrost-concurrent-"))
+    .map((entry) => join(retainBase, entry.name));
+  const mainScratch = scratchDirs.filter((dir) => existsSync(join(dir, "network-violations.log")));
+  assert.equal(mainScratch.length, 1, `expected one retained main scratch, saw ${scratchDirs.join(",")}`);
+  // The stalled child never reaches teardown, so no report is written; the
+  // violations log proves this is the main parent scratch.
+  for (const groupId of groupIds) {
+    try { process.kill(-groupId, "SIGKILL"); } catch {}
+  }
+  const deadline = Date.now() + 5_000;
+  while (groupIds.some((groupId) => processGroupExists(groupId)) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  for (const groupId of groupIds) {
+    assert.equal(processGroupExists(groupId), false, `owned group ${groupId} survived restoration`);
+  }
+  assert.equal(removeScratchWhenGroupGone(mainScratch[0], groupIds), true, "scratch retained after owned groups exited");
+  assert.equal(existsSync(mainScratch[0]), false, "scratch not removed after cleanup");
+  rmSync(retainBase, { recursive: true, force: true });
 });

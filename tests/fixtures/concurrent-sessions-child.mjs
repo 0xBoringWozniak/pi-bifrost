@@ -148,6 +148,11 @@ async function setup() {
 }
 
 function installSuccessResponses() {
+  // Whole-parent denial control: with BIFROST_TEST_HANG_CHILD=1 both provider
+  // callbacks stall after arrival (inside the test, so no top-level-await
+  // tripwire), leaving the prompts unsettled for the caller deadline. Off by
+  // default; normal routing proof hangs nowhere.
+  const hangIfArmed = () => process.env.BIFROST_TEST_HANG_CHILD === "1" ? new Promise(() => {}) : Promise.resolve();
   const arrive = barrier(2);
   fauxA.setResponses([async (context, _options, _state, model) => {
     // Exact physical identity: the provider must observe Bifrost's repaired
@@ -159,6 +164,7 @@ function installSuccessResponses() {
     assert.doesNotMatch(text, /session b dispatch marker/);
     report.invocations.push({ session: "a", model: `${model.provider}/${model.id}` });
     report.events.push("a:arrived");
+    await hangIfArmed();
     await arrive();
     report.events.push("a:released");
     return fauxAssistantMessage(fauxText("session-a response"));
@@ -171,13 +177,18 @@ function installSuccessResponses() {
     assert.doesNotMatch(text, /session a dispatch marker/);
     report.invocations.push({ session: "b", model: `${model.provider}/${model.id}` });
     report.events.push("b:arrived");
+    await hangIfArmed();
     await arrive();
     report.events.push("b:released");
     return fauxAssistantMessage(fauxText("session-b response"));
   }]);
 }
 
-it("dispatches concurrent native sessions to explicit physical identities without cross-session delivery", { timeout: 30_000 }, async () => {
+it("dispatches concurrent native sessions to explicit physical identities without cross-session delivery", {
+  // Armed stall must outlast the caller deadline by a wide margin so the
+  // denied group is observably alive when the caller settles; default 30s.
+  timeout: process.env.BIFROST_TEST_HANG_CHILD === "1" ? 120_000 : 30_000,
+}, async () => {
   await setup();
   // Pre-generation selection: both sessions start on their standby decoy.
   assert.equal(sessionA.model.provider, "faux-a");
