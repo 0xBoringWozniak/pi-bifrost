@@ -434,7 +434,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       if (existsSync(scratch)) {
         const verified = await stopChild(stubborn, 300);
         if (!verified || processGroupExists(stubborn.pid)) {
-          if (pendingError) return;
+          if (pendingError) throw pendingError;
           throw new Error(`refusing to delete scratch while owned process group ${stubborn.pid} still alive: ${scratch}`);
         }
         rmSync(scratch, { recursive: true, force: true });
@@ -495,7 +495,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       if (existsSync(home)) {
         const reaped = await reapRecordedDescendant(pidFile);
         if (!reaped) {
-          if (pendingError) return;
+          if (pendingError) throw pendingError;
           throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
         }
         rmSync(home, { recursive: true, force: true });
@@ -542,7 +542,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       if (existsSync(scratch)) {
         const verified = await stopChild(leader);
         if (!verified || processGroupExists(leader.pid)) {
-          if (pendingError) return;
+          if (pendingError) throw pendingError;
           throw new Error(`refusing to delete scratch while owned process group ${leader.pid} still alive: ${scratch}`);
         }
         rmSync(scratch, { recursive: true, force: true });
@@ -630,7 +630,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       if (existsSync(home)) {
         const reaped = await reapRecordedDescendant(pidFile);
         if (!reaped) {
-          if (pendingError) return;
+          if (pendingError) throw pendingError;
           throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
         }
         rmSync(home, { recursive: true, force: true });
@@ -679,7 +679,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       if (existsSync(home)) {
         const reaped = await reapRecordedDescendant(pidFile);
         if (!reaped) {
-          if (pendingError) return;
+          if (pendingError) throw pendingError;
           throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
         }
         rmSync(home, { recursive: true, force: true });
@@ -754,12 +754,12 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
         if (descendantAlive || groupAlive) {
-          if (pendingError) return;
+          if (pendingError) throw pendingError;
           throw new Error(`refusing to delete scratch while owned resources still alive (descendant=${descendant}, workerGroup=${worker?.pid}): ${home}`);
         }
         rmSync(home, { recursive: true, force: true });
       } else if (worker && processGroupExists(worker.pid)) {
-        if (pendingError) return;
+        if (pendingError) throw pendingError;
         throw new Error(`refusing to finish while owned worker group ${worker.pid} still alive`);
       }
     }
@@ -805,7 +805,7 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       if (existsSync(home)) {
         const reaped = await reapRecordedDescendant(pidFile);
         if (!reaped) {
-          if (pendingError) return;
+          if (pendingError) throw pendingError;
           throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
         }
         rmSync(home, { recursive: true, force: true });
