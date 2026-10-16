@@ -1,17 +1,14 @@
-import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
 import {
   REPO_ROOT,
-  assertFenceBlocked,
   assertNoViolations,
-  fenceProbeScript,
+  assertOutboundFence,
   fixtureChildEnv,
   isolateAmbientCredentials,
   runFauxFixtureChild,
-  runNode,
 } from "../fixtures/faux-harness.mjs";
 
 const CHILD = join(REPO_ROOT, "tests", "fixtures", "native-faux-lifecycle-child.mjs");
@@ -22,14 +19,7 @@ it("routes real AgentSession turns by direct rules, tier override precedence, an
   const restoreCredentials = isolateAmbientCredentials();
   try {
     const env = fixtureChildEnv({ scratch, violations, allowedOrigin: "http://127.0.0.1:1" });
-    writeFileSync(violations, "");
-    const probe = await runNode(["-e", fenceProbeScript({ allowedUrl: "http://127.0.0.1:1", blockedPort: 2 })], { cwd: REPO_ROOT, env });
-    assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
-    assertFenceBlocked(violations, [
-      /blocked fetch to https?:\/\/[^:\s]+:\d/,
-      /blocked socket connection to [^\s]+:\d/,
-      /blocked UDP datagram to/,
-    ]);
+    await assertOutboundFence({ env, violations, allowedUrl: "http://127.0.0.1:1", blockedPort: 2 });
 
     writeFileSync(violations, "");
     await runFauxFixtureChild({

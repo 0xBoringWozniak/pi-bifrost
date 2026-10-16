@@ -9,6 +9,7 @@
 //     runNode                    bounded stdout/stderr capture
 //     fenceProbeScript           HTTP/HTTPS/TCP/UDP fence probe source
 //     assertFenceBlocked         prove the fence rejected every attempt
+//     assertOutboundFence        run the probe in a guarded child and assert it
 //     runFauxFixtureChild        run a fixture child and require exit 0
 //     assertNoViolations         prove the child made no outbound attempt
 //
@@ -45,6 +46,14 @@ export const CREDENTIAL_ENV_NAMES = [
 ];
 
 const OUTBOUND_GUARD = join(REPO_ROOT, "scripts", "test-outbound-guard.cjs");
+
+/** Violations every guarded child must record: HTTP, HTTPS, TCP, and UDP. */
+const DEFAULT_FENCE_PATTERNS = Object.freeze([
+  /blocked fetch to https:\/\/127\.0\.0\.1:/,
+  /blocked fetch to http:\/\/127\.0\.0\.1:/,
+  /blocked socket connection to 127\.0\.0\.1:/,
+  /blocked UDP datagram to 127\.0\.0\.1/,
+]);
 
 // ── Driver side ─────────────────────────────────────────────────
 
@@ -117,14 +126,28 @@ export function fenceProbeScript({ allowedUrl, blockedPort, expectAllowedText })
 }
 
 /** Prove the fence recorded a rejection for every transport the probe tried. */
-export function assertFenceBlocked(violations, patterns = [
-  /blocked fetch to/,
-  /blocked socket connection to/,
-  /blocked UDP datagram to/,
-]) {
+export function assertFenceBlocked(violations, patterns = DEFAULT_FENCE_PATTERNS) {
   const text = readFileSync(violations, "utf8");
   for (const pattern of patterns) assert.match(text, pattern);
   return text;
+}
+
+/**
+ * Run the fence probe in a guarded child and require the recorded violations.
+ * Drivers call this once before running any fixture child.
+ */
+export async function assertOutboundFence({
+  env,
+  violations,
+  allowedUrl,
+  blockedPort,
+  expectAllowedText,
+  patterns = DEFAULT_FENCE_PATTERNS,
+}) {
+  writeFileSync(violations, "");
+  const probe = await runNode(["-e", fenceProbeScript({ allowedUrl, blockedPort, expectAllowedText })], { cwd: REPO_ROOT, env });
+  assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
+  return assertFenceBlocked(violations, patterns);
 }
 
 /** Run a fixture child under `node --test` and require a clean exit. */
