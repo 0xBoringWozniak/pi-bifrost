@@ -40,7 +40,7 @@ active cron today, and this branch does not claim one.
 - `reliability`: reliability state machine, filter, and cache replay-control tests.
 - `integration`: `npm run test:integration` (repeat measured; includes concurrency
   and native suites).
-- `pi-compatibility`: both packages at pinned `1.0.1` and `1.3.0`, each installed
+- `pi-compatibility`: both packages at pinned `1.0.1` and `1.3.0`, baseline kept on the `npm ci` lock and the alternate installed
   into `node_modules` only (`--no-save --package-lock=false`, no credentials),
   with installed-version verification, an unchanged tracked tree, `npm run
   typecheck`, native SDK/process tests, and the installed-package consumer test.
