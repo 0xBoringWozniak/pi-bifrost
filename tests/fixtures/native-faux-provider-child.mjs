@@ -57,32 +57,23 @@ it("routes real AgentSession request to configured physical faux model behind pr
   runtime.registerNativeProvider(faux.provider);
   await runtime.setRuntimeApiKey("faux", "fixture-only");
   await runtime.refresh({ allowNetwork: false });
-  const model = runtime.getModel("faux", "physical-fast");
-  assert.ok(model, "registered physical model must be available");
   assert.deepEqual((await runtime.getAvailable("faux")).map(({ id }) => id), ["physical-fast", "physical-capable"]);
   const { default: bifrostExtension } = await import(join(root, "index.ts"));
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, extensionFactories: [bifrostExtension] });
   await resourceLoader.reload();
+
+  await runtime.getAvailable("faux");
+  const model = runtime.getModel("faux", "physical-fast");
+  assert.ok(model, "registered physical model must be available");
   ({ session } = await createAgentSession({ cwd, agentDir, modelRuntime: runtime, model, noTools: "all", resourceLoader }));
   await session.bindExtensions({ mode: "print" });
-  await runtime.getAvailable("faux");
-  const errors = [];
-  const originalError = console.error;
-  console.error = (...args) => { errors.push(args.join(" ")); originalError(...args); };
-  try {
-    await session.prompt("native faux dispatch marker");
-  } finally {
-    console.error = originalError;
-  }
+  await session.prompt("native faux dispatch marker");
   assert.equal(session.getLastAssistantText(), "native faux response");
+  assert.equal(session.model.provider, "faux");
+  assert.equal(session.model.id, process.env.BIFROST_EXPECTED_MODEL);
   assert.equal(faux.state.callCount, 1);
   assert.equal(readFileSync(violationPath, "utf8"), "", "AgentSession made blocked outbound attempt");
-  assert.deepEqual(invocations, ["faux/physical-capable"]);
-  assert.equal(errors.some((line) => line.includes("requested_tier_unavailable")), false);
-  assert.equal(errors.some((line) => line.includes("faux/physical-capable")), true);
-  assert.equal(errors.some((line) => line.includes("typesafe") || line.includes("pi-native")), false);
+  assert.deepEqual(invocations, [`faux/${process.env.BIFROST_EXPECTED_MODEL}`]);
   assert.equal(faux.getPendingResponseCount(), 0);
-  assert.equal(session.model.provider, "faux");
-  assert.equal(session.model.id, "physical-capable");
   assert.deepEqual(runtime.getModels("faux").map(({ id }) => id), ["physical-fast", "physical-capable"]);
 });

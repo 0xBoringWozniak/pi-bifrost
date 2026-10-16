@@ -70,10 +70,23 @@ it("routes real AgentSession behind tested HTTP, HTTPS, TCP, and UDP outbound fe
     assert.match(attempts, /blocked socket connection to 127\.0\.0\.1:/);
     assert.match(attempts, /blocked UDP datagram to 127\.0\.0\.1/);
 
-    writeFileSync(violations, "");
-    const result = await runNode(["--test", "--experimental-strip-types", child], { cwd: root, env: isolatedEnv });
-    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.equal(readFileSync(violations, "utf8"), "", "faux AgentSession made blocked outbound attempt");
+    for (const testCase of [
+      // pi-subagents 0.77.0 producer marker: child host must preserve Pi's
+      // explicitly selected physical model, even without a run id.
+      { expectedModel: "physical-fast", child: "1" },
+      // Ordinary parent sessions, including empty marker values, still route.
+      { expectedModel: "physical-capable" },
+      { expectedModel: "physical-capable", child: "" },
+    ]) {
+      writeFileSync(violations, "");
+      const childEnv = { ...isolatedEnv, BIFROST_EXPECTED_MODEL: testCase.expectedModel };
+      delete childEnv.PI_SUBAGENT_RUN_ID;
+      if (testCase.child === undefined) delete childEnv.PI_SUBAGENT_CHILD;
+      else childEnv.PI_SUBAGENT_CHILD = testCase.child;
+      const result = await runNode(["--test", "--experimental-strip-types", child], { cwd: root, env: childEnv });
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.equal(readFileSync(violations, "utf8"), "", "faux AgentSession made blocked outbound attempt");
+    }
   } finally {
     for (const [name, value] of Object.entries(previousCredentials)) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;

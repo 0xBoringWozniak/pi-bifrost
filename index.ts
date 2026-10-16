@@ -3626,6 +3626,29 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       strictBoundary = false;
       return { action: "continue" };
     }
+    // pi-subagents 0.77.0 sets PI_SUBAGENT_CHILD=1 in its async child
+    // runner (src/runs/background/subagent-runner.js). Scope this bypass to
+    // that verified child-host marker; PI_SUBAGENT_RUN_ID is not a producer
+    // contract in the installed SDK and must not drive routing decisions.
+    // The bypass preserves a child host's fixed physical model identity, but
+    // an explicitly selected bifrost/auto child owns per-request virtual
+    // dispatch (including the inline tier handoff below), so only physical
+    // selections take the early return.
+    const explicitSubagentChild = process.env.PI_SUBAGENT_CHILD === "1" && !isBifrostAuto(ctx.model);
+    if (explicitSubagentChild) {
+      debug("input", "subagent", {
+        source: "PI-subagent",
+        agent: process.env.PI_SUBAGENT_CHILD_AGENT,
+        model: modelKey(ctx.model),
+        thinkingLevel: ctx.thinkingLevel,
+        depth: process.env.PI_SUBAGENT_PARENT_DEPTH,
+      });
+      routeBoundary = false;
+      strictBoundary = false;
+      debug("input", "bypass", { enabled: state.enabled, pinned: state.pinned, reason: "subagent_child_host" });
+      syncBifrostModeStatus(ctx, state);
+      return { action: "continue" };
+    }
     if (providerCooldownsEnabled()) {
       try { await ensureProviderAllowanceImports(); }
       catch {
@@ -3643,17 +3666,6 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     clearBifrostWidgets(ctx);
     const activeBootstrap = autoBootstrapBySession.get(ctx.sessionManager);
     if (activeBootstrap) renderAutoBootstrapProgress(ctx, activeBootstrap);
-    // Passive subagent observation — logged even when routing is disabled,
-    // so child-session model usage stays visible in debug logs.
-    if (process.env.PI_SUBAGENT_RUN_ID) {
-      debug("input", "subagent", {
-        source: "PI-subagent",
-        agent: process.env.PI_SUBAGENT_CHILD_AGENT,
-        model: modelKey(ctx.model),
-        thinkingLevel: ctx.thinkingLevel,
-        depth: process.env.PI_SUBAGENT_PARENT_DEPTH,
-      });
-    }
     if (!state.enabled || state.pinned) {
       const pinnedModel = ctx.model;
       if (state.enabled && state.pinned && pinnedModel && !isVirtualModel(pinnedModel) && providerCooldownsEnabled()) {
