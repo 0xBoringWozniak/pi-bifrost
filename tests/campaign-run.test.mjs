@@ -57,6 +57,10 @@ test("rejects out-of-bounds repeat, seed base, timeout, and name values", () => 
 test("derives distinct, replayable, in-range seeds from one seed base", () => {
   assert.equal(MAX_REPEAT, 5, "the campaign repeat count stays hard-bounded");
   const seeds = Array.from({ length: MAX_REPEAT }, (_, attempt) => deriveSeed(1729, attempt));
+  assert.equal(seeds[0], 1729, "attempt zero must use the requested seed base");
+  assert.equal(deriveSeed(0, 0), 0);
+  assert.equal(deriveSeed(SIGNED_32_MIN, 0), SIGNED_32_MIN);
+  assert.equal(deriveSeed(SIGNED_32_MAX, 1), -2_146_441_106, "overflow must wrap to signed32");
   assert.equal(new Set(seeds).size, MAX_REPEAT, "derived seeds must be distinct");
   assert.deepEqual(seeds, Array.from({ length: MAX_REPEAT }, (_, attempt) => deriveSeed(1729, attempt)));
   for (const seed of [...seeds, deriveSeed(0, 0), deriveSeed(SIGNED_32_MAX, 4), deriveSeed(SIGNED_32_MIN, 0)]) {
@@ -144,6 +148,21 @@ test("propagates a failing attempt as a failing campaign with honest counts", (t
   const failure = campaign.attempts.find((attempt) => attempt.status === "failed");
   assert.equal(failure.exitCode, 3);
   assert.match(readFileSync(failure.logFile, "utf8"), /status: failed \(exit 3\)/u);
+});
+
+test("stops before spawning another attempt after failure", (t) => {
+  const out = withOutDir(t);
+  const receipts = join(out, "spawn-receipts.txt");
+  const result = run([
+    "--name", "fail-fast", "--repeat", "3", "--seed-base", "1729", "--out", out,
+    "--", process.execPath, "-e",
+    "require('node:fs').appendFileSync(process.argv[1], 'spawned\\n'); process.exit(3)", receipts,
+  ]);
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(readFileSync(receipts, "utf8"), "spawned\n", "only one real child must start");
+  const campaign = readCampaign(out, "fail-fast");
+  assert.equal(campaign.summary.attempted, 1);
+  assert.equal(campaign.summary.failed, 1);
 });
 
 test("bounds a hung attempt and fails the campaign instead of waiting forever", (t) => {

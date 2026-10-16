@@ -53,8 +53,7 @@ export function deriveSeed(seedBase, attempt) {
   if (!Number.isSafeInteger(attempt) || attempt < 0) {
     throw new Error(`attempt must be a non-negative integer, received: ${JSON.stringify(attempt)}`);
   }
-  const wrapped = (((seedBase + attempt * SEED_STRIDE) % 2 ** 32) + 2 ** 32) % 2 ** 32;
-  return wrapped - 2 ** 31;
+  return Number(BigInt.asIntN(32, BigInt(seedBase) + BigInt(attempt) * BigInt(SEED_STRIDE)));
 }
 
 function assertOutsideRepository(out) {
@@ -172,6 +171,7 @@ export async function runCampaign(config, { log = (line) => process.stdout.write
   })();
   const sourceBefore = sourceFingerprint(ROOT);
   const attempts = [];
+  let aborted = null;
   for (let index = 0; index < config.repeat; index++) {
     const seed = config.seeds[index];
     const attemptStartedAt = new Date().toISOString();
@@ -199,6 +199,22 @@ export async function runCampaign(config, { log = (line) => process.stdout.write
       processCleanupFailed: result.processCleanupFailed === true,
     });
     log(`campaign ${config.name} attempt ${index + 1}/${config.repeat} seed=${seed} status=${status} exit=${result.status} elapsed-ms=${elapsedMs}`);
+    // A campaign only produces valid evidence when each attempt passes, cleans
+    // up its child process group, and leaves the source tree byte-stable.
+    // Abort before launching another attempt; do not merely record the failure.
+    if (status !== "passed") {
+      aborted = `attempt ${index + 1} did not pass (status=${status}, exit=${result.status})`;
+      break;
+    }
+    if (result.processCleanupFailed === true) {
+      aborted = `attempt ${index + 1} left an owned child process group behind`;
+      break;
+    }
+    const sourceAfterAttempt = sourceFingerprint(ROOT);
+    if (sourceAfterAttempt !== sourceBefore) {
+      aborted = `source tree changed during attempt ${index + 1}`;
+      break;
+    }
   }
   const sourceAfter = sourceFingerprint(ROOT);
   const summary = {
@@ -206,7 +222,9 @@ export async function runCampaign(config, { log = (line) => process.stdout.write
     passed: attempts.filter((attempt) => attempt.status === "passed").length,
     failed: attempts.filter((attempt) => attempt.status === "failed").length,
     timeout: attempts.filter((attempt) => attempt.status === "timeout").length,
-    exitCode: attempts.every((attempt) => attempt.status === "passed") ? 0 : 1,
+    aborted,
+    validEvidence: aborted === null && sourceBefore === sourceFingerprint(ROOT) && attempts.every((attempt) => attempt.status === "passed"),
+    exitCode: aborted === null && attempts.every((attempt) => attempt.status === "passed") ? 0 : 1,
   };
   const campaign = {
     name: config.name,
@@ -224,6 +242,8 @@ export async function runCampaign(config, { log = (line) => process.stdout.write
     gitRevision: revision,
     source: sourceBefore,
     sourceAfter,
+    aborted,
+    validEvidence: aborted === null && sourceBefore === sourceFingerprint(ROOT),
     changedDuringRun: sourceBefore !== sourceAfter,
     startedAt: new Date(startedAtMs).toISOString(),
     finishedAt: new Date().toISOString(),
@@ -233,7 +253,7 @@ export async function runCampaign(config, { log = (line) => process.stdout.write
   };
   const evidencePath = join(campaignDir, "campaign.json");
   writeFileSync(evidencePath, JSON.stringify(campaign, null, 2) + "\n");
-  log(`campaign ${config.name}: ${summary.passed}/${summary.attempted} passed, ${summary.failed} failed, ${summary.timeout} timed out (${campaign.elapsedMs}ms)`);
+  log(`campaign ${config.name}: ${summary.passed}/${summary.attempted} passed, ${summary.failed} failed, ${summary.timeout} timed out, valid-evidence=${summary.validEvidence} (${campaign.elapsedMs}ms)`);
   log(`campaign evidence: ${relative(ROOT, evidencePath) || evidencePath}`);
   return { campaign, evidencePath };
 }
