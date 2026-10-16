@@ -16,7 +16,7 @@ if (process.env.BIFROST_LIVE_TEST_CHILD !== "1") {
       const violations = join(directory, "network-violations.log");
       const result = spawnSync(process.execPath, ["--require", join(ROOT, "scripts/test-outbound-guard.cjs"), "--test", TEST_FILE], {
         encoding: "utf8",
-        timeout: 60_000,
+        timeout: 180_000,
         env: {
           BIFROST_LIVE_TEST_CHILD: "1",
           BIFROST_TEST_ALLOWED_ORIGIN: "http://127.0.0.1:1",

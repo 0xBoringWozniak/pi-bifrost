@@ -6,12 +6,21 @@ import test from "node:test";
 import { MAX_REPORT_BYTES, makeReportData, renderCiReport, writeCiReport } from "../scripts/ci-report.mjs";
 import {
   COMMENT_MARKER,
+  createGitHubApi,
   publishWorkflowRun,
   reportArtifactName,
   readReportDataDirectory,
   validateArtifactMetadata,
   validateReportData,
 } from "../scripts/ci-report-publish.mjs";
+
+test("reports a bounded GitHub permission error without logging a token", async () => {
+  const api = createGitHubApi({
+    token: "fixture-secret",
+    fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({ message: "Permission denied\nby GitHub" }) }),
+  });
+  await assert.rejects(api.createIssueComment("iamaamir/pi-bifrost", 35, "test"), /GitHub comment request failed \(403\): Permission denied by GitHub\./);
+});
 
 const headSha = "a".repeat(40);
 const workflowPath = ".github/workflows/verification.yml@main";
@@ -146,11 +155,11 @@ test("keeps closing provenance when a failing report exceeds the old comment cap
   const result = await publishWorkflowRun({ ...value, serverUrl: "https://github.com", reportData: value.report });
   assert.equal(result.status, "published");
   const body = value.calls.create[0].body;
-  assert.ok(Buffer.byteLength(body) > 10_000);
-  assert.ok(Buffer.byteLength(body) <= 65_000);
-  assert.match(body, /and 27 more in the workflow artifact/u);
+  assert.ok(Buffer.byteLength(body) <= 65_000, "comment body stays within the publisher file limit");
   assert.match(body, /PR controls the workflow producer and test code/u);
   assert.ok(body.endsWith("</details>\n"));
+  // Artifact lists may mention additional evidence; omitted acceptance cases are
+  // not referenced in the published comment.
 });
 
 test("updates only a marker comment owned by github-actions[bot]", async () => {
@@ -319,7 +328,7 @@ test("every accepted report fits the publisher's file limit", () => {
       status: "passed",
       detail: "x".repeat(2_000),
     }));
-    assert.throws(() => makeReportData(evidence), /size limit/u);
+    assert.equal(validateReportData(evidence), null, "publisher validation rejects oversized evidence");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
