@@ -1122,6 +1122,44 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     }
   });
 
+  it("surfaces malformed SSE as one failed provider attempt without replay", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-auto-malformed-sse-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-auto-malformed-sse-work-"));
+    try {
+      writeFixture({
+        home, work, port: server.port,
+        models: [
+          { id: "malformed-sse", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
+          { id: "zz-healthy", reasoning: false, cost: { input: 20, output: 20, cacheRead: 0, cacheWrite: 0 } },
+        ],
+        bifrost: {
+          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+          models: { quick: ["fake/malformed-sse", "fake/zz-healthy"] },
+          categoryStrategies: { quick: "cheapest" },
+          reliability: {
+            enabled: true, allowanceCooldownScope: "model", retryOnAllowanceExhausted: true,
+            failureThreshold: 1, windowMinutes: 5, cooldownMinutes: 60,
+          },
+        },
+      });
+      const before = await fakeStats(server.port);
+      const result = await runAuto({ home, work, messages: ["malformed transport request"] });
+      const after = await fakeStats(server.port);
+      assert.equal(result.code, 1, result.stderr);
+      assert.equal(result.stdout.trim(), "");
+      assert.match(result.stderr, /Bifrost auto: quick → fake\/malformed-sse/);
+      assert.match(result.stderr, /Error reading response: malformed server-sent event JSON\./);
+      assert.equal((after.attempts["malformed-sse"] ?? 0) - (before.attempts["malformed-sse"] ?? 0), 1, result.stderr);
+      assert.equal((after.attempts["zz-healthy"] ?? 0) - (before.attempts["zz-healthy"] ?? 0), 0, "parser failure must not trigger allowance recovery");
+      const generationStats = after.stats.slice(before.stats.length).filter((item) => item.kind === "generation");
+      assert.deepEqual(generationStats.map(({ model }) => model), ["malformed-sse"], "malformed SSE must not trigger additional generation requests");
+      assert.equal(generationStats.length, 1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
   it("opens the circuit on failure and visibly degrades to the last dispatched model", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-auto-home-"));
     const work = mkdtempSync(join(tmpdir(), "bifrost-auto-work-"));
