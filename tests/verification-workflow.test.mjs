@@ -180,3 +180,12 @@ test("the schedule is bounded to one daily run and needs no secrets", () => {
   assert.doesNotMatch(workflow, /secrets\./u, "campaign jobs must not consume repository secrets");
   assert.match(workflow, /^permissions:\n {2}contents: read$/mu, "permissions stay read-only");
 });
+
+test("verification campaign docs state the default-branch schedule boundary", () => {
+  const doc = readFileSync(new URL("../docs/verification-campaign.md", import.meta.url), "utf8");
+  assert.match(doc, /default branch/u, "docs must explain where scheduled runs execute");
+  assert.match(doc, /Scheduled workflows will only run\s+on the default branch/u, "docs must quote the only-default-branch rule");
+  assert.match(doc, /`v2` is not the default branch/u, "docs must state that v2 is not the default branch");
+  assert.match(doc, /pending/u, "docs must state pending activation");
+  assert.match(doc, /no\s+active\s+cron/u, "docs must not claim a live nightly run");
+});
