@@ -199,7 +199,7 @@ export function runChild(command, args, {
       resolveResult({
         status: cleanupFailed ? 1 : timedOut ? 124 : receivedSignal ? signalExitCode(receivedSignal) : reporterLineTooLarge || reporterEventOverflowed ? 1 : code ?? 1,
         stdout: stdout.text(),
-        stderr: (timedOut ? stderr.text() + "\nVerification gate timed out after 20 minutes." : signal ? stderr.text() + `\nProcess ended by ${signal}.` : stderr.text())
+        stderr: (timedOut ? stderr.text() + `\nCommand timed out after ${timeoutMs} ms.` : signal ? stderr.text() + `\nProcess ended by ${signal}.` : stderr.text())
           + (cleanupFailed ? "\nCould not confirm that the child process group terminated." : ""),
         outputTruncated: stdout.truncated() || stderr.truncated(),
         reporterLineTooLarge,
