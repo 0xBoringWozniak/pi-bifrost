@@ -430,7 +430,7 @@ describe("model selection properties", () => {
             }
           },
         ),
-        { seed: 1408, path: "127:0:63:63:63:63", numRuns: 250 },
+        { numRuns: 250 },
       );
     });
 

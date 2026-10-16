@@ -69,6 +69,50 @@ This test uses a local fake provider and `agent-tui`. It sets `PI_OFFLINE=1` and
 
 `npm run test:ui:agent-tui` is a separate proof of concept. It uses the local Ollama model `gemma4:12b-mlx`. It does not replace `npm run test:ui`.
 
+## CRAP analysis
+
+CRAP (Change Risk Anti-Patterns) ranks functions by change risk: complex functions with low unit-test coverage score high. The score is `CC^2 * (1 - coverage)^3 + CC`, where `CC` is cyclomatic complexity and coverage is statement-level for that function's own statements. A score at or above 30 is the classic "CRAP-y" threshold.
+
+Settings live in the `crap` block of `package.json`, so they are configurable without editing the script:
+
+```json
+"crap": {
+  "threshold": 30,
+  "coverage": "coverage/coverage-final.json",
+  "failAbove": null,
+  "history": "docs/quality/crap-history.jsonl"
+}
+```
+
+`threshold` flags functions at or above that score. `coverage` names the c8 report to read. `failAbove` is the optional gate: `null` means the report stays advisory; a number makes the command exit 1 when any function scores above it.
+
+Why 30 is the default: Alberto Savoia and Bob Evans, who introduced the metric and the crap4j tool in 2007, chose it empirically after reviewing their code and many open source projects, and called it a starting point rather than a derived constant. It is tunable configuration here for that reason.
+
+The number is still self-consistent. A fully covered function scores exactly its own complexity, so a threshold of 30 also caps the complexity worth testing at 30: a function of complexity 31 or more cannot comply with any amount of testing. The authors' table agrees: complexity 10 needs 42% coverage, 20 needs 71%, and 26-30 needs 100%. Source: the [crap4j FAQ](http://www.crap4j.org/faq.html).
+
+One calibration caveat: crap4j measured basis path coverage, while this report uses statement coverage from c8. Statement coverage is usually higher for the same tests, so scores here are slightly more optimistic than the original table implies. Treat the number as a ranking aid, not a converted measurement.
+
+Precedence is CLI flag, then the `crap` block, then the built-in default. Run the unit tests with coverage, then generate the report:
+
+```bash
+npm run crap                 # coverage run + report
+npm run test:coverage        # coverage only (writes coverage/coverage-final.json)
+node scripts/crap-report.mjs # report from existing coverage data
+node scripts/crap-report.mjs --all            # list every function, not only above threshold
+node scripts/crap-report.mjs --threshold 50   # override the flagged threshold once
+node scripts/crap-report.mjs --fail-above 30  # override the gate once
+npm run crap:record          # coverage run, then append a snapshot to the history
+npm run crap:trend           # print the snapshot history as a table
+```
+
+The history records one line per snapshot: revision, whether the tree was dirty, threshold, function count, flagged count, share, and the worst score. `--trend` reads only that file, so it needs no test run and works without coverage data.
+
+Snapshots answer whether quality is improving or drifting: the table shows the change in flagged functions between consecutive snapshots and the overall direction from the first to the last. A revision marked `*` was recorded with uncommitted changes, so it describes no frozen candidate.
+
+Every run prints the effective settings and where each value came from. Invalid configuration exits 2 with a clear message.
+
+The report covers the top-level `*.ts` package sources. Files absent from the coverage data count as 0% coverage. Coverage data under `coverage/` is gitignored. The formula, precedence and validation tests live in `tests/crap-report.test.mjs`.
+
 ## Build the router package
 
 The router build creates files in `dist/router/`:

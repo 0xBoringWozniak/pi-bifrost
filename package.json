@@ -49,10 +49,19 @@
     "minPiVersion": "1.0.1",
     "image": "https://iamaamir.github.io/pi-bifrost/social-card.png"
   },
+  "crap": {
+    "threshold": 30,
+    "coverage": "coverage/coverage-final.json",
+    "history": "docs/quality/crap-history.jsonl"
+  },
   "scripts": {
     "build:router": "node scripts/build-router.mjs",
     "prepack": "npm run build:router",
     "test": "node --test --experimental-strip-types \"tests/*.test.ts\" \"tests/*.test.mjs\"",
+    "test:coverage": "c8 --reporter=json --reporter=text node --test --experimental-strip-types \"tests/*.test.ts\" \"tests/*.test.mjs\"",
+    "crap": "npm run test:coverage && node scripts/crap-report.mjs",
+    "crap:record": "npm run test:coverage && node scripts/crap-report.mjs --record",
+    "crap:trend": "node scripts/crap-report.mjs --trend",
     "test:integration": "node --test --experimental-strip-types tests/integration/*.test.mjs",
     "test:ui": "python3 scripts/ui-smoke.py",
     "test:ui:agent-tui": "bash scripts/ui-smoke-agent-tui.sh",
@@ -75,6 +84,7 @@
     "@earendil-works/pi-coding-agent": "1.0.1",
     "@types/node": "^26.1.1",
     "agent-tui": "^1.1.0",
+    "c8": "^12.0.0",
     "fast-check": "4.10.2",
     "typescript": "6.0.3"
   }
