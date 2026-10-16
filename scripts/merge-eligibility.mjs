@@ -127,6 +127,7 @@ function getReviews(repo, number) {
 
 export function getReviewThreads(repo, number, query = ghJson) {
   const threads = [];
+  const cursors = new Set();
   let cursor;
   do {
     const result = query(["api", "graphql", "-f", "query=query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}",
@@ -138,8 +139,9 @@ export function getReviewThreads(repo, number, query = ghJson) {
       || (pageInfo.endCursor !== null && (typeof pageInfo.endCursor !== "string" || !pageInfo.endCursor))) {
       throw new Error("Review thread pagination unavailable");
     }
+    if (pageInfo.hasNextPage && (!pageInfo.endCursor || cursors.has(pageInfo.endCursor))) throw new Error("Review thread pagination unavailable");
+    cursors.add(pageInfo.endCursor);
     threads.push(...page.nodes);
-    if (pageInfo.hasNextPage && !pageInfo.endCursor) throw new Error("Review thread pagination unavailable");
     cursor = pageInfo.hasNextPage ? pageInfo.endCursor : null;
   } while (cursor);
   return threads;

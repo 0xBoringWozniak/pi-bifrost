@@ -154,6 +154,19 @@ test("review-thread pagination requires explicit valid page metadata", () => {
   assert.deepEqual(threads, [{ isResolved: true }, { isResolved: false }]);
 });
 
+test("review-thread pagination rejects repeated cursors before requesting a page again", () => {
+  for (const cursors of [["cursor-1", "cursor-1"], ["cursor-1", "cursor-2", "cursor-1"]]) {
+    let calls = 0;
+    assert.throws(() => getReviewThreads("org/repo", 48, () => {
+      assert.ok(calls < cursors.length, "pagination requested a repeated page");
+      return { data: { repository: { pullRequest: { reviewThreads: {
+        nodes: [], pageInfo: { hasNextPage: true, endCursor: cursors[calls++] },
+      } } } } };
+    }), /Review thread pagination unavailable/);
+    assert.equal(calls, cursors.length);
+  }
+});
+
 test("CLI main-module detection works when script path contains spaces", () => {
   const temp = mkdtempSync(join(tmpdir(), "merge-eligibility-cli-"));
   try {
