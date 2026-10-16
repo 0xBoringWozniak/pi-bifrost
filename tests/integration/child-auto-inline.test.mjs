@@ -765,14 +765,18 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
     }
   });
 
-  it("fails a bounded run and reaps the owned descendant holding inherited pipes", async () => {
+  for (const scenario of [
+    { name: "fails a bounded run and reaps the owned descendant holding inherited pipes", delayMs: 0 },
+    { name: "waits for descendant readiness beyond the old run window", delayMs: 1_500 },
+    { name: "fails boundedly and reaps the owned descendant when readiness never arrives", delayMs: 0, neverReady: true },
+  ]) it(scenario.name, async (t) => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-child-descendant-home-"));
     const pidFile = join(home, "descendant.pid");
     let pendingError = null;
+    let runError;
     try {
-      // The stand-in CLI exits while a descendant it spawned keeps the
-      // inherited stdout pipe open, so the runner's close never arrives on its
-      // own. The outer bound keeps the regression from hanging the suite.
+      // Delay is negative stimulus; only the fixture's receipt-backed record
+      // starts the unchanged one-second run window.
       const run = runPi({
         home,
         work: home,
@@ -781,16 +785,26 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
         child: "1",
         command: execPath,
         args: [DESCENDANT_CLI],
+        readyRecord: "descendant-ready\n",
+        startupMs: 3_000,
         windowMs: 1_000,
         terminationGraceMs: 200,
-        extraEnv: { BIFROST_DESCENDANT_PID_FILE: pidFile },
+        extraEnv: {
+          BIFROST_DESCENDANT_PID_FILE: pidFile,
+          BIFROST_DESCENDANT_STARTUP_DELAY_MS: String(scenario.delayMs),
+          BIFROST_DESCENDANT_NEVER_READY: scenario.neverReady ? "1" : "0",
+        },
       });
       await assert.rejects(
         withBound(run, 30_000, "runPi stayed pending after its bounded window and owned termination"),
-        /exceeded the bounded run window/,
-        "a run whose owned descendant holds the pipes must fail, not stay pending",
+        (error) => {
+          runError = error;
+          t.diagnostic(JSON.stringify({ ownedGroup: error.ownedGroup, verified: error.verified, scratchPaths: error.scratchPaths }));
+          assert.match(error.message, scenario.neverReady ? /exceeded the bounded startup window/ : /exceeded the bounded run window/);
+          assert.equal(error.verified, true, "cleanup must observe close and prove owned group death");
+          return true;
+        },
       );
-      // The descendant must actually be gone, not merely unobserved.
       const pid = Number(readFileSync(pidFile, "utf8"));
       assert.ok(Number.isInteger(pid) && pid > 0, "the fixture must record its descendant pid");
       assert.throws(
@@ -802,14 +816,11 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       pendingError = error;
       throw error;
     } finally {
-      if (existsSync(home)) {
-        const reaped = await reapRecordedDescendant(pidFile);
-        if (!reaped) {
-          if (pendingError) throw pendingError;
-          throw new Error(`refusing to delete scratch while recorded descendant from ${pidFile} still alive: ${home}`);
-        }
-        rmSync(home, { recursive: true, force: true });
+      if (runError?.verified !== true || !Number.isInteger(runError.ownedGroup) || runError.ownedGroup <= 0 || processGroupExists(runError.ownedGroup)) {
+        if (pendingError) throw pendingError;
+        throw new Error(`refusing to delete scratch without verified owned-group cleanup: ${home}`);
       }
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

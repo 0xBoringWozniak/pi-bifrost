@@ -314,7 +314,7 @@ function writeFixture({ home, work, port }) {
   }));
 }
 
-function runPi({ home, work, model, prompt, child, command = PI, args, windowMs = 60_000, terminationGraceMs = 5_000, extraEnv = {} }) {
+function runPi({ home, work, model, prompt, child, command = PI, args, windowMs = 60_000, terminationGraceMs = 5_000, readyRecord, startupMs = 3_000, extraEnv = {} }) {
   const violations = join(home, "test-network-violations.log");
   writeFileSync(violations, "");
   const env = {
@@ -342,6 +342,7 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let waitingForReady = readyRecord !== undefined;
     let spawnError;
     let settled = false;
     const finish = (settle, value) => {
@@ -352,7 +353,14 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
     };
     childProcess.stdout.setEncoding("utf8");
     childProcess.stderr.setEncoding("utf8");
-    childProcess.stdout.on("data", (chunk) => { stdout += chunk; });
+    childProcess.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (waitingForReady && !timedOut && stdout.includes(readyRecord)) {
+        waitingForReady = false;
+        clearTimeout(timer);
+        timer = setTimeout(onTimeout, windowMs);
+      }
+    });
     childProcess.stderr.on("data", (chunk) => { stderr += chunk; });
     childProcess.on("error", (error) => { spawnError = error; });
     // Bounded termination: SIGTERM, then SIGKILL after the grace window, and
@@ -361,7 +369,9 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
     // SIGTERM and keeps running fails the run instead of settling on a close
     // event that proves nothing.
     const lifecycle = closeTracking(childProcess);
-    const timeoutDetail = () => `Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`;
+    const timeoutDetail = () => waitingForReady
+      ? `Pi exceeded the bounded startup window before readiness (stdout=${stdout.length}, stderr=${stderr.length})`
+      : `Pi exceeded the bounded run window and was force-killed after SIGTERM (stdout=${stdout.length}, stderr=${stderr.length})`;
     // Every settlement path — success, assertion failure, spawn error and
     // timeout — goes through this, so none of them can settle or delete a
     // scratch while a member of the owned group is still alive. An unverified
@@ -391,10 +401,12 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
       error.scratchPaths = scratchPaths;
       finish(reject, error);
     };
-    const timer = setTimeout(() => {
+    const onTimeout = () => {
       timedOut = true;
       void settleClean(timeoutDetail());
-    }, windowMs);
+    };
+    // Readiness is opt-in; ordinary callers retain their spawn-based deadline.
+    let timer = setTimeout(onTimeout, waitingForReady ? startupMs : windowMs);
     childProcess.on("close", async (code) => {
       if (spawnError) {
         await settleClean(spawnError.message);
@@ -405,6 +417,10 @@ function runPi({ home, work, model, prompt, child, command = PI, args, windowMs 
         // that closed the inherited pipes. Await the same coordinated
         // termination the timeout path started; it decides the message.
         await settleClean(timeoutDetail());
+        return;
+      }
+      if (waitingForReady) {
+        await settleClean("Pi exited before readiness");
         return;
       }
       try {
