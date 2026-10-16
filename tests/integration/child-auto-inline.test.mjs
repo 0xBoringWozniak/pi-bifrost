@@ -816,7 +816,11 @@ describe("explicit child host keeps Auto inline overrides", { timeout: 300_000, 
       pendingError = error;
       throw error;
     } finally {
-      retainOrRemoveScratch({ paths: [home], ownedGroup: runError?.ownedGroup, runSettled: true, pendingError });
+      if (runError?.verified !== true || !Number.isInteger(runError.ownedGroup) || runError.ownedGroup <= 0 || processGroupExists(runError.ownedGroup)) {
+        if (pendingError) throw pendingError;
+        throw new Error(`refusing to delete scratch without verified owned-group cleanup: ${home}`);
+      }
+      rmSync(home, { recursive: true, force: true });
     }
   });
 
