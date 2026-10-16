@@ -1,6 +1,6 @@
 # Bounded verification campaigns
 
-Issue #85. The `Verification` workflow on `main` and `v2` gained an opt-in
+Issue #85. The `Verification` workflow gains an opt-in
 expanded campaign, a pinned Pi compatibility matrix, and an opt-in mutation
 experiment, all using the existing workflow path. No standalone workflow was
 added, and all seven release gates plus the proposed-merge report publisher
@@ -12,9 +12,9 @@ Use the existing dispatch path with `--ref` to run the workflow version from any
 branch (the workflow file must exist on the default branch first):
 
 ```bash
-gh workflow run verification.yml --ref phase/completion-campaigns \\
-  -f campaign=expanded \\
-  -f campaign_repeats=3 \\
+gh workflow run verification.yml --ref integration/completion-verification \
+  -f campaign=expanded \
+  -f campaign_repeats=3 \
   -f campaign_seed=1729
 ```
 
@@ -57,8 +57,8 @@ unset it changes nothing, so the ordinary `npm test` path is unchanged.
 
 Campaign attempts set `FC_SEED` per run through `scripts/campaign-run.mjs`.
 The seed for attempt `n` is `seed(base) + n * 1042543`, starting with attempt 0
-exactly equal to the configured base; every value must stay in the signed 32-bit
-input range to be replayable. `campaign.json` records each derived seed, so a
+exactly equal to the configured base; the result wraps into the signed 32-bit
+range. `campaign.json` records each derived seed, so a
 failure replays under `FC_SEED=<seed>` with NODE_OPTIONS carrying the preload.
 
 Please be truthful about what this varies:
@@ -83,8 +83,7 @@ surviving mutants were caught. Report and file log are uploaded on failure.
 ## Compatibility claims
 
 Normal release gates and `verify-release.mjs` keep pinned Pi `1.0.1`. The
-compatibility jobs are separate and run both `1.0.1` and the current `1.3.0`
-(independently verified current on the npm registry for both packages) against
+compatibility jobs are separate and run both pinned `1.0.1` and `1.3.0` against
 real native SDK, process, package-consumer, and typecheck tests. `verify-release`
 is intentionally not used as an alternate-version oracle. This does not make a
 broad compatibility claim beyond those executed checks.
@@ -108,5 +107,3 @@ cleanup result in `campaign.json` plus a per-attempt log. The evidence directory
 is written outside the repository. A campaign is marked `validEvidence`: false
 and aborted whenever an attempt fails, leaves a child process group, or the
 source tree changes; it never runs a later attempt after one of those.
-EOF
-echo "written"; ls -l /Users/mak/.paseo/verification/completion/campaigns/docs/verification-campaign.md

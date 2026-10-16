@@ -43,6 +43,7 @@ function runNode(args, options = {}) {
     let exitSignal = null;
     let deadlineExceeded = false;
     let settled = false;
+    let closeObserved = false;
     let timer = null;
 
     if (childProcess.stdout) childProcess.stdout.setEncoding("utf8");
@@ -52,6 +53,7 @@ function runNode(args, options = {}) {
 
     const closePromise = new Promise((resolveClose) => {
       childProcess.once("close", (code, signal) => {
+        closeObserved = true;
         exitCode = code;
         exitSignal = signal;
         resolveClose();
@@ -62,20 +64,32 @@ function runNode(args, options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      let groupGone = !Number.isInteger(groupId) || groupId <= 0 || process.platform === "win32";
-      if (!groupGone) {
+      // Group absence is a POSIX observation, never inferred from the platform.
+      let groupGone = false;
+      if (process.platform !== "win32" && Number.isInteger(groupId) && groupId > 0) {
         groupGone = await waitForGroupGone(groupId, 500);
-        if (!groupGone) groupGone = await terminateProcessGroup(childProcess, { graceMs: 2_000, cleanupTimeoutMs: 5_000 });
+        if (!groupGone) {
+          try { await terminateProcessGroup(childProcess, { graceMs: 2_000, cleanupTimeoutMs: 5_000 }); } catch {}
+          groupGone = !processGroupExists(groupId);
+        }
       }
-      try { childProcess.unref(); } catch {}
-      resolve({ status: exitCode, signal: exitSignal, stdout, stderr, deadlineExceeded, groupId, groupGone });
+      if (!closeObserved) {
+        let drainTimer;
+        await Promise.race([closePromise, new Promise(resolveDrain => { drainTimer = setTimeout(resolveDrain, 500); })]);
+        clearTimeout(drainTimer);
+      }
+      // Inherited pipes must not keep the parent alive after denied cleanup.
+      if (!closeObserved) {
+        childProcess.stdout?.destroy();
+        childProcess.stderr?.destroy();
+      }
+      childProcess.unref();
+      resolve({ status: exitCode, signal: exitSignal, stdout, stderr, deadlineExceeded, groupId, groupGone, closeObserved });
     }
 
-    timer = setTimeout(async () => {
+    timer = setTimeout(() => {
       deadlineExceeded = true;
-      try { await terminateProcessGroup(childProcess, { graceMs: 2_000, cleanupTimeoutMs: 5_000 }); } catch {}
-      await closePromise;
-      await settle();
+      void settle();
     }, timeoutMs);
 
     closePromise.then(() => { if (!deadlineExceeded) void settle(); });
@@ -99,7 +113,7 @@ it("routes real AgentSession turns by direct rules, tier override precedence, an
   async function runOwned(args, options) {
     try {
       const result = await runNode(args, options);
-      if (result.groupGone !== true) cleanupVerified = false;
+      if (result.groupGone !== true || result.closeObserved !== true) cleanupVerified = false;
       return result;
     } catch (error) {
       cleanupVerified = false;
@@ -111,7 +125,7 @@ it("routes real AgentSession turns by direct rules, tier override precedence, an
     const isolatedEnv = {
       PATH: process.env.PATH,
       HOME: join(scratch, "home"),
-      BIFROST_TEST_ALLOWED_ORIGIN: "http://127.0.0.1:1",
+      BIFROST_TEST_DENY_ALL: "1",
       BIFROST_TEST_NETWORK_VIOLATIONS: violations,
       BIFROST_NATIVE_LIFECYCLE_SCRATCH: scratch,
       NODE_OPTIONS: `--require=${guard}`,
@@ -123,42 +137,30 @@ it("routes real AgentSession turns by direct rules, tier override precedence, an
       const net = require("node:net");
       const tls = require("node:tls");
       const dgram = require("node:dgram");
+      const assert = require("node:assert/strict");
       (async () => {
-        for (const attempt of [
-          () => fetch("http://127.0.0.1:2"),
-          () => fetch("https://127.0.0.1:2"),
-          () => new net.Socket().connect({ port: 2, host: "127.0.0.1" }),
-          () => tls.connect({ port: 2, host: "127.0.0.1" }),
-          () => dgram.createSocket("udp4").send(Buffer.from("fixture"), 2, "127.0.0.1"),
-        ]) { try { await attempt(); } catch {} }
+        for (const url of ["http://127.0.0.1:2", "https://127.0.0.1:2"]) {
+          await assert.rejects(async () => fetch(url, { signal: AbortSignal.timeout(500) }), /blocked fetch/);
+        }
+        for (const socket of [new net.Socket(), new tls.TLSSocket()]) {
+          socket.on("error", () => {});
+          try { assert.throws(() => socket.connect({ port: 2, host: "127.0.0.1" }), /blocked socket connection/); }
+          finally { socket.destroy(); }
+        }
+        const udp = dgram.createSocket("udp4");
+        udp.on("error", () => {});
+        try { assert.throws(() => udp.send(Buffer.from("fixture"), 2, "127.0.0.1"), /blocked UDP datagram/); }
+        finally { try { udp.close(); } catch {} }
         if (${JSON.stringify(credentials)}.some((name) => process.env[name] !== undefined)) process.exitCode = 9;
-      })();
+      })().catch(error => { console.error(error); process.exitCode = 1; });
     `], { cwd: root, env: isolatedEnv });
     assert.equal(probe.deadlineExceeded, false, `guard probe must finish inside its bounded deadline\n${probe.stdout}\n${probe.stderr}`);
-    assert.equal(probe.groupGone, true, "guard probe process group must be gone before scratch deletion");
+    if (process.platform !== "win32") assert.equal(probe.groupGone, true, "guard probe process group must be gone before scratch deletion");
     assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
     const attempts = readFileSync(violations, "utf8");
     assert.match(attempts, /blocked fetch to https?:\/\/[^:\s]+:\d/);
     assert.match(attempts, /blocked socket connection to [^\s]+:\d/);
     assert.match(attempts, /blocked UDP datagram to/);
-
-    // Guard-loading negative control: with deny-all the previously allowed origin
-    // must itself be blocked and recorded. If the guard were not loaded, nothing
-    // would be recorded and the reachable origin would succeed.
-    writeFileSync(violations, "");
-    const denyAllEnv = { ...isolatedEnv, BIFROST_TEST_DENY_ALL: "1" };
-    delete denyAllEnv.BIFROST_TEST_ALLOWED_ORIGIN;
-    const denyAllProbe = await runOwned(["-e", `
-      (async () => {
-        let reached = false;
-        try { await fetch("http://127.0.0.1:1"); reached = true; } catch {}
-        if (reached) process.exitCode = 10;
-      })();
-    `], { cwd: root, env: denyAllEnv });
-    assert.equal(denyAllProbe.deadlineExceeded, false, `guard negative control must finish inside its bounded deadline\n${denyAllProbe.stdout}\n${denyAllProbe.stderr}`);
-    assert.equal(denyAllProbe.groupGone, true, "guard negative control process group must be gone before scratch deletion");
-    assert.equal(denyAllProbe.status, 0, `${denyAllProbe.stdout}\n${denyAllProbe.stderr}`);
-    assert.match(readFileSync(violations, "utf8"), /blocked fetch to http:\/\/127\.0\.0\.1:1/, "deny-all control must prove the outbound guard is loaded and enforcing");
 
     for (const scenario of [
       // Baseline: direct rules, inline tier precedence, and the default tier on a physical seed.
@@ -179,7 +181,7 @@ it("routes real AgentSession turns by direct rules, tier override precedence, an
         timeoutMs: DEADLINE_MS,
       });
       assert.equal(result.deadlineExceeded, false, `${scenario.name} must complete inside its bounded deadline\n${result.stdout}\n${result.stderr}`);
-      assert.equal(result.groupGone, true, `${scenario.name} owned process group must be gone before scratch deletion`);
+      if (process.platform !== "win32") assert.equal(result.groupGone, true, `${scenario.name} owned process group must be gone before scratch deletion`);
       assert.equal(result.status, 0, `${scenario.name}\n${result.stdout}\n${result.stderr}`);
       assert.equal(readFileSync(violations, "utf8"), "", `${scenario.name} AgentSession made a blocked outbound attempt`);
     }
