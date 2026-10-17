@@ -89,8 +89,11 @@ function readViolations(path) {
 /**
  * Start `scripts/fake-provider-server.mjs` and wait for its `{"port": N}` ready
  * record. Every server is a detached, creation-owned process group. Returns
- * `{ child, port, stop() }`; `stop()` later observes close and terminates the
- * owned group if it is still alive. It never deletes scratch.
+ * `{ child, port, stop() }`; `stop()` is a guarded shutdown — it terminates the
+ * owned group if it is still alive, then asserts the child closed AND the
+ * creation-owned group (`child.pid`) is absent before resolving, so a denied or
+ * failed cleanup throws instead of leaking a stray provider. It never deletes
+ * scratch.
  */
 export function startFakeProviderServer({ timeoutMs = PORT_DEADLINE_MS } = {}) {
   const child = spawn("node", [FAKE_PROVIDER_SERVER], { stdio: ["ignore", "pipe", "ignore"], detached: true });
@@ -104,8 +107,15 @@ export function startFakeProviderServer({ timeoutMs = PORT_DEADLINE_MS } = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      void stop({ graceMs: 0 });
-      reject(error);
+      // Guarded teardown on the failure path too: await the owned-group shutdown
+      // so its assertions cannot be lost, but never mask the startup error.
+      stop({ graceMs: 0 }).then(
+        () => reject(error),
+        (cleanupError) => reject(new AggregateError(
+          [error, cleanupError],
+          "fake provider startup failed and its owned group did not shut down cleanly",
+        )),
+      );
     };
     const timer = setTimeout(() => fail(new Error("fake provider startup timed out")), timeoutMs);
     child.stdout.setEncoding("utf8");
@@ -124,17 +134,28 @@ export function startFakeProviderServer({ timeoutMs = PORT_DEADLINE_MS } = {}) {
   });
 }
 
-/** Terminate an owned process group: graceful signal first, then the shared helper. */
+/**
+ * Guarded shutdown of an owned process group. Signals gracefully, escalates via
+ * the shared `terminateProcessGroup` if the child is still open, then ASSERTS —
+ * using only creation-time receipts (`child.pid` as the group id) — that the
+ * child closed and the group is absent. A denied or failed cleanup throws
+ * rather than returning as if teardown were proven. Mirrors the fake-provider
+ * shutdown in tests/integration/cache-lifecycle-acceptance.test.mjs.
+ */
 async function stopOwnedGroup(child, closed, isClosed, graceMs) {
-  if (!child || isClosed()) return;
-  try { child.kill("SIGTERM"); } catch { /* already gone */ }
-  if (graceMs > 0) await Promise.race([closed, delay(graceMs)]);
+  if (!child) return;
   if (!isClosed()) {
-    try { await terminateProcessGroup(child, { graceMs: 1_000, cleanupTimeoutMs: 5_000 }); }
-    catch { /* denied cleanup: absence stays unproven */ }
-    await Promise.race([closed, delay(1_000)]);
+    try { child.kill("SIGTERM"); } catch { /* already gone */ }
+    if (graceMs > 0) await Promise.race([closed, delay(graceMs)]);
+    if (!isClosed()) {
+      const terminated = await terminateProcessGroup(child, { graceMs: 1_000, cleanupTimeoutMs: 5_000 });
+      assert.equal(terminated, true, "fake provider owned group must terminate");
+      await Promise.race([closed, delay(1_000)]);
+    }
   }
   child.unref();
+  assert.equal(isClosed(), true, "fake provider must close before teardown completes");
+  assert.equal(processGroupExists(child.pid), false, "fake provider owned group must be absent after close");
 }
 
 // ── Isolated environment ────────────────────────────────────────
