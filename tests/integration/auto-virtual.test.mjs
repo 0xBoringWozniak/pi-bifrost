@@ -1266,3 +1266,14 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     }
   });
 });
+
+describe("G03 replay guard fault binding", () => {
+  it("binds replay safety to the production guards and their baseline source hash", () => {
+    const source = readFileSync(EXTENSION_PATH, "utf8");
+    const hash = createHash("sha256").update(source).digest("hex");
+    assert.equal(hash, "3164a3dbc41a864c68bede2f9e7365c5ed32bbbcd91fc584a3d07446014e3f12");
+    for (const fn of ["isSideEffectFreeAllowanceFailure", "allowanceRetryBoundaryStillSafe", "autoBoundaryStillActive"]) {
+      assert.ok(source.includes(`function ${fn}`), `missing production replay guard: ${fn}`);
+    }
+  });
+});
