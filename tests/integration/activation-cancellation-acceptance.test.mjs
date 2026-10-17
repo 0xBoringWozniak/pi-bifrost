@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -41,6 +42,9 @@ function makeHarness(config, available = [], options = {}) {
   delete process.env[TYPE_SAFE_API_KEY_ENV];
 
   const selected = [];
+  // Every activation/dispatch attempt, recorded before the host hook resolves so
+  // a rejected or throwing activation still counts as an attempted dispatch.
+  const dispatchAttempts = [];
   const notices = [];
   const editor = { value: "" };
   const active = options.active ?? makeModel("fixture", "active");
@@ -88,6 +92,7 @@ function makeHarness(config, available = [], options = {}) {
     registerCommand: (name, opts) => { commands[name] = opts.handler; },
     on: (event, handler) => { if (event === "input") input = handler; return () => {}; },
     setModel: async (model) => {
+      dispatchAttempts.push(`${model.provider}/${model.id}`);
       selected.push(`${model.provider}/${model.id}`);
       return options.setModel ? options.setModel(model) : true;
     },
@@ -106,6 +111,7 @@ function makeHarness(config, available = [], options = {}) {
     },
     route: definition.route,
     selected,
+    dispatchAttempts,
     notices,
     editor,
     cleanup: () => {
@@ -128,11 +134,14 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
     for (const activate of [async () => false, async () => { throw new Error("injected activation failure"); }]) {
       const target = makeModel("fixture", "allowed");
       const harness = makeHarness(strictConfig({ models: { restricted: ["fixture/allowed"] } }), [target], {
+        mode: "tui",
         setModel: activate,
       });
       try {
         assert.deepEqual(await sendInput(harness), { action: "handled" });
         assert.deepEqual(harness.selected, ["fixture/allowed"]);
+        assert.ok(harness.notices.some((message) => /could not activate fixture\/allowed/i.test(message)),
+          "activation failure must surface an actionable user-visible error, not fail silently");
       } finally {
         harness.cleanup();
       }
@@ -163,6 +172,7 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
       assert.deepEqual(await Promise.race([input, timeout]), { action: "handled" });
       assert.equal(harness.editor.value, "newer draft");
       assert.deepEqual(harness.selected, []);
+      assert.deepEqual(harness.dispatchAttempts, [], "an aborted registry wait must make no activation attempt");
     } finally {
       if (deadline) clearTimeout(deadline);
       harness.cleanup();
@@ -209,6 +219,7 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
       controller.abort();
       assert.deepEqual(await Promise.race([input, timeout]), { action: "handled" });
       assert.deepEqual(harness.selected, []);
+      assert.deepEqual(harness.dispatchAttempts, [], "a late classifier result must make no activation attempt");
     } finally {
       if (deadline) clearTimeout(deadline);
       harness.cleanup();
@@ -240,6 +251,7 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
       releaseRefresh();
       assert.deepEqual(await Promise.race([input, timeout]), { action: "continue" });
       assert.deepEqual(harness.selected, []);
+      assert.deepEqual(harness.dispatchAttempts, [], "a manual pin must make no automatic activation attempt");
     } finally {
       if (deadline) clearTimeout(deadline);
       releaseRefresh?.();
@@ -248,7 +260,11 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
   });
 
   it("fault control: removing the late-abort guard allows forbidden late dispatch", async () => {
+    const BASELINE_SHA256 = "3164a3dbc41a864c68bede2f9e7365c5ed32bbbcd91fc584a3d07446014e3f12";
+    const sha256 = (text) => createHash("sha256").update(text).digest("hex");
     const original = readFileSync(join(ROOT, "index.ts"), "utf8");
+    assert.equal(sha256(original), BASELINE_SHA256,
+      "production index.ts must match the recorded baseline hash before fault injection");
     const guard = `      if (ctx.signal?.aborted) {
         endClassify({ kind: classification.kind, outcome: "aborted" });
         endInput({ outcome: "aborted" });
@@ -258,7 +274,7 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
       }`;
     assert.ok(original.includes(guard), "late-abort guard must exist in production source");
     const mutantSource = original.replace(guard, "      console.error('MUTANT_GUARD_REMOVED_REACHED');");
-    assert.notEqual(mutantSource, original);
+    assert.notEqual(mutantSource, original, "fault injection must change the production source");
 
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-activation-fault-"));
     const copyDir = join(scratch, "src");
@@ -267,94 +283,120 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
       if (file.endsWith(".ts")) copyFileSync(join(ROOT, file), join(copyDir, file));
     }
     writeFileSync(join(copyDir, "index.ts"), mutantSource);
-    // node_modules symlink for imports
     symlinkSync(join(ROOT, "node_modules"), join(copyDir, "node_modules"));
+    const mutantExtension = (await import(pathToFileURL(join(copyDir, "index.ts")).href + `?fault=${Date.now()}`)).default;
 
-    const mod = await import(pathToFileURL(join(copyDir, "index.ts")).href + `?fault=${Date.now()}`);
-    const mutantExtension = mod.default;
-
+    // Hard admission turns the aborted classifier result into a default-tier
+    // fallback before the late-abort guard, and disabling reliability removes the
+    // provider-admission abort gate. The late-abort guard is then the only abort
+    // gate left between classification and dispatch, so removing it is observable.
+    const faultConfig = () => strictConfig({
+      models: { restricted: ["fixture/allowed"] },
+      reliability: { enabled: false },
+      economics: {
+        mode: "policy",
+        scopes: { selected: { kind: "model", model: "fixture/allowed" } },
+        sources: [{ id: "manual", scopeRef: "selected", authority: "declared" }],
+        admission: [{ id: "daily", scopeRef: "selected", windowId: "day", reserveRatio: 0.2, unknown: "block" }],
+        observations: [{
+          sourceId: "manual", scopeRef: "selected", billing: "metered", observedAt: 100,
+          expiresAt: 8_000_000_000_000_000, revision: 1,
+          windows: [{ id: "day", period: { id: "p1", sequence: 1 }, unit: "ratio", remaining: 0.4 }],
+        }],
+      },
+      classifier: {
+        enabled: true,
+        backend: "pi-native",
+        criteria: { restricted: "Bounded fixture classification criterion." },
+        minConfidence: 0.1,
+        piNative: { model: "typesafe/fixture", timeoutMs: 5000, maxAttempts: 1 },
+      },
+    });
     const classifierModel = { type: "classifier", provider: "typesafe", id: "fixture" };
-    const target = makeModel("fixture", "allowed");
-    const harness = makeHarness(strictConfig({
-      models: { restricted: ["fixture/allowed"] },
-      classifier: {
-        enabled: true,
-        backend: "pi-native",
-        criteria: { restricted: "Bounded fixture classification criterion." },
-        minConfidence: 0.1,
-        piNative: { model: "typesafe/fixture", timeoutMs: 5000, maxAttempts: 1 },
-      },
-    }), [target], {
-      classifierModel,
-      extension: mutantExtension,
-      classify: async () => {
-        // release classification only after abort in the test body; here return a gate promise
-        return new Promise((resolve) => {
-          // store resolver on global-ish harness? Instead resolve immediately with high confidence;
-          // abort happens after classification starts via outer controller? We'll just return result.
-          resolve({
-            api: "systemone",
-            provider: "typesafe",
-            model: "fixture",
-            answers: { tier: { type: "choice", choice: "restricted", confidence: 0.9, probabilities: { restricted: 1 } } },
-            stopReason: "stop",
-            timestamp: Date.now(),
-          });
-        });
-      },
+    const classificationResult = () => ({
+      api: "systemone",
+      provider: "typesafe",
+      model: "fixture",
+      answers: { tier: { type: "choice", choice: "restricted", confidence: 0.9, probabilities: { restricted: 1 } } },
+      stopReason: "stop",
+      timestamp: Date.now(),
     });
-    // To simulate late completion after abort, we need classification to be pending when abort occurs.
-    // Rebuild with a gated classifier instead:
-    harness.cleanup();
 
-    // Rebuild properly with gated classify
-    let releaseClassification;
-    const classificationGate = new Promise((resolve) => { releaseClassification = resolve; });
-    let markClassificationStarted;
-    const classificationStarted = new Promise((resolve) => { markClassificationStarted = resolve; });
-    const harness2 = makeHarness(strictConfig({
-      models: { restricted: ["fixture/allowed"] },
-      classifier: {
-        enabled: true,
-        backend: "pi-native",
-        criteria: { restricted: "Bounded fixture classification criterion." },
-        minConfidence: 0.1,
-        piNative: { model: "typesafe/fixture", timeoutMs: 5000, maxAttempts: 1 },
-      },
-    }), [target], {
-      classifierModel,
-      extension: mutantExtension,
-      classify: async () => { markClassificationStarted(); return classificationGate; },
-    });
-    const controller = new AbortController();
-    harness2.ctx.signal = controller.signal;
-    let deadline;
+    // Deterministic sequence: start the turn, abort while the classifier gate is
+    // still pending, yield a macrotask so the abort has taken effect, then release
+    // the classification result. This exercises the mutant's missing guard.
+    const runGatedAbort = async (extension) => {
+      let releaseClassification;
+      const classificationGate = new Promise((resolve) => { releaseClassification = resolve; });
+      let markClassificationStarted;
+      const classificationStarted = new Promise((resolve) => { markClassificationStarted = resolve; });
+      const target = makeModel("fixture", "allowed");
+      const harness = makeHarness(faultConfig(), [target], {
+        classifierModel,
+        extension,
+        classify: async () => { markClassificationStarted(); return classificationGate; },
+      });
+      const controller = new AbortController();
+      harness.ctx.signal = controller.signal;
+      let deadline;
+      try {
+        const input = harness.input({ text: "do the task", source: "interactive", streamingBehavior: "steer" });
+        const timeout = new Promise((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("fault control exceeded 5-second deadline")), 5000);
+        });
+        await Promise.race([classificationStarted, timeout]);
+        controller.abort();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        releaseClassification(classificationResult());
+        const result = await Promise.race([input, timeout]);
+        return { harness, result };
+      } catch (error) {
+        harness.cleanup();
+        throw error;
+      } finally {
+        if (deadline) clearTimeout(deadline);
+      }
+    };
+
+    // The fault-sensitive assertion: under abort no model may be selected and no
+    // activation may be attempted.
+    const assertNoForbiddenLateDispatch = (run, label) => {
+      assert.deepEqual(run.harness.selected, [],
+        "late-abort guard removal must allow forbidden late dispatch");
+      assert.deepEqual(run.harness.dispatchAttempts, [],
+        "late-abort guard removal must allow forbidden late dispatch");
+      assert.deepEqual(run.result, { action: "handled" }, `${label} must handle the aborted turn`);
+    };
+
     try {
-      const input = harness2.input({ text: "do the task", source: "interactive", streamingBehavior: "steer" });
-      const timeout = new Promise((_, reject) => {
-        deadline = setTimeout(() => reject(new Error("fault control exceeded 5-second deadline")), 5000);
-      });
-      await Promise.race([classificationStarted, timeout]);
-      releaseClassification({
-        api: "systemone",
-        provider: "typesafe",
-        model: "fixture",
-        answers: { tier: { type: "choice", choice: "restricted", confidence: 0.9, probabilities: { restricted: 1 } } },
-        stopReason: "stop",
-        timestamp: Date.now(),
-      });
-      controller.abort();
-      const result = await Promise.race([input, timeout]);
-      console.error("FAULT_RESULT", JSON.stringify(result), "SELECTED", JSON.stringify(harness2.selected));
-      // Mutant run completed; production source restored below. The controlled
-      // mutation is retained as process evidence even though this environment's
-      // timing did not turn it into a dispatch.
-      assert.deepEqual(harness2.selected, [],
-        "mutant run completed without crashing the extension");
+      // GREEN reference: pristine production extension passes the assertion.
+      const pristine = await runGatedAbort(bifrostExtension);
+      try {
+        assertNoForbiddenLateDispatch(pristine, "pristine");
+      } finally {
+        pristine.harness.cleanup();
+      }
+
+      // RED fault: the guard-removed mutant must fail that exact assertion, and the
+      // failure must be the named AssertionError, not a startup or syntax failure.
+      const mutant = await runGatedAbort(mutantExtension);
+      try {
+        assert.throws(
+          () => assertNoForbiddenLateDispatch(mutant, "mutant"),
+          (error) => error instanceof assert.AssertionError
+            && /late-abort guard removal must allow forbidden late dispatch/.test(error.message),
+          "the guard-removed mutant must fail the forbidden-dispatch assertion",
+        );
+        assert.deepEqual(mutant.harness.dispatchAttempts, ["fixture/allowed"],
+          "the forbidden late dispatch must be observable in the harness dispatch counter");
+      } finally {
+        mutant.harness.cleanup();
+      }
     } finally {
-      if (deadline) clearTimeout(deadline);
-      harness2.cleanup();
       rmSync(scratch, { recursive: true, force: true });
     }
+
+    assert.equal(sha256(readFileSync(join(ROOT, "index.ts"), "utf8")), BASELINE_SHA256,
+      "production index.ts must remain byte-identical after the fault control restored the copy");
   });
 });
