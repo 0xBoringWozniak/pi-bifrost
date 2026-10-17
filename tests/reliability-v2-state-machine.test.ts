@@ -52,6 +52,9 @@ function scopeKeyOf(modelKey: string): string {
 // ── Independent reference model ────────────────────────────────────────────
 
 interface RefLease {
+  ownerToken: string;
+  dispatchId: string;
+  outcomeId: string;
   leaseId: string;
   generation: number;
   expiresAt: number;
@@ -75,17 +78,28 @@ interface RefDispatch {
   settledKind?: "success" | "failure" | "cancelled";
   scopeKey: string;
   scopeGeneration: number;
-  lease?: { leaseId: string; expiresAt: number; maxExpiresAt: number; generation: number };
+  modelKey: string;
+  lease?: RefLease;
 }
 
 interface RefOutcome {
   expiresAt: number;
 }
 
-type RefResult = { status: string; reason?: string };
+/**
+ * A transition outcome. `commits` records whether the durable state changes.
+ *
+ * Production separates these: `admitReliabilityV2Dispatch` returns the empty
+ * state on some refusals (the caller discards it), and the store only writes
+ * when the transition actually commits. The model therefore tracks the durable
+ * state itself and reports `commits` independently of the returned object.
+ */
+type RefResult = { status: string; reason?: string; commits?: boolean; emptyResult?: boolean };
 
 class Reference {
   now = ORIGIN;
+  /** Durable state revision; exactly one commit increments it by one. */
+  revision = 0;
   readonly scopes = new Map<string, RefScope>();
   readonly dispatches = new Map<string, RefDispatch>();
   readonly outcomes = new Map<string, RefOutcome>();
@@ -111,13 +125,6 @@ class Reference {
     for (const [k, v] of snapshot.outcomes) this.outcomes.set(k, v);
   }
 
-  /** Production answers an unusable lease operation with a fresh empty state. */
-  private reset(): void {
-    this.scopes.clear();
-    this.dispatches.clear();
-    this.outcomes.clear();
-  }
-
   private scope(scopeKey: string): RefScope {
     let entry = this.scopes.get(scopeKey);
     if (!entry) {
@@ -127,9 +134,26 @@ class Reference {
     return entry;
   }
 
+  /**
+   * Expired receipts are deleted and their dead trial leases are released from
+   * the scope, exactly as the production prune does before any reuse.
+   */
   private prune(now: number): void {
-    for (const [id, d] of this.dispatches) if (d.proofUntil < now) this.dispatches.delete(id);
-    for (const [id, o] of this.outcomes) if (o.expiresAt < now) this.outcomes.delete(id);
+    for (const [id, d] of [...this.dispatches]) {
+      if (d.proofUntil < now) {
+        const scope = this.scopes.get(d.scopeKey);
+        if (scope && d.lease && scope.lease
+          && scope.lease.leaseId === d.lease.leaseId
+          && scope.lease.expiresAt <= now
+          && scope.lease.generation === d.lease.generation
+          && scope.lease.expiresAt === d.lease.expiresAt
+          && scope.lease.maxExpiresAt === d.lease.maxExpiresAt) {
+          delete scope.lease;
+        }
+        this.dispatches.delete(id);
+      }
+    }
+    for (const [id, o] of [...this.outcomes]) if (o.expiresAt < now) this.outcomes.delete(id);
   }
 
   private liveLease(d: RefDispatch, now: number): boolean {
@@ -150,27 +174,29 @@ class Reference {
   // ops ───────────────────────────────────────────────────────────────────
 
   cooldown(modelKey: string, openUntil: number): RefResult {
-    if (openUntil <= this.now) return { status: "invalid", reason: "invalid_scope_cooldown" };
+    if (openUntil <= this.now) return { status: "invalid", reason: "invalid_scope_cooldown", commits: false };
     const scopeKey = scopeKeyOf(modelKey);
     const scope = this.scope(scopeKey);
     scope.generation += 1;
     scope.openUntil = Math.max(scope.openUntil ?? 0, openUntil);
     delete scope.lease; // a cooldown bump invalidates an in-flight trial lease
-    return { status: "settled" };
+    this.revision += 1;
+    return { status: "settled", commits: true };
   }
 
   clearCooldown(modelKey: string): RefResult {
     const scopeKey = scopeKeyOf(modelKey);
     const scope = this.scopes.get(scopeKey);
-    if (!scope) return { status: "settled", reason: "already_clear" };
+    if (!scope) return { status: "settled", reason: "already_clear", commits: false };
     if (scope.lease && scope.lease.expiresAt > this.now && scope.lease.generation === scope.generation) {
-      return { status: "blocked", reason: "trial_active" };
+      return { status: "blocked", reason: "trial_active", commits: false };
     }
     scope.generation += 1;
     delete scope.openUntil;
     delete scope.lease;
     delete scope.cooldownMultiplier;
-    return { status: "settled" };
+    this.revision += 1;
+    return { status: "settled", commits: true };
   }
 
   admit(ownerToken: string, dispatchId: string, outcomeId: string, modelKey: string): RefResult {
@@ -200,35 +226,39 @@ class Reference {
     }
     const maxExpiresAt = this.now + CONFIG.maxDispatchLifetimeMs;
     const lease = halfOpen ? {
-      leaseId: dispatchId, generation: scope.generation,
+      // The scope key disambiguates leases within one dispatch, so production
+      // derives the lease identity from the dispatch ID.
+      ownerToken, dispatchId, outcomeId, leaseId: dispatchId, generation: scope.generation,
       expiresAt: Math.min(this.now + CONFIG.leaseTtlMs, maxExpiresAt), maxExpiresAt,
     } : undefined;
     if (lease) scope.lease = { ...lease };
     this.dispatches.set(dispatchId, {
       ownerToken, outcomeId, admittedAt: this.now, proofUntil: maxExpiresAt,
-      scopeKey, scopeGeneration: scope.generation,
+      scopeKey, scopeGeneration: scope.generation, modelKey,
       lease: lease ? { ...lease } : undefined,
     });
-    return { status: "admitted" };
+    this.revision += 1;
+    return { status: "admitted", commits: true };
   }
 
   renew(ownerToken: string, dispatchId: string, outcomeId: string, ttlMs?: number): RefResult {
     const d = this.dispatches.get(dispatchId);
     if (!d || d.ownerToken !== ownerToken || d.outcomeId !== outcomeId || !d.lease) {
-      // Production returns a fresh empty state for an unusable lease operation.
-      this.reset();
-      return { status: "invalid", reason: "invalid_lease_renewal" };
+      // The pure transition hands back an empty sentinel state, but the store
+      // never commits an invalid result, so the durable history is untouched.
+      return { status: "invalid", reason: "invalid_lease_renewal", commits: false, emptyResult: true };
     }
-    if (this.now > d.proofUntil) return { status: "expired", reason: "dispatch_proof_horizon_expired" };
-    if (this.now < d.admittedAt) return { status: "stale", reason: "clock_before_admission" };
-    if (this.now >= d.lease.maxExpiresAt) return { status: "expired", reason: "maximum_dispatch_lifetime_expired" };
+    if (this.now > d.proofUntil) return { status: "expired", reason: "dispatch_proof_horizon_expired", commits: false };
+    if (this.now < d.admittedAt) return { status: "stale", reason: "clock_before_admission", commits: false };
+    if (this.now >= d.lease.maxExpiresAt) return { status: "expired", reason: "maximum_dispatch_lifetime_expired", commits: false };
     const ttl = ttlMs ?? CONFIG.leaseTtlMs;
-    if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > CONFIG.leaseTtlMs) return { status: "invalid", reason: "invalid_lease_ttl" };
-    if (!this.liveLease(d, this.now)) return { status: "stale", reason: "lease_owner_or_generation_changed" };
+    if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > CONFIG.leaseTtlMs) return { status: "invalid", reason: "invalid_lease_ttl", commits: false };
+    if (!this.liveLease(d, this.now)) return { status: "stale", reason: "lease_owner_or_generation_changed", commits: false };
     const scope = this.scopes.get(d.scopeKey)!;
     scope.lease!.expiresAt = Math.min(this.now + ttl, scope.lease!.maxExpiresAt);
     d.lease.expiresAt = scope.lease!.expiresAt;
-    return { status: "renewed" };
+    this.revision += 1;
+    return { status: "renewed", commits: true };
   }
 
   settle(ownerToken: string, dispatchId: string, outcomeId: string, kind: "success" | "failure" | "cancelled"): RefResult {
@@ -281,43 +311,50 @@ class Reference {
       if (d.lease && d.lease.expiresAt <= this.now && scope?.lease?.leaseId === d.lease.leaseId) {
         delete scope.lease;
       }
-      return { status: "stale", reason: "success_did_not_own_current_generation" };
+      this.revision += 1;
+      return { status: "stale", reason: "success_did_not_own_current_generation", commits: true };
     }
-    return { status: "settled" };
+    this.revision += 1;
+    return { status: "settled", commits: true };
   }
 
   abandon(ownerToken: string, dispatchId: string, outcomeId: string): RefResult {
     const d = this.dispatches.get(dispatchId);
     if (!d || d.ownerToken !== ownerToken || d.outcomeId !== outcomeId) {
-      // Production returns a fresh empty state for an unusable abandon request.
-      this.reset();
-      return { status: "invalid", reason: "invalid_abandon_request" };
+      // The pure transition hands back an empty sentinel state, but the store
+      // never commits an invalid result, so the durable history is untouched.
+      return { status: "invalid", reason: "invalid_abandon_request", commits: false, emptyResult: true };
     }
-    if (this.now > d.proofUntil) return { status: "expired", reason: "dispatch_proof_horizon_expired" };
-    if (d.settledAt !== undefined) return { status: "duplicate", reason: "dispatch_already_settled" };
-    if (d.lease && !this.liveLease(d, this.now)) return { status: "stale", reason: "lease_owner_or_generation_changed" };
+    if (this.now > d.proofUntil) return { status: "expired", reason: "dispatch_proof_horizon_expired", commits: false };
+    if (d.settledAt !== undefined) return { status: "duplicate", reason: "dispatch_already_settled", commits: false };
+    if (d.lease && !this.liveLease(d, this.now)) return { status: "stale", reason: "lease_owner_or_generation_changed", commits: false };
     this.prune(this.now);
     const scope = this.scopes.get(d.scopeKey);
     if (d.lease) delete scope!.lease;
     d.settledAt = this.now;
     d.settledKind = "cancelled";
     this.outcomes.set(outcomeId, { expiresAt: Math.max(d.proofUntil, this.now + CONFIG.dedupRetentionMs) });
-    return { status: "abandoned" };
+    this.revision += 1;
+    return { status: "abandoned", commits: true };
   }
 
   // projection ────────────────────────────────────────────────────────────
 
-  /** Independent expected projection of every persisted observable. */
+  /** Independent expected projection of the modeled persisted surface. */
   projection(): unknown {
     return {
+      version: 2,
+      revision: this.revision,
       scopes: Object.fromEntries([...this.scopes.entries()].map(([k, s]) => [k, {
         generation: s.generation,
         failures: [...s.failures],
         openUntil: s.openUntil ?? null,
         cooldownMultiplier: s.cooldownMultiplier ?? null,
-        lease: s.lease ? { leaseId: s.lease.leaseId, generation: s.lease.generation, expiresAt: s.lease.expiresAt, maxExpiresAt: s.lease.maxExpiresAt } : null,
+        lease: s.lease ? { ownerToken: s.lease.ownerToken, dispatchId: s.lease.dispatchId, outcomeId: s.lease.outcomeId, leaseId: s.lease.leaseId, generation: s.lease.generation, expiresAt: s.lease.expiresAt, maxExpiresAt: s.lease.maxExpiresAt } : null,
       }])),
       dispatches: Object.fromEntries([...this.dispatches.entries()].map(([k, d]) => [k, {
+        key: k,
+        dispatchId: k,
         ownerToken: d.ownerToken,
         outcomeId: d.outcomeId,
         admittedAt: d.admittedAt,
@@ -326,7 +363,8 @@ class Reference {
         settledKind: d.settledKind ?? null,
         scopeKey: d.scopeKey,
         scopeGeneration: d.scopeGeneration,
-        lease: d.lease ? { leaseId: d.lease.leaseId, generation: d.lease.generation, expiresAt: d.lease.expiresAt, maxExpiresAt: d.lease.maxExpiresAt } : null,
+        scopeModelKey: d.modelKey,
+        lease: d.lease ? { ownerToken: d.lease.ownerToken, dispatchId: d.lease.dispatchId, outcomeId: d.lease.outcomeId, leaseId: d.lease.leaseId, generation: d.lease.generation, expiresAt: d.lease.expiresAt, maxExpiresAt: d.lease.maxExpiresAt } : null,
       }])),
       settledOutcomes: Object.fromEntries([...this.outcomes.entries()].map(([k, o]) => [k, { expiresAt: o.expiresAt }])),
     };
@@ -343,14 +381,18 @@ class Reference {
 
 function productionProjection(state: ReliabilityV2State): unknown {
   return {
+    version: state.version,
+    revision: state.revision,
     scopes: Object.fromEntries(Object.entries(state.scopes).map(([k, s]) => [k, {
       generation: s.generation,
       failures: [...s.failures],
       openUntil: s.openUntil ?? null,
       cooldownMultiplier: s.cooldownMultiplier ?? null,
-      lease: s.lease ? { leaseId: s.lease.leaseId, generation: s.lease.generation, expiresAt: s.lease.expiresAt, maxExpiresAt: s.lease.maxExpiresAt } : null,
+      lease: s.lease ? { ownerToken: s.lease.ownerToken, dispatchId: s.lease.dispatchId, outcomeId: s.lease.outcomeId, leaseId: s.lease.leaseId, generation: s.lease.generation, expiresAt: s.lease.expiresAt, maxExpiresAt: s.lease.maxExpiresAt } : null,
     }])),
     dispatches: Object.fromEntries(Object.entries(state.dispatches).map(([k, d]) => [k, {
+      key: k,
+      dispatchId: d.dispatchId,
       ownerToken: d.ownerToken,
       outcomeId: d.outcomeId,
       admittedAt: d.admittedAt,
@@ -359,12 +401,22 @@ function productionProjection(state: ReliabilityV2State): unknown {
       settledKind: d.settledKind ?? null,
       scopeKey: d.scopes[0]?.scopeKey,
       scopeGeneration: d.scopes[0]?.generation,
+      scopeModelKey: d.scopes[0]?.modelKey,
       lease: d.scopes[0]?.leaseId !== undefined
-        ? { leaseId: d.scopes[0].leaseId, generation: d.scopes[0].generation, expiresAt: d.scopes[0].expiresAt, maxExpiresAt: d.scopes[0].maxExpiresAt }
+        ? {
+          ownerToken: d.ownerToken, dispatchId: d.dispatchId, outcomeId: d.outcomeId,
+          leaseId: d.scopes[0].leaseId, generation: d.scopes[0].generation,
+          expiresAt: d.scopes[0].expiresAt, maxExpiresAt: d.scopes[0].maxExpiresAt,
+        }
         : null,
     }])),
     settledOutcomes: Object.fromEntries(Object.entries(state.settledOutcomes).map(([k, o]) => [k, { expiresAt: o.expiresAt }])),
   };
+}
+
+/** Projection of the empty sentinel state a pure transition may return. */
+function emptyProjection(): unknown {
+  return { version: 2, revision: 0, scopes: {}, dispatches: {}, settledOutcomes: {} };
 }
 
 // ── Generated operations ───────────────────────────────────────────────────
@@ -493,16 +545,28 @@ function applyOp(run: Run, rng: Rng, op: Op): void {
     }
   }
 
+  // P3: reasons are compared unconditionally, so an unexpected reason on an
+  // otherwise correct status cannot survive.
   assert.equal(result.status, expected.status, `${label}: status drift`);
-  if (expected.reason !== undefined) {
-    assert.equal(result.reason, expected.reason, `${label}: reason drift`);
+  assert.equal(result.reason, expected.reason, `${label}: reason drift`);
+
+  if (expected.emptyResult) {
+    // The pure transition returns an empty sentinel for an unusable request.
+    // That sentinel is not committed, so the caller must retain the prior
+    // effective state; the store contract is asserted separately below.
+    assert.deepEqual(
+      productionProjection(result.state),
+      emptyProjection(),
+      `${label}: unusable request must return the empty sentinel state`,
+    );
+  } else {
+    assert.deepEqual(
+      productionProjection(result.state),
+      ref.projection(),
+      `${label}: persisted state drift`,
+    );
+    run.state = result.state;
   }
-  assert.deepEqual(
-    productionProjection(result.state),
-    ref.projection(),
-    `${label}: persisted state drift`,
-  );
-  run.state = result.state;
 }
 
 // ── Scenario runner ────────────────────────────────────────────────────────
@@ -561,6 +625,85 @@ describe("reliability v2 state machine", () => {
 
   it("matches the independent model across a wider generated sample", () => {
     fc.assert(fc.property(scenarioCommands(12), (commands) => runScenario(commands)), { seed: SWEEP_SEED, numRuns: 400 });
+  });
+
+  it("releases an expired receipt lease when pruning during unrelated admission", () => {
+    // Reviewer sequence: cooldown model 0 +1000; advance 1000; admit owner-a/d1/model 0
+    // (half-open trial); advance 120001 (past the receipt proof horizon); admit owner-b/d2/model 1.
+    const first = MODELS[0];
+    const second = MODELS[1];
+    const firstScope = scopeKeyOf(first);
+    const ref = new Reference();
+    let state = emptyReliabilityV2State();
+
+    ref.now = ORIGIN;
+    state = setReliabilityV2ScopeCooldown(state, first, ORIGIN + 1000, CONFIG, ORIGIN).state;
+    assert.equal(ref.cooldown(first, ORIGIN + 1000).status, "settled");
+
+    ref.now = ORIGIN + 1000;
+    let result = admitReliabilityV2Dispatch(state, {
+      ownerToken: OWNERS[0], dispatchId: "d1", outcomeId: "d1-owner-a", modelKeys: [first], now: ORIGIN + 1000,
+    }, CONFIG);
+    assert.equal(result.status, ref.admit(OWNERS[0], "d1", "d1-owner-a", first).status);
+    state = result.state;
+    assert.equal(state.scopes[firstScope]!.lease!.leaseId, "d1", "the trial must be leased before the prune");
+
+    // Prune runs during this unrelated admission and must free the dead lease.
+    ref.now = ORIGIN + 121001;
+    result = admitReliabilityV2Dispatch(state, {
+      ownerToken: OWNERS[1], dispatchId: "d2", outcomeId: "d2-owner-b", modelKeys: [second], now: ORIGIN + 121001,
+    }, CONFIG);
+    assert.equal(result.status, ref.admit(OWNERS[1], "d2", "d2-owner-b", second).status);
+    state = result.state;
+
+    assert.equal(state.scopes[firstScope]!.lease, undefined, "pruning must release the expired receipt lease");
+    assert.equal(state.dispatches["d1"], undefined, "pruning must drop the expired receipt");
+    assert.ok(state.dispatches["d2"], "the unrelated receipt must survive the prune");
+    assert.deepEqual(productionProjection(state), ref.projection(), "pruned state must match the model");
+  });
+
+  it("keeps durable history after an invalid owner operation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bifrost-v2-history-"));
+    try {
+      const path = join(dir, "v2.json");
+      let clock = ORIGIN;
+      const store = new ReliabilityV2Store({ path, config: CONFIG, now: () => clock });
+      await store.setScopeCooldown(MODELS[0], ORIGIN + 1000);
+      clock = ORIGIN + 1000;
+      const admitted = await store.admit({
+        ownerToken: OWNERS[0], dispatchId: "d1", outcomeId: "d1-owner-a", modelKeys: [MODELS[0]],
+      });
+      assert.equal(admitted.status, "admitted");
+
+      // A wrong owner must be refused without disturbing the durable state.
+      clock = ORIGIN + 2000;
+      const wrong = await store.renew({
+        ownerToken: OWNERS[1], dispatchId: "d1", outcomeId: "d1-owner-a",
+        leaseReferences: admitted.leases ?? [],
+      });
+      assert.equal(wrong.status, "invalid");
+      assert.equal(wrong.reason, "invalid_lease_renewal");
+      const afterInvalid = new ReliabilityV2Store({ path, config: CONFIG, now: () => clock }).readSnapshot();
+      assert.deepEqual(Object.keys(afterInvalid.dispatches), ["d1"], "a refused operation must preserve the receipt");
+      assert.equal(afterInvalid.revision, admitted.state.revision, "a refused operation must not advance the revision");
+
+      // The real owner must still renew and settle its own trial afterwards.
+      clock = ORIGIN + 3000;
+      const renewed = await store.renew({
+        ownerToken: OWNERS[0], dispatchId: "d1", outcomeId: "d1-owner-a",
+        leaseReferences: admitted.leases ?? [],
+      });
+      assert.equal(renewed.status, "renewed");
+      clock = ORIGIN + 4000;
+      const settled = await store.settle({
+        ownerToken: OWNERS[0], dispatchId: "d1", outcomeId: "d1-owner-a", settlement: { kind: "success" },
+      });
+      assert.equal(settled.status, "settled");
+      const final = new ReliabilityV2Store({ path, config: CONFIG, now: () => clock }).readSnapshot();
+      assert.equal(final.dispatches["d1"]!.settledKind, "success");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("shrinks and replays a faulty model control to a minimal sequence", () => {
@@ -705,6 +848,18 @@ const FAULTS: readonly FaultPlan[] = [
     from: "  next.settledOutcomes[receipt.outcomeId] = {\n    expiresAt: expiry,\n    ...(observation === undefined ? {} : { observation }),\n  };",
     to: "  void expiry;\n  void observation;",
   },
+  {
+    // Reviewer mutant that previously survived every submitted test.
+    name: "revisionSkipsTwo",
+    from: "function commit(state: ReliabilityV2State): ReliabilityV2State | undefined {\n  const revision = increment(state.revision);",
+    to: "function commit(state: ReliabilityV2State): ReliabilityV2State | undefined {\n  const revision = increment(state.revision + 1);",
+  },
+  {
+    // Reviewer mutant that previously survived every submitted test.
+    name: "unexpectedAdmissionReason",
+    from: "  return committed\n    ? { status: \"admitted\", state: committed, leases: leaseReferences(next.dispatches[dispatchId]!) }",
+    to: "  return committed\n    ? { status: \"admitted\", state: committed, reason: \"unexpected_reason\", leases: leaseReferences(next.dispatches[dispatchId]!) }",
+  },
 ];
 
 const PRODUCTION_SOURCE = new URL("../reliability-v2.ts", import.meta.url);
@@ -737,7 +892,12 @@ function runFixedScenario(v2: typeof import("../reliability-v2.ts")): unknown {
   let result = v2.admitReliabilityV2Dispatch(state, {
     ownerToken: OWNERS[0], dispatchId: "d1", outcomeId: "d1-owner-a", modelKeys: [modelKey], now: ORIGIN + 1000,
   }, CONFIG);
-  assert.equal(result.status, ref.admit(OWNERS[0], "d1", "d1-owner-a", modelKey).status, "half-open admission status");
+  const admitted = ref.admit(OWNERS[0], "d1", "d1-owner-a", modelKey);
+  // Status AND reason are compared unconditionally, so an unexpected reason on a
+  // correct status cannot survive.
+  assert.equal(result.status, admitted.status, "half-open admission status");
+  assert.equal(result.reason, admitted.reason, "half-open admission reason");
+  assert.deepEqual(productionProjection(result.state), ref.projection(), "half-open admission state");
   state = result.state;
 
   // Renew exactly at the maximum dispatch lifetime: production must refuse.
