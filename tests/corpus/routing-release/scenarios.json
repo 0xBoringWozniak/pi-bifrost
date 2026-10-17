@@ -230,5 +230,63 @@
     "seed": 42,
     "available": ["fixture/a", "fixture/b", "fixture/c"],
     "allowedModels": ["fixture/a", "fixture/b", "fixture/c"]
+  },
+  {
+    "id": "general-requested-pool",
+    "schemaVersion": 1,
+    "tiers": { "general": ["fixture/g1", "fixture/g2"], "quick": ["fixture/q1"] },
+    "requestedTier": "general",
+    "defaultTier": "quick",
+    "available": ["fixture/g1", "fixture/g2", "fixture/q1"],
+    "allowedModels": ["fixture/g1", "fixture/g2"]
+  },
+  {
+    "id": "frontier-requested-pool",
+    "schemaVersion": 1,
+    "tiers": { "frontier": ["fixture/f1"], "general": ["fixture/g1"] },
+    "requestedTier": "frontier",
+    "defaultTier": "general",
+    "available": ["fixture/f1", "fixture/g1"],
+    "allowedModels": ["fixture/f1"]
+  },
+  {
+    "id": "custom-tier-requested-pool",
+    "schemaVersion": 1,
+    "tiers": { "budget": ["fixture/b1", "fixture/b2"] },
+    "requestedTier": "budget",
+    "defaultTier": "budget",
+    "available": ["fixture/b1", "fixture/b2"],
+    "allowedModels": ["fixture/b1", "fixture/b2"]
+  },
+  {
+    "id": "frontier-requested-general-default-recovery",
+    "schemaVersion": 1,
+    "tiers": { "frontier": [], "general": ["fixture/g1"] },
+    "requestedTier": "frontier",
+    "defaultTier": "general",
+    "available": ["fixture/g1"],
+    "allowedModels": ["fixture/g1"],
+    "expectedUnavailable": []
+  },
+  {
+    "id": "custom-tier-cheapest-strategy",
+    "schemaVersion": 1,
+    "tiers": { "budget": ["fixture/b1", "fixture/b2", "fixture/b3"] },
+    "requestedTier": "budget",
+    "defaultTier": "budget",
+    "strategy": "cheapest",
+    "available": ["fixture/b1", "fixture/b2", "fixture/b3"],
+    "allowedModels": ["fixture/b1", "fixture/b2", "fixture/b3"]
+  },
+  {
+    "id": "general-requested-explicit-forced-alternate",
+    "schemaVersion": 2,
+    "tiers": { "general": ["fixture/g1"], "alternate": ["fixture/a1"] },
+    "strictFallbackTiers": { "general": [] },
+    "requestedTier": "general",
+    "forcedTier": "alternate",
+    "defaultTier": "general",
+    "available": ["fixture/g1", "fixture/a1"],
+    "allowedModels": ["fixture/a1"]
   }
 ]

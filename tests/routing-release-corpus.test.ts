@@ -124,7 +124,7 @@ async function resolve(scenario: Scenario) {
 
 describe("synthetic routing release corpus", () => {
   it("matches independently labelled allowed-model and no-route sets", async () => {
-    assert.equal(scenarios.length, 19);
+    assert.equal(scenarios.length, 25);
     for (const scenario of scenarios) {
       const result = await resolve(scenario);
       assert.equal(result.status, "completed", scenario.id);

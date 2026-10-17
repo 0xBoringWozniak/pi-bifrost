@@ -92,10 +92,14 @@ describe("packed experimental router consumer", () => {
 
       const consumerSource = `
         import assert from "node:assert/strict";
-        import { existsSync } from "node:fs";
+        import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+        import { tmpdir } from "node:os";
+        import { dirname, join } from "node:path";
+        import { fileURLToPath } from "node:url";
         import { createRouter } from "pi-bifrost/router";
         import { createJiti } from "jiti";
-        const piExtension = await createJiti(import.meta.url).import("pi-bifrost/index.ts");
+        const jiti = createJiti(import.meta.url);
+        const piExtension = await jiti.import("pi-bifrost/index.ts");
         assert.equal(typeof piExtension.default, "function");
         const model = { provider: "fixture", id: "small", cost: { input: 0.1, output: 0.2 }, contextWindow: 32000 };
         const router = createRouter({
@@ -126,6 +130,69 @@ describe("packed experimental router consumer", () => {
         assert.equal(classifyStarted, true, "the fake classifier must start before the bounded wait expires");
         controller.abort();
         assert.deepEqual(await pending, { version: 1, status: "aborted", asOf: 1000 });
+
+        // A classifier port is a capability, not a grant: it stays cold without an
+        // explicit grant even when classification is enabled, and cold when disabled.
+        const classifierRegistry = { knownModels: [model], availableModels: [model] };
+        let ungrantedCalls = 0;
+        const ungrantedRouter = createRouter({
+          config: { models: { quick: ["fixture/small"] }, default: "quick", rules: [], classifier: { enabled: true } },
+          registry: classifierRegistry, now: 1000,
+        }, { networkClassifier: { classify: async () => { ungrantedCalls += 1; return { tier: "quick", backend: "test" }; } } });
+        const ungrantedResult = await ungrantedRouter.resolve({ prompt: "ungranted classifier request" });
+        assert.equal(ungrantedResult.status, "completed");
+        assert.equal(ungrantedCalls, 0, "a classifier port without networkClassifierGrant must never be invoked");
+        assert.equal(ungrantedResult.decision.classification.classifier, undefined,
+          "an ungranted classifier never contributes a classifier identity");
+        assert.equal(ungrantedResult.decision.selected, "fixture/small");
+
+        let disabledCalls = 0;
+        const disabledRouter = createRouter({
+          config: { models: { quick: ["fixture/small"] }, default: "quick", rules: [], classifier: { enabled: false } },
+          registry: classifierRegistry, now: 1000,
+        }, { networkClassifierGrant: true, networkClassifier: { classify: async () => { disabledCalls += 1; return { tier: "quick", backend: "test" }; } } });
+        const disabledResult = await disabledRouter.resolve({ prompt: "disabled classifier request" });
+        assert.equal(disabledResult.status, "completed");
+        assert.equal(disabledCalls, 0, "a disabled classifier must never invoke a granted port");
+        assert.equal(disabledResult.decision.classification.classifier, undefined);
+
+        // Config-source inheritance composes through the packaged loader: the global
+        // layer supplies inherited models, the project layer overrides scalars and
+        // colliding entries, and both survive the loader boundary unchanged.
+        const { loadConfig } = await jiti.import("pi-bifrost/config.ts");
+        const inheritanceRoot = mkdtempSync(join(tmpdir(), "pi-bifrost-config-inherit-"));
+        try {
+          const agentDir = join(inheritanceRoot, "agent");
+          const projectCwd = join(inheritanceRoot, "workspace");
+          mkdirSync(agentDir, { recursive: true });
+          mkdirSync(join(projectCwd, ".pi"), { recursive: true });
+          writeFileSync(join(agentDir, "bifrost.json"), JSON.stringify({
+            enabled: true,
+            default: "globalTier",
+            strategy: "first",
+            models: { globalTier: ["fixture/global"], shared: ["fixture/global"] },
+          }));
+          writeFileSync(join(projectCwd, ".pi", "bifrost.json"), JSON.stringify({
+            default: "projectTier",
+            models: { projectTier: ["fixture/project"], shared: ["fixture/project"] },
+          }));
+          const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+          process.env.PI_CODING_AGENT_DIR = agentDir;
+          try {
+            const extensionDir = dirname(fileURLToPath(import.meta.resolve("pi-bifrost/bifrost.json")));
+            const inherited = loadConfig(projectCwd, extensionDir);
+            assert.equal(inherited.default, "projectTier", "the project layer overrides the inherited scalar default");
+            assert.equal(inherited.strategy, "first", "the inherited global scalar default survives the project layer");
+            assert.deepEqual(inherited.models.globalTier, ["fixture/global"], "a global-only model tier is inherited");
+            assert.deepEqual(inherited.models.projectTier, ["fixture/project"], "a project-only model tier is added");
+            assert.deepEqual(inherited.models.shared, ["fixture/project"], "the project layer overrides a colliding inherited tier");
+          } finally {
+            if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+            else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+          }
+        } finally {
+          rmSync(inheritanceRoot, { recursive: true, force: true });
+        }
       `;
       execFileSync(process.execPath, ["--input-type=module", "-e", consumerSource], {
         cwd: consumer,
