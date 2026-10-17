@@ -51,38 +51,49 @@ async function startFakeServer() {
   let closed = false;
   const childClosed = new Promise((resolve) => child.once("close", () => { closed = true; resolve(); }));
   child.unref();
-  const ready = await new Promise((resolve, reject) => {
-    let output = "";
-    const timer = setTimeout(() => reject(new Error("fake provider startup timed out")), 10_000);
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-      try {
-        const record = JSON.parse(output);
-        clearTimeout(timer);
-        resolve(record);
-      } catch { /* wait for the startup record */ }
+  try {
+    const ready = await new Promise((resolve, reject) => {
+      let output = "";
+      const timer = setTimeout(() => reject(new Error("fake provider startup timed out")), 10_000);
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+        try {
+          const record = JSON.parse(output);
+          clearTimeout(timer);
+          resolve(record);
+        } catch { /* wait for the startup record */ }
+      });
+      child.once("error", (error) => { clearTimeout(timer); reject(error); });
+      child.once("close", () => { clearTimeout(timer); reject(new Error("fake provider exited before startup")); });
     });
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("close", () => { clearTimeout(timer); reject(new Error("fake provider exited before startup")); });
-  });
-  return {
-    child,
-    port: ready.port,
-    // Bounded observed close plus group absence, using the shared baseline helpers.
-    async shutdown() {
-      if (!closed) {
-        await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 500))]);
-      }
-      if (!closed) {
-        const terminated = await terminateProcessGroup(child, { graceMs: 1000, cleanupTimeoutMs: 2000 });
-        assert.equal(terminated, true, "fake provider group must terminate");
-        await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2000))]);
-      }
-      assert.equal(closed, true, "fake provider must close before teardown completes");
-      assert.equal(processGroupExists(child.pid), false, "fake provider group must be absent after close");
-    },
-  };
+    return {
+      child,
+      port: ready.port,
+      async shutdown() {
+        if (!closed) {
+          await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 500))]);
+        }
+        if (!closed) {
+          const terminated = await terminateProcessGroup(child, { graceMs: 1000, cleanupTimeoutMs: 2000 });
+          assert.equal(terminated, true, "fake provider group must terminate");
+          await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2000))]);
+        }
+        assert.equal(closed, true, "fake provider must close before teardown completes");
+        assert.equal(processGroupExists(child.pid), false, "fake provider group must be absent after close");
+      },
+    };
+  } catch (error) {
+    // Startup failed before the handle was returned: the detached process group
+    // must be terminated and observed gone before the rejection propagates.
+    try { child.stdout.destroy(); } catch {}
+    try { child.stderr?.destroy(); } catch {}
+    const terminated = await terminateProcessGroup(child, { graceMs: 1000, cleanupTimeoutMs: 2000 });
+    await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2000))]);
+    assert.equal(terminated, true, "fake provider group must terminate on startup failure");
+    assert.equal(processGroupExists(child.pid), false, "fake provider group must be absent after startup failure");
+    throw error;
+  }
 }
 
 async function stats() {
@@ -113,6 +124,7 @@ function fixture({ cacheEnabled = true, extension = join(ROOT, "index.ts") } = {
   const project = join(work, ".pi");
   mkdirSync(agent, { recursive: true });
   mkdirSync(project, { recursive: true });
+  writeFileSync(join(home, "network-violations.log"), "");
   writeFileSync(join(agent, "models.json"), JSON.stringify({
     providers: {
       fake: {
@@ -259,14 +271,32 @@ function startRpc({ home, work, extension }) {
       if (!closeInfo) {
         const terminated = await terminateProcessGroup(child, { graceMs: 1_000, cleanupTimeoutMs: 2_000 });
         await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+        // On a denied-signaling path the child's pipes may still be open; destroy
+        // and unref them so the test worker can exit, while keeping the cleanup
+        // failure observable for releaseScratch.
+        try { child.stdout.destroy(); } catch {}
+        try { child.stderr.destroy(); } catch {}
+        try { child.unref(); } catch {}
         if (!terminated) return { closed: Boolean(closeInfo), groupGone: !processGroupExists(child.pid) };
       }
+      try { child.stdout.destroy(); } catch {}
+      try { child.stderr.destroy(); } catch {}
+      try { child.unref(); } catch {}
       return { closed: Boolean(closeInfo), groupGone: !processGroupExists(child.pid), code: closeInfo?.code, signal: closeInfo?.signal };
     })();
     return closePromise.then(async (result) => {
-      let violations = "";
+      // A missing violations log is a failure, not an empty pass: a blocked
+      // request whose log write failed must not pass undetected.
+      let violations;
       try { violations = readFileSync(join(home, "network-violations.log"), "utf8"); }
-      catch (error) { if (error.code !== "ENOENT") throw error; }
+      catch (error) {
+        if (error.code === "ENOENT") throw new Error("network-violations log is missing");
+        throw error;
+      }
+      // Captured stderr indicating a blocked request is also a failure.
+      if (/blocked|network.?violation|violation/i.test(stderr)) {
+        throw new Error(`blocked request observed in captured stderr: ${stderr.trim()}`);
+      }
       return { ...result, violations };
     });
   }
