@@ -43,21 +43,17 @@ function signalGroup(groupId, signal) {
   catch (error) { return error?.code !== "ESRCH"; }
 }
 
-async function terminateGroup(child, closePromise, groupId) {
-  let closed = false;
-  closePromise.then(() => { closed = true; });
-  if (!closed) {
-    signalGroup(groupId, "SIGTERM");
-    await Promise.race([closePromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-  }
-  if (!closed) {
-    signalGroup(groupId, "SIGKILL");
-    await Promise.race([closePromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-  }
+async function terminateGroup(_child, closePromise, groupId) {
+  // The group may already be gone; ESRCH is swallowed by signalGroup. Escalate
+  // only on a bounded grace window, then always await the observed close.
+  signalGroup(groupId, "SIGTERM");
+  await Promise.race([closePromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+  signalGroup(groupId, "SIGKILL");
+  await Promise.race([closePromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
   await closePromise;
 }
 
-function runNamed({ scratch, testFile, testName, timeoutMs = 120_000 }) {
+function runNamed({ scratch, testFile, testName, timeoutMs = 60_000 }) {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   delete env.BIFROST_ACCEPTANCE_EVENTS;

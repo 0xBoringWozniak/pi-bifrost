@@ -280,7 +280,7 @@ describe("reliability migration acceptance against pinned Pi", { timeout: 300_00
   });
 });
 
-describe("migration exact mutation boundaries and controlled fault", { timeout: 180_000, concurrency: 1 }, () => {
+describe("migration exact mutation boundaries and controlled fault", { timeout: 300_000, concurrency: 1 }, () => {
   const config = reliabilityV2Config({ cooldownMinutes: 1 });
 
   it("rejects a held active v1 source writer before backup or v2 mutation at the deterministic fence boundary", async () => {

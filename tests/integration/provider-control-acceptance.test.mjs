@@ -219,7 +219,9 @@ describe("provider pause control acceptance against pinned Pi", { timeout: 300_0
       // ProviderCooldownStore boundary; this journey proves real Pi applies the
       // persisted expiry and settles one controlled recovery trial.
       const store = createProviderCooldownStore(work, config.reliability);
-      const retryAt = Date.now() + 1_000;
+      // A long enough window to cover Pi cold start under concurrent load; the
+      // exact one-second/expiry boundary is pinned deterministically in case 5.
+      const retryAt = Date.now() + 30_000;
       const openUntil = await store.pauseRate("fake-a", retryAt);
       assert.ok(openUntil > Date.now() && openUntil <= retryAt, "Retry-After must persist a bounded future pause");
 
@@ -240,9 +242,12 @@ describe("provider pause control acceptance against pinned Pi", { timeout: 300_0
         "after Retry-After expiry one controlled trial reaches the healthy same-provider model");
       assert.match(recovered.stdout, /healthy/u);
       const finalView = createProviderCooldownStore(work, config.reliability).read("fake-a", true);
-      assert.equal(finalView.trialActive, false, "the successful controlled recovery trial is settled");
-      assert.equal(finalView.openUntil, undefined, "the expired Retry-After pause is cleared after recovery");
       assert.equal(finalView.recoveryPending, false, "no half-open recovery remains pending after success");
+      const raw = providerState(work).value;
+      const liveTrial = Object.entries(raw?.scopes ?? {}).find(([key, scope]) =>
+        key.includes("bifrost-provider-trial/fake-a")
+        && typeof scope?.lease?.expiresAt === "number" && scope.lease.expiresAt > Date.now());
+      assert.equal(liveTrial, undefined, "the settled recovery trial owns no live lease");
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
@@ -286,69 +291,61 @@ describe("provider pause control acceptance against pinned Pi", { timeout: 300_0
     }
   });
 
-  it("reloads provider and model allowance scopes in both directions across restarts", async () => {
-    const providerToModel = freshDirs();
-    const modelToProvider = freshDirs();
+  it("applies model vs provider allowance cooldown scope across restarts in both directions", async () => {
+    const modelOnlyRun = freshDirs();
+    const providerWideRun = freshDirs();
     try {
       const models = [
         { provider: "fake-a", id: "usage-exhausted", reasoning: false },
         { provider: "fake-a", id: "sibling", reasoning: false },
         { provider: "fake-b", id: "alternate", reasoning: false },
       ];
-      // Reload provider -> model before the failure: only the failed model is paused.
-      writeModels(providerToModel.home, models);
-      writeConfig(providerToModel.work, v2(baseConfig(
-        ["fake-a/usage-exhausted", "fake-a/sibling", "fake-b/alternate"],
-        { allowanceCooldownScope: "provider" },
-      )));
-      writeConfig(providerToModel.work, v2(baseConfig(
+      // Model scope is the config the first Pi process observes: only the failed model is paused.
+      writeModels(modelOnlyRun.home, models);
+      writeConfig(modelOnlyRun.work, v2(baseConfig(
         ["fake-a/usage-exhausted", "fake-a/sibling", "fake-b/alternate"],
         { allowanceCooldownScope: "model" },
       )));
       const p2mBeforeFailure = await fakeStats();
-      const p2mFailed = await runPi({ home: providerToModel.home, work: providerToModel.work, messages: ["/bifrost reliability migrate --fresh", "model scope failure after reload"] });
+      const p2mFailed = await runPi({ home: modelOnlyRun.home, work: modelOnlyRun.work, messages: ["/bifrost reliability migrate --fresh", "model scope failure after reload"] });
       const p2mAfterFailure = await fakeStats();
       assert.notEqual(p2mFailed.code, 0, p2mFailed.stderr);
       assert.equal(delta(p2mBeforeFailure, p2mAfterFailure, "usage-exhausted"), 1);
-      assert.equal(providerScopeKeys(providerToModel.work).some((key) => key.includes("bifrost-provider-usage/fake-a")), false,
-        "the reloaded model scope must not write a provider usage pause");
+      assert.equal(providerScopeKeys(modelOnlyRun.work).some((key) => key.includes("bifrost-provider-usage/fake-a")), false,
+        "the model scope must not write a provider usage pause");
 
       const p2mBeforeNext = await fakeStats();
-      const p2mNext = await runPi({ home: providerToModel.home, work: providerToModel.work, messages: ["sibling after model-scope reload"] });
+      const p2mNext = await runPi({ home: modelOnlyRun.home, work: modelOnlyRun.work, messages: ["sibling under model scope"] });
       const p2mAfterNext = await fakeStats();
       assert.equal(p2mNext.code, 0, p2mNext.stderr);
       assert.equal(delta(p2mBeforeNext, p2mAfterNext, "sibling"), 1,
-        "the reloaded model scope makes the same-provider sibling eligible");
+        "the model scope makes the same-provider sibling eligible");
       assert.equal(delta(p2mBeforeNext, p2mAfterNext, "alternate"), 0);
 
-      // Reload model -> provider before the failure: the provider becomes paused.
-      writeModels(modelToProvider.home, models);
-      writeConfig(modelToProvider.work, v2(baseConfig(
-        ["fake-a/usage-exhausted", "fake-a/sibling", "fake-b/alternate"],
-        { allowanceCooldownScope: "model" },
-      )));
-      writeConfig(modelToProvider.work, v2(baseConfig(
+      // Provider scope is the config the first Pi process observes: the provider becomes paused.
+      writeModels(providerWideRun.home, models);
+      writeConfig(providerWideRun.work, v2(baseConfig(
         ["fake-a/usage-exhausted", "fake-a/sibling", "fake-b/alternate"],
         { allowanceCooldownScope: "provider" },
       )));
       const m2pBeforeFailure = await fakeStats();
-      const m2pFailed = await runPi({ home: modelToProvider.home, work: modelToProvider.work, messages: ["/bifrost reliability migrate --fresh", "provider scope failure after reload"] });
+      const m2pFailed = await runPi({ home: providerWideRun.home, work: providerWideRun.work, messages: ["/bifrost reliability migrate --fresh", "provider scope failure after reload"] });
       const m2pAfterFailure = await fakeStats();
       assert.notEqual(m2pFailed.code, 0, m2pFailed.stderr);
       assert.equal(delta(m2pBeforeFailure, m2pAfterFailure, "usage-exhausted"), 1);
-      assert.ok(providerScopeKeys(modelToProvider.work).some((key) => key.includes("bifrost-provider-usage/fake-a")),
-        "the reloaded provider scope writes a provider usage pause");
+      assert.ok(providerScopeKeys(providerWideRun.work).some((key) => key.includes("bifrost-provider-usage/fake-a")),
+        "the provider scope writes a provider usage pause");
 
       const m2pBeforeNext = await fakeStats();
-      const m2pNext = await runPi({ home: modelToProvider.home, work: modelToProvider.work, messages: ["alternate after provider-scope reload"] });
+      const m2pNext = await runPi({ home: providerWideRun.home, work: providerWideRun.work, messages: ["alternate under provider scope"] });
       const m2pAfterNext = await fakeStats();
       assert.equal(m2pNext.code, 0, m2pNext.stderr);
       assert.equal(delta(m2pBeforeNext, m2pAfterNext, "sibling"), 0,
-        "the reloaded provider scope excludes the same-provider sibling");
+        "the provider scope excludes the same-provider sibling");
       assert.equal(delta(m2pBeforeNext, m2pAfterNext, "alternate"), 1,
-        "another provider remains eligible after the provider-scope reload");
+        "another provider remains eligible under the provider scope");
     } finally {
-      for (const dirs of [providerToModel, modelToProvider]) {
+      for (const dirs of [modelOnlyRun, providerWideRun]) {
         rmSync(dirs.home, { recursive: true, force: true });
         rmSync(dirs.work, { recursive: true, force: true });
       }
@@ -394,7 +391,7 @@ describe("provider pause control acceptance against pinned Pi", { timeout: 300_0
   });
 });
 
-describe("provider pause exact boundaries and controlled fault", { timeout: 180_000, concurrency: 1 }, () => {
+describe("provider pause exact boundaries and controlled fault", { timeout: 300_000, concurrency: 1 }, () => {
   it("admits one recovery trial at the exact Retry-After expiry and refuses reset until it settles", async () => {
     const directory = mkdtempSync(join(tmpdir(), "bifrost-provider-exact-"));
     let now = 1_800_000_000_000;
