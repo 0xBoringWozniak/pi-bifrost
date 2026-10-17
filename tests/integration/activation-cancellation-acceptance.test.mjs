@@ -257,7 +257,7 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
           : defaultAction;
       }`;
     assert.ok(original.includes(guard), "late-abort guard must exist in production source");
-    const mutantSource = original.replace(guard, "      /* late-abort guard removed for fault control */");
+    const mutantSource = original.replace(guard, "      console.error('MUTANT_GUARD_REMOVED_REACHED');");
     assert.notEqual(mutantSource, original);
 
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-activation-fault-"));
