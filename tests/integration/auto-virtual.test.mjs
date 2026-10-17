@@ -1272,7 +1272,7 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
 // tests/fixtures/replay-fault-control.mjs for the guard inventory, the named
 // proof specs, and the still-outstanding follow-ups.
 describe("G03 replay guard integrity anchor", () => {
-  it("anchors the baseline source hash and proves isSideEffectFreeAllowanceFailure faults the output-effect no-replay assertion", () => {
+  it("anchors the baseline source hash and proves isSideEffectFreeAllowanceFailure faults the output-effect no-replay assertion", async () => {
     const source = readFileSync(EXTENSION_PATH, "utf8");
     const hash = createHash("sha256").update(source).digest("hex");
     assert.equal(hash, REPLAY_GUARD_BASELINE_SHA256);
@@ -1280,7 +1280,7 @@ describe("G03 replay guard integrity anchor", () => {
       assert.ok(source.includes(`function ${fn}`), `missing production replay guard: ${fn}`);
     }
 
-    const receipt = runReplayGuardFaultProof({ root: ROOT, log: (message) => process.stderr.write(`${message}\n`) });
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, log: (message) => process.stderr.write(`${message}\n`) });
     assert.equal(receipt.guard, "isSideEffectFreeAllowanceFailure");
     assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
     assert.notEqual(receipt.mutantSha256, receipt.baselineSha256, "the guard bypass must change the source hash");
@@ -1290,9 +1290,9 @@ describe("G03 replay guard integrity anchor", () => {
     assert.equal(receipt.phases.restoredGreen, 0);
   });
 
-  it("proves autoBoundaryStillActive faults the synthetic tool side-effect no-replay assertion", () => {
+  it("proves autoBoundaryStillActive faults the synthetic tool side-effect no-replay assertion", async () => {
     const proof = FAULT_PROOFS.autoBoundaryToolSideEffect;
-    const receipt = runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
 
     assert.equal(receipt.guard, proof.guard);
     assert.equal(receipt.testName, proof.testName);

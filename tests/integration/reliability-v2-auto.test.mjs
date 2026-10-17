@@ -1202,12 +1202,12 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
 // tests/fixtures/replay-fault-control.mjs for the guard inventory and the
 // still-outstanding guard/assertion follow-ups.
 describe("G03 replay guard integrity anchor", () => {
-  it("proves allowanceRetryBoundaryStillSafe faults the v2 Auto allowance-retry assertion", () => {
+  it("proves allowanceRetryBoundaryStillSafe faults the v2 Auto allowance-retry assertion", async () => {
     const proof = FAULT_PROOFS.allowanceRetryBoundaryV2;
     const sourceHash = createHash("sha256").update(readFileSync(EXTENSION, "utf8")).digest("hex");
     assert.equal(sourceHash, REPLAY_GUARD_BASELINE_SHA256, "the proof requires the baseline production source");
 
-    const receipt = runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
     assert.equal(receipt.guard, proof.guard);
     assert.equal(receipt.testName, proof.testName);
     assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
