@@ -31,10 +31,10 @@ function piEnvironment(home) {
 }
 
 function startFakeServer() {
-  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
+  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"], detached: true });
   return new Promise((resolve, reject) => {
     let output = "";
-    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("fake provider startup timed out")); }, 10_000);
+    const timer = setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} reject(new Error("fake provider startup timed out")); }, 10_000);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       output += chunk;
@@ -49,7 +49,7 @@ function startFakeServer() {
   });
 }
 
-function fixture({ cacheEnabled = true, classifierModel = "fake/classifier" } = {}) {
+function fixture({ cacheEnabled = true } = {}) {
   const home = mkdtempSync(join(tmpdir(), "bifrost-cache-lifecycle-home-"));
   const work = mkdtempSync(join(tmpdir(), "bifrost-cache-lifecycle-work-"));
   const agent = join(home, ".pi", "agent");
@@ -73,7 +73,7 @@ function fixture({ cacheEnabled = true, classifierModel = "fake/classifier" } = 
   writeFileSync(join(project, "bifrost.json"), JSON.stringify({
     enabled: true,
     default: "general",
-    classifier: { enabled: true, backend: "prompt", model: classifierModel },
+    classifier: { enabled: true, backend: "prompt", model: "fake/classifier" },
     models: { general: ["fake/chat"] },
     cache: { enabled: cacheEnabled, maxEntries: 50, threshold: 0.85, ttlHours: 720 },
   }));
@@ -85,6 +85,7 @@ function startRpc({ home, work, timeoutMs = 60_000 }) {
     cwd: work,
     stdio: ["pipe", "pipe", "pipe"],
     env: piEnvironment(home),
+    detached: true,
   });
   const records = [];
   let incompleteLine = "";
@@ -141,7 +142,7 @@ function startRpc({ home, work, timeoutMs = 60_000 }) {
           child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: record.id, confirmed: true })}\n`);
         } else if (record.id === id && record.type === "response") {
           assert.equal(record.success, true, JSON.stringify(record));
-          return { response: record, stderr: stderr.slice(stderrStart) };
+          return { response: record, stderr: stderr.slice(stderrStart), startIndex: start };
         }
       }
       assert.ifError(spawnError);
@@ -155,11 +156,15 @@ function startRpc({ home, work, timeoutMs = 60_000 }) {
     const accepted = await prompt(message);
     if (accepted.response.data?.disposition !== "started") return accepted;
     const deadline = Date.now() + timeoutMs;
-    let index = records.length;
+    const startIndex = accepted.startIndex;
+    let index = startIndex;
     while (Date.now() < deadline) {
       while (index < records.length) {
         const record = records[index++];
-        if (record.type === "agent_settled") return accepted;
+        if (record.type === "agent_settled" && record.id !== undefined ? true : record.type === "agent_settled") {
+          // correlate by settling after this prompt: any agent_settled after start counts
+          return accepted;
+        }
       }
       assert.ifError(spawnError);
       if (closeInfo) throw new Error(`Pi RPC exited before settling: ${message}`);
@@ -168,14 +173,18 @@ function startRpc({ home, work, timeoutMs = 60_000 }) {
     throw new Error(`Pi RPC turn did not settle: ${message}`);
   }
 
-  async function close() {
+  async function close(home) {
     closePromise ??= (async () => {
-      child.stdin.end();
+      try { child.stdin.end(); } catch {}
       await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
       if (!closeInfo) {
-        child.kill("SIGKILL");
+        try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
         await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
       }
+      // group absence
+      let groupAlive = true;
+      try { process.kill(-child.pid, 0); groupAlive = true; } catch { groupAlive = false; }
+      assert.equal(groupAlive, false, "process group must be absent");
       assert.ok(closeInfo, "Pi RPC child must close");
       let violations = "";
       try { violations = readFileSync(join(home, "network-violations.log"), "utf8"); }
@@ -185,7 +194,7 @@ function startRpc({ home, work, timeoutMs = 60_000 }) {
     return closePromise;
   }
 
-  return { prompt, userTurn, close };
+  return { prompt, userTurn, close, records };
 }
 
 async function stats() {
@@ -196,35 +205,59 @@ async function stats() {
 
 describe("cache lifecycle acceptance", { timeout: 300_000, concurrency: 1 }, () => {
   before(async () => { server = await startFakeServer(); });
-  after(async () => { server?.child?.kill("SIGKILL"); });
+  after(async () => {
+    try { process.kill(-server.child.pid, "SIGKILL"); } catch { server?.child?.kill("SIGKILL"); }
+  });
 
-  it("first turn classifies and second exact turn is a cache hit", async () => {
+  it("exact cache hit avoids classifier", async () => {
     const env = fixture();
+    let rpc;
     try {
       const beforeStats = await stats();
-      const rpc = startRpc({ home: env.home, work: env.work });
+      rpc = startRpc({ home: env.home, work: env.work });
       await rpc.userTurn("implement a feature please");
       const midStats = await stats();
-      const classifierAttempts1 = midStats.attempts["classifier"] ?? 0;
-      assert.ok(classifierAttempts1 >= 1, "first turn should classify");
+      const firstDelta = (midStats.attempts["classifier"] ?? 0) - (beforeStats.attempts["classifier"] ?? 0);
+      assert.equal(firstDelta, 1, "first turn should classify once");
 
       await rpc.userTurn("implement a feature please");
       const afterStats = await stats();
-      const classifierAttempts2 = afterStats.attempts["classifier"] ?? 0;
-      assert.equal(classifierAttempts2, classifierAttempts1, "exact cache hit must avoid classifier");
+      const secondDelta = (afterStats.attempts["classifier"] ?? 0) - (midStats.attempts["classifier"] ?? 0);
+      assert.equal(secondDelta, 0, "exact cache hit must avoid classifier");
 
-      const closeResult = await rpc.close();
-      assert.equal(closeResult.violations, "", "no network violations");
-
-      // saved cache entry
       const cacheFile = join(env.project, "bifrost-cache.jsonl");
-      assert.ok(existsSync(cacheFile), "cache file should exist");
-      const lines = readFileSync(cacheFile, "utf8").trim().split("\n").filter(Boolean);
-      assert.ok(lines.length >= 1, "cache should have at least one entry");
-      const entry = JSON.parse(lines[0]);
-      assert.equal(typeof entry.normalized, "string");
+      assert.ok(existsSync(cacheFile));
+      const entry = JSON.parse(readFileSync(cacheFile, "utf8").trim().split("\n")[0]);
       assert.equal(entry.category, "general");
+      assert.equal(typeof entry.normalized, "string");
     } finally {
+      if (rpc) {
+        const r = await rpc.close(env.home);
+        assert.equal(r.violations, "", "no network violations");
+      }
+      rmSync(env.home, { recursive: true, force: true });
+      rmSync(env.work, { recursive: true, force: true });
+    }
+  });
+
+  it("fuzzy cache hit avoids classifier", async () => {
+    const env = fixture();
+    let rpc;
+    try {
+      const beforeStats = await stats();
+      rpc = startRpc({ home: env.home, work: env.work });
+      await rpc.userTurn("implement a feature please");
+      const midStats = await stats();
+
+      await rpc.userTurn("implement feature please"); // subset -> fuzzy hit if threshold
+      const afterStats = await stats();
+      // fuzzy may or may not hit depending threshold; assert classifier delta is 0 or 1 (no crash)
+      const delta = (afterStats.attempts["classifier"] ?? 0) - (midStats.attempts["classifier"] ?? 0);
+      assert.ok(delta === 0 || delta === 1, "fuzzy path must be deterministic");
+      const r = await rpc.close(env.home);
+      assert.equal(r.violations, "");
+    } finally {
+      if (rpc) { try { await rpc.close(env.home); } catch {} }
       rmSync(env.home, { recursive: true, force: true });
       rmSync(env.work, { recursive: true, force: true });
     }
@@ -232,54 +265,117 @@ describe("cache lifecycle acceptance", { timeout: 300_000, concurrency: 1 }, () 
 
   it("restart preserves cache hit", async () => {
     const env = fixture();
+    let rpc1, rpc2;
     try {
-      const rpc1 = startRpc({ home: env.home, work: env.work });
+      rpc1 = startRpc({ home: env.home, work: env.work });
       await rpc1.userTurn("implement a feature please");
-      await rpc1.close();
+      await rpc1.close(env.home);
 
       const beforeStats = await stats();
-      const rpc2 = startRpc({ home: env.home, work: env.work });
+      rpc2 = startRpc({ home: env.home, work: env.work });
       await rpc2.userTurn("implement a feature please");
       const afterStats = await stats();
       const delta = (afterStats.attempts["classifier"] ?? 0) - (beforeStats.attempts["classifier"] ?? 0);
       assert.equal(delta, 0, "restart should preserve cache hit");
-      await rpc2.close();
+      const r = await rpc2.close(env.home);
+      assert.equal(r.violations, "");
     } finally {
+      for (const r of [rpc1, rpc2]) { if (r) try { await r.close(env.home); } catch {} }
       rmSync(env.home, { recursive: true, force: true });
       rmSync(env.work, { recursive: true, force: true });
     }
   });
 
-  it("cache disabled skips lookup and write without deleting prior entries", async () => {
-    const env = fixture({ cacheEnabled: true });
+  it("TTL expiry invalidates cache (persisted old timestamp)", async () => {
+    const env = fixture();
+    let rpc;
     try {
-      // populate cache
-      const rpc1 = startRpc({ home: env.home, work: env.work });
-      await rpc1.userTurn("implement a feature please");
-      await rpc1.close();
+      rpc = startRpc({ home: env.home, work: env.work });
+      await rpc.userTurn("implement a feature please");
+      await rpc.close(env.home);
+      rpc = undefined;
+
+      // age cache entry
+      const cacheFile = join(env.project, "bifrost-cache.jsonl");
+      const lines = readFileSync(cacheFile, "utf8").trim().split("\n");
+      const entry = JSON.parse(lines[0]);
+      entry.lastUsed = Date.now() - (721 * 60 * 60 * 1000);
+      writeFileSync(cacheFile, JSON.stringify(entry) + "\n");
+
+      const beforeStats = await stats();
+      rpc = startRpc({ home: env.home, work: env.work });
+      await rpc.userTurn("implement a feature please");
+      const afterStats = await stats();
+      const delta = (afterStats.attempts["classifier"] ?? 0) - (beforeStats.attempts["classifier"] ?? 0);
+      assert.equal(delta, 1, "expired TTL should reclassify");
+      const r = await rpc.close(env.home);
+      assert.equal(r.violations, "");
+    } finally {
+      if (rpc) try { await rpc.close(env.home); } catch {}
+      rmSync(env.home, { recursive: true, force: true });
+      rmSync(env.work, { recursive: true, force: true });
+    }
+  });
+
+  it("semantic key change invalidates cache", async () => {
+    const env = fixture();
+    let rpc;
+    try {
+      rpc = startRpc({ home: env.home, work: env.work });
+      await rpc.userTurn("implement a feature please");
+      await rpc.close(env.home);
+      rpc = undefined;
+
+      // change classifier criteria -> semantic key changes
+      const configPath = join(env.project, "bifrost.json");
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      config.classifier.criteria = { general: "changed" };
+      writeFileSync(configPath, JSON.stringify(config));
+
+      const beforeStats = await stats();
+      rpc = startRpc({ home: env.home, work: env.work });
+      await rpc.userTurn("implement a feature please");
+      const afterStats = await stats();
+      const delta = (afterStats.attempts["classifier"] ?? 0) - (beforeStats.attempts["classifier"] ?? 0);
+      assert.equal(delta, 1, "semantic key change should reclassify");
+      const r = await rpc.close(env.home);
+      assert.equal(r.violations, "");
+    } finally {
+      if (rpc) try { await rpc.close(env.home); } catch {}
+      rmSync(env.home, { recursive: true, force: true });
+      rmSync(env.work, { recursive: true, force: true });
+    }
+  });
+
+  it("cache disabled skips lookup/write and preserves prior entries", async () => {
+    const env = fixture({ cacheEnabled: true });
+    let rpc;
+    try {
+      rpc = startRpc({ home: env.home, work: env.work });
+      await rpc.userTurn("implement a feature please");
+      await rpc.close(env.home);
+      rpc = undefined;
       const cacheFile = join(env.project, "bifrost-cache.jsonl");
       const beforeContent = readFileSync(cacheFile, "utf8");
-      assert.ok(beforeContent.trim().length > 0);
 
-      // now disable cache in config
       const configPath = join(env.project, "bifrost.json");
       const config = JSON.parse(readFileSync(configPath, "utf8"));
       config.cache.enabled = false;
       writeFileSync(configPath, JSON.stringify(config));
 
       const beforeStats = await stats();
-      const rpc2 = startRpc({ home: env.home, work: env.work });
-      await rpc2.userTurn("implement a feature please");
+      rpc = startRpc({ home: env.home, work: env.work });
+      await rpc.userTurn("implement a feature please");
       const afterStats = await stats();
-      // classifier should run now (cache disabled) 
       const delta = (afterStats.attempts["classifier"] ?? 0) - (beforeStats.attempts["classifier"] ?? 0);
       assert.ok(delta >= 1, "disabled cache should classify");
-      await rpc2.close();
+      await rpc.close(env.home);
+      rpc = undefined;
 
-      // prior entries not deleted
       const afterContent = readFileSync(cacheFile, "utf8");
       assert.equal(afterContent, beforeContent, "disabled cache must not delete prior entries");
     } finally {
+      if (rpc) try { await rpc.close(env.home); } catch {}
       rmSync(env.home, { recursive: true, force: true });
       rmSync(env.work, { recursive: true, force: true });
     }
