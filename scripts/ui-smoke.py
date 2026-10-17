@@ -818,6 +818,7 @@ def main() -> int:
             },
         ),
         ("dashboard", True, [(1.0, "/bifrost\r")]),
+        ("classifier-picker", True, [(0.5, "/bifrost classifier\r")], {"classifier": {"enabled": False, "backend": "prompt"}}),
         ("validate", True, [(0.5, "/bifrost validate\r")]),
         ("inspect", True, [(0.5, "/bifrost inspect\r")]),
         (
@@ -914,6 +915,26 @@ def main() -> int:
                 launch_auto,
                 only_models,
             ))
+            if name == "startup":
+                startup_text = (OUT / "startup.txt").read_text(errors="ignore")
+                # Footer stays Pi-owned: Pi renders the physical model label and
+                # Bifrost contributes only a separate status line.
+                if "(fake) healthy" not in startup_text:
+                    raise AssertionError("startup footer lost Pi's physical model label (footer must stay Pi-owned)")
+                if "Bifrost ·" not in startup_text:
+                    raise AssertionError("startup did not render the Bifrost status line")
+            if name == "dashboard":
+                dashboard_text = (OUT / "dashboard.txt").read_text(errors="ignore")
+                if "→ /bifrost off" not in dashboard_text or "Choose classifier backend" not in dashboard_text:
+                    raise AssertionError("dashboard picker did not render the root command list")
+                if "(fake) healthy" not in dashboard_text or "Bifrost ·" not in dashboard_text:
+                    raise AssertionError("dashboard footer is not Pi-owned with a separate Bifrost status")
+            if name == "classifier-picker":
+                picker_text = (OUT / "classifier-picker.txt").read_text(errors="ignore")
+                if "Classifier backend" not in picker_text or "prompt — choose a Pi model" not in picker_text:
+                    raise AssertionError("classifier picker did not render the backend choices")
+                if "(fake) healthy" not in picker_text or "Bifrost ·" not in picker_text:
+                    raise AssertionError("classifier picker footer is not Pi-owned with a separate Bifrost status")
             if name == "preview-trace":
                 trace_text = (OUT / "preview-trace.txt").read_text(errors="ignore")
                 if "route trace v1" not in trace_text:
