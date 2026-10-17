@@ -352,7 +352,7 @@ async function runDeterministic({ root, artifactDir }) {
 }
 
 export function supportingTestCase({ target, testEvents, artifactDir, root, eventPath }) {
-  const result = matchNamedTestEvent(testEvents, target);
+  const result = matchNamedTestEvent(testEvents, target, root);
   const caseArtifact = target.caseArtifact ? join(artifactDir, target.caseArtifact) : undefined;
   const hasCaseArtifact = caseArtifact ? existsSync(caseArtifact) : true;
   const status = !result ? "blocked" : !result.passed ? "failed" : !hasCaseArtifact ? "blocked" : "passed";

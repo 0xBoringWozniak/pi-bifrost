@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
-import { git, matchNamedTestEvent } from "./core.mjs";
+import { isAbsolute, join } from "node:path";
+import { git, matchNamedTestEvent, normalizedTestPath } from "./core.mjs";
 
 const MANIFEST = "change-evidence.json";
 const SHA = /^[a-f0-9]{40}$/;
@@ -23,7 +23,7 @@ export function validateChangeEvidence({ manifest, base, changedFiles, testEvent
   requireValue(manifest?.schemaVersion === 1 && manifest.base === base, "missing, unsupported or stale declaration");
   requireValue(Array.isArray(manifest.contracts) && manifest.contracts.length > 0, "contracts must not be empty");
   const changed = new Set(changedFiles.filter((file) => file !== MANIFEST));
-  const covered = new Set();
+  const covered = new Map();
   const ids = new Set();
   for (const contract of manifest.contracts) {
     requireValue(text(contract?.id) && !ids.has(contract.id), "contract IDs must be unique and nonempty");
@@ -33,7 +33,8 @@ export function validateChangeEvidence({ manifest, base, changedFiles, testEvent
     requireValue(Array.isArray(contract.files) && contract.files.length > 0, "changed files are required");
     for (const file of contract.files) {
       requireValue(safePath(file) && changed.has(file), `file is not in the candidate diff: ${file}`);
-      covered.add(file);
+      requireValue(!covered.has(file), `duplicate file coverage: ${file} declared by ${covered.get(file)} and ${contract.id}`);
+      covered.set(file, contract.id);
     }
     for (const dimension of ["boundaryTest", "invariant", "fault"]) {
       const evidence = contract[dimension];
@@ -45,8 +46,8 @@ export function validateChangeEvidence({ manifest, base, changedFiles, testEvent
       requireValue(safePath(evidence.file) && evidence.file.startsWith("tests/") && text(evidence.name), `${contract.id}: invalid ${dimension} test reference`);
       // Normalize exact paths before using the shared matcher; suffix aliases are not evidence.
       const events = testEvents.filter((event) => typeof event.file === "string"
-        && resolve(root, event.file) === resolve(root, evidence.file));
-      const result = matchNamedTestEvent(events, evidence);
+        && normalizedTestPath(root, event.file) === normalizedTestPath(root, evidence.file));
+      const result = matchNamedTestEvent(events, evidence, root);
       requireValue(result?.type === "test:complete" && result.passed === true && !result.skipped && !result.todo,
         `${contract.id}: ${dimension} did not complete uniquely and successfully: ${evidence.file} — ${evidence.name}`);
     }

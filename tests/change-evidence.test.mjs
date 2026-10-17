@@ -75,6 +75,45 @@ test("checks real git diff and fails closed for missing PR metadata or declarati
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("rejects a test event whose path only suffix-matches the declared file", () => {
+  for (const file of ["/other/tests/route.test.ts", "vendor/tests/route.test.ts", "other/repo/tests/route.test.ts"]) {
+    const data = input();
+    data.testEvents = [{ type: "test:complete", file, name: ref.name, passed: true }];
+    assert.throws(() => validateChangeEvidence(data), /did not complete/);
+  }
+});
+
+test("accepts exact normalized event paths including CI fetch-depth checkout layouts", () => {
+  for (const file of ["tests/route.test.ts", "./tests/route.test.ts", "/repo/tests/route.test.ts"]) {
+    const data = input();
+    data.testEvents = [{ type: "test:complete", file, name: ref.name, passed: true }];
+    assert.equal(validateChangeEvidence(data), data.manifest);
+  }
+  const ci = { ...input(), root: "/home/runner/work/bifrost/bifrost" };
+  ci.testEvents = [{ type: "test:complete", file: "/home/runner/work/bifrost/bifrost/tests/route.test.ts", name: ref.name, passed: true }];
+  assert.equal(validateChangeEvidence(ci), ci.manifest);
+});
+
+test("rejects a changed file covered by more than one contract with a named error", () => {
+  const data = input();
+  data.manifest.contracts.push({ id: "routing-copy", requirement: "R02", files: ["routing.ts"],
+    boundary: "duplicate boundary", assertions: "duplicate assertions",
+    boundaryTest: { ...ref }, invariant: { ...ref }, fault: { ...ref } });
+  assert.throws(() => validateChangeEvidence(data), /duplicate file coverage: routing\.ts declared by routing and routing-copy/);
+});
+
+test("keeps previously passing declarations passing", () => {
+  const data = input();
+  assert.equal(validateChangeEvidence(data), data.manifest);
+  data.manifest.contracts[0].invariant = { exception: "Static docs-only example; no state transitions." };
+  assert.equal(validateChangeEvidence(data), data.manifest);
+  data.changedFiles.push("other.ts");
+  data.manifest.contracts.push({ id: "other", requirement: "R02", files: ["other.ts"],
+    boundary: "second boundary", assertions: "second assertions",
+    boundaryTest: { exception: "no state" }, invariant: { exception: "no state" }, fault: { exception: "no state" } });
+  assert.equal(validateChangeEvidence(data), data.manifest);
+});
+
 test("the missing-case assertion detects a disabled execution guard", async () => {
   const directory = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-fault-"));
   const source = readFileSync(new URL("../scripts/acceptance/change-evidence.mjs", import.meta.url), "utf8");
