@@ -1,11 +1,13 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { reliabilitySourceFencePath } from "../../reliability-v1-fence.ts";
+import { REPLAY_GUARD_BASELINE_SHA256, FAULT_PROOFS, runReplayGuardFaultProof } from "../fixtures/replay-fault-control.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -1194,4 +1196,26 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
       }
     });
   }
+});
+
+// This executable fault proof lives beside the assertion it must turn RED. See
+// tests/fixtures/replay-fault-control.mjs for the guard inventory and the
+// still-outstanding guard/assertion follow-ups.
+describe("G03 replay guard integrity anchor", () => {
+  it("proves allowanceRetryBoundaryStillSafe faults the v2 Auto allowance-retry assertion", () => {
+    const proof = FAULT_PROOFS.allowanceRetryBoundaryV2;
+    const sourceHash = createHash("sha256").update(readFileSync(EXTENSION, "utf8")).digest("hex");
+    assert.equal(sourceHash, REPLAY_GUARD_BASELINE_SHA256, "the proof requires the baseline production source");
+
+    const receipt = runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
+    assert.equal(receipt.guard, proof.guard);
+    assert.equal(receipt.testName, proof.testName);
+    assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
+    assert.notEqual(receipt.mutantSha256, receipt.baselineSha256, "the boundary fault must change the source hash");
+    assert.equal(receipt.restoredSha256, REPLAY_GUARD_BASELINE_SHA256, "the proof must restore the baseline source");
+    assert.equal(receipt.redAssertionMessage, proof.redAssertionMessage);
+    assert.equal(receipt.phases.green, 0);
+    assert.equal(receipt.phases.red, 1);
+    assert.equal(receipt.phases.restoredGreen, 0);
+  });
 });

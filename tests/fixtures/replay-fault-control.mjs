@@ -21,14 +21,17 @@
 //      ROOT resolves inside the scratch tree.
 //   2. GREEN   — run the named replay assertion against the pristine copied
 //      index.ts. It must pass (proves the harness and baseline are healthy).
-//   3. MUTATE  — bypass isSideEffectFreeAllowanceFailure by returning the
-//      assistant entry id at function entry. The mutant hash must differ.
+//   3. MUTATE  — corrupt one production guard (see REPLAY_GUARD_MUTATORS). The
+//      mutant hash must differ.
 //   4. RED     — run the SAME named assertion against the mutant. It must fail
 //      with the meaningful AssertionError message below, NOT a syntax/startup
 //      failure. This is the fault-sensitivity evidence.
 //   5. RESTORE — write the original bytes back into the scratch tree, confirm
 //      the restored hash matches the baseline, rerun the assertion (GREEN),
 //      and confirm the committed index.ts was never modified.
+//
+// The caller selects a proof with the FAULT_PROOFS spec; the default is the
+// original isSideEffectFreeAllowanceFailure output-effect proof.
 //
 // No live provider calls. No arbitrary replay in production. Scratch is private
 // (mkdtemp, mode 0700), created and torn down by this helper; receipts are
@@ -59,22 +62,106 @@ export const REPLAY_GUARD_LINES = {
 //   - auto-virtual.test.mjs titles are literal.
 //   - reliability-v2-auto.test.mjs titles are mode-parameterized by the loop
 //     `for (const mode of ["v1", "v2"])`, so both concrete variants are listed.
+// Every named replay assertion and the guard that is load-bearing for it.
+// status: "PROVEN"  — a committed executable proof mutates that guard and turns
+//                     this exact named assertion RED (see FAULT_PROOFS).
+//         "OUTSTANDING" — no executable proof covers this pair yet.
+// `mutation` records the injected fault so the direction of the proof is clear
+// (a permissive bypass vs. a restrictive over-fire).
 export const NAMED_REPLAY_ASSERTIONS = [
-  "tests/integration/auto-virtual.test.mjs :: does not replay a failed Auto turn after the provider emitted output",
-  "tests/integration/auto-virtual.test.mjs :: does not replay an allowance failure after a synthetic tool side effect",
-  "tests/integration/auto-virtual.test.mjs :: does not replay an unsafe tool turn and dispatches its queued follow-up once on a distinct provider",
-  // Template entries (mode ∈ {"v1", "v2"}) — concrete titles are `in v1 Auto` / `in v2 Auto`.
-  "tests/integration/reliability-v2-auto.test.mjs :: retries one zero-effect allowance failure with a configured alternate in {v1,v2} Auto",
-  "tests/integration/reliability-v2-auto.test.mjs :: stops after the single alternate allowance attempt in {v1,v2} Auto",
+  {
+    testFile: "tests/integration/auto-virtual.test.mjs",
+    testName: "does not replay a failed Auto turn after the provider emitted output",
+    guard: "isSideEffectFreeAllowanceFailure",
+    mutation: "return [assistantEntryId]",
+    status: "PROVEN",
+  },
+  {
+    testFile: "tests/integration/auto-virtual.test.mjs",
+    testName: "does not replay an allowance failure after a synthetic tool side effect",
+    guard: "autoBoundaryStillActive",
+    mutation: "return false",
+    status: "PROVEN",
+  },
+  {
+    testFile: "tests/integration/auto-virtual.test.mjs",
+    testName: "does not replay an unsafe tool turn and dispatches its queued follow-up once on a distinct provider",
+    guard: null,
+    mutation: null,
+    status: "OUTSTANDING",
+  },
+  // reliability-v2-auto titles are mode-parameterized; each concrete mode is listed.
+  {
+    testFile: "tests/integration/reliability-v2-auto.test.mjs",
+    testName: "retries one zero-effect allowance failure with a configured alternate in v1 Auto",
+    guard: null,
+    mutation: null,
+    status: "OUTSTANDING",
+  },
+  {
+    testFile: "tests/integration/reliability-v2-auto.test.mjs",
+    testName: "retries one zero-effect allowance failure with a configured alternate in v2 Auto",
+    guard: "allowanceRetryBoundaryStillSafe",
+    mutation: "return false",
+    status: "PROVEN",
+  },
+  {
+    testFile: "tests/integration/reliability-v2-auto.test.mjs",
+    testName: "stops after the single alternate allowance attempt in v1 Auto",
+    guard: null,
+    mutation: null,
+    status: "OUTSTANDING",
+  },
+  {
+    testFile: "tests/integration/reliability-v2-auto.test.mjs",
+    testName: "stops after the single alternate allowance attempt in v2 Auto",
+    guard: null,
+    mutation: null,
+    status: "OUTSTANDING",
+  },
 ];
 
-/** The one guard this helper mutates and the assertion that must go RED. */
+/** The original proof; kept as the default so existing callers stay unchanged. */
 export const FAULT_PROOF = {
   guard: "isSideEffectFreeAllowanceFailure",
   testFile: "tests/integration/auto-virtual.test.mjs",
   testName: "does not replay a failed Auto turn after the provider emitted output",
   redAssertionMessage: "the failed allowance/output-effect turn must not dispatch to an alternate",
 };
+
+/** Named guard × assertion proofs, one per guard, executed by the anchor tests. */
+export const FAULT_PROOFS = {
+  sideEffectFreeAllowanceOutputEffect: FAULT_PROOF,
+  allowanceRetryBoundaryV2: {
+    guard: "allowanceRetryBoundaryStillSafe",
+    testFile: "tests/integration/reliability-v2-auto.test.mjs",
+    testName: "retries one zero-effect allowance failure with a configured alternate in v2 Auto",
+    redAssertionMessage: "the prepared usage-limit retry was cancelled because the turn changed; no model was dispatched.",
+  },
+  autoBoundaryToolSideEffect: {
+    guard: "autoBoundaryStillActive",
+    testFile: "tests/integration/auto-virtual.test.mjs",
+    testName: "does not replay an allowance failure after a synthetic tool side effect",
+    redAssertionMessage: "Pi must execute the provider-requested synthetic tool",
+  },
+};
+
+/** Injected fault per guard. `return false` proves the guard's restrictive half
+ * (the assertion depends on the guard permitting the safe path). */
+export const REPLAY_GUARD_MUTATORS = {
+  isSideEffectFreeAllowanceFailure: (source) => injectGuardStatement(source, "isSideEffectFreeAllowanceFailure", "return [assistantEntryId];"),
+  allowanceRetryBoundaryStillSafe: (source) => injectGuardStatement(source, "allowanceRetryBoundaryStillSafe", "return false;"),
+  autoBoundaryStillActive: (source) => injectGuardStatement(source, "autoBoundaryStillActive", "return false;"),
+};
+
+function injectGuardStatement(source, guard, statement) {
+  const anchor = `  function ${guard}(`;
+  const anchorIndex = source.indexOf(anchor);
+  if (anchorIndex === -1) throw new Error(`replay guard anchor not found: ${guard}`);
+  const openBrace = source.indexOf("{\n", anchorIndex);
+  if (openBrace === -1) throw new Error(`replay guard body opening brace not found: ${guard}`);
+  return `${source.slice(0, openBrace + 1)}\n    ${statement}${source.slice(openBrace + 1)}`;
+}
 
 export function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
@@ -86,12 +173,7 @@ export function sha256(text) {
  * Throws if the function anchor is missing.
  */
 export function mutateReplayGuard(source) {
-  const anchor = "  function isSideEffectFreeAllowanceFailure(";
-  const anchorIndex = source.indexOf(anchor);
-  if (anchorIndex === -1) throw new Error("replay guard anchor not found: isSideEffectFreeAllowanceFailure");
-  const openBrace = source.indexOf("{\n", anchorIndex);
-  if (openBrace === -1) throw new Error("replay guard body opening brace not found");
-  return `${source.slice(0, openBrace + 1)}\n    return [assistantEntryId];${source.slice(openBrace + 1)}`;
+  return REPLAY_GUARD_MUTATORS.isSideEffectFreeAllowanceFailure(source);
 }
 
 /**
@@ -150,29 +232,31 @@ function assertGreen(receipt, phase) {
  * Execute the full copy-mutate-load-assert-restore fault proof. Asserts each
  * phase and returns a receipt. The scratch tree is removed unless keepScratch.
  */
-export function runReplayGuardFaultProof({ root, keepScratch = false, log = () => {} }) {
+export function runReplayGuardFaultProof({ root, keepScratch = false, log = () => {}, proof = FAULT_PROOF }) {
   const committedPath = join(root, "index.ts");
   const original = readFileSync(committedPath, "utf8");
   const originalHash = sha256(original);
   if (originalHash !== REPLAY_GUARD_BASELINE_SHA256) {
     throw new Error(`G03 replay fault proof requires baseline source; index.ts sha256=${originalHash}`);
   }
+  const mutate = REPLAY_GUARD_MUTATORS[proof.guard];
+  if (!mutate) throw new Error(`G03 replay fault proof has no mutator for guard ${proof.guard}`);
 
   const scratch = createReplayScratchTree(root);
   log(`G03 replay fault proof scratch: ${scratch} (created at proof start)`);
   try {
-    const { testFile, testName, redAssertionMessage } = FAULT_PROOF;
+    const { testFile, testName, redAssertionMessage } = proof;
 
     // 2. GREEN on the pristine copy.
     const green = runNamedReplayAssertion({ scratch, testFile, testName });
     assertGreen(green, "pristine copy");
 
     // 3. MUTATE.
-    const mutant = mutateReplayGuard(original);
+    const mutant = mutate(original);
     const mutantHash = sha256(mutant);
     if (mutantHash === originalHash) throw new Error("G03 replay fault proof mutation produced no source change");
     writeFileSync(join(scratch, "index.ts"), mutant);
-    log(`G03 replay fault proof mutant sha256=${mutantHash}`);
+    log(`G03 replay fault proof ${proof.guard} mutant sha256=${mutantHash}`);
 
     // 4. RED against the mutant.
     const red = runNamedReplayAssertion({ scratch, testFile, testName });
@@ -199,7 +283,7 @@ export function runReplayGuardFaultProof({ root, keepScratch = false, log = () =
     }
 
     return {
-      guard: FAULT_PROOF.guard,
+      guard: proof.guard,
       testFile,
       testName,
       baselineSha256: originalHash,
