@@ -1,13 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execPath } from "node:process";
 import { processGroupExists } from "../../scripts/acceptance/core.mjs";
-import { NORMAL_CLOSE_CLI, ROOT, setOwnedGroupSignalDenial } from "../fixtures/child-auto-inline-harness.mjs";
+import { NORMAL_CLOSE_CLI, ROOT, setOwnedGroupSignalDenial, spawnOwned } from "../fixtures/child-auto-inline-harness.mjs";
 import {
   FAULT_PROOFS,
+  assertAssertionGreen,
   assertAssertionRed,
   removeScratchAfterVerifiedGroupDeath,
   runNamedReplayAssertion,
@@ -41,10 +43,34 @@ async function waitForGone(pid, group, boundMs = 5_000) {
   return false;
 }
 
+// Best-effort, non-throwing reclaim used by control finally blocks: kill only
+// creation-recorded resources, verify the owned group and recorded descendant
+// are absent, and delete the scratch only when both are proven gone. Never
+// throws, so a finally here cannot mask the pending assertion failure, and a
+// group that cannot be verified dead keeps its scratch.
+async function safeReclaim({ scratch, ownedGroup, descendantPid, pidDir }) {
+  if (Number.isInteger(descendantPid) && descendantPid > 0) { try { process.kill(descendantPid, "SIGKILL"); } catch {} }
+  if (Number.isInteger(ownedGroup) && ownedGroup > 0) { try { process.kill(-ownedGroup, "SIGKILL"); } catch {} }
+  await waitForGone(descendantPid, ownedGroup);
+  const groupGone = !Number.isInteger(ownedGroup) || ownedGroup <= 0 || !processGroupExists(ownedGroup);
+  const descendantGone = !Number.isInteger(descendantPid) || descendantPid <= 0 || !isAlive(descendantPid);
+  if (scratch && existsSync(scratch) && groupGone && descendantGone) rmSync(scratch, { recursive: true, force: true });
+  if (pidDir && existsSync(pidDir)) rmSync(pidDir, { recursive: true, force: true });
+  return { groupGone, descendantGone };
+}
+
 describe("G03 replay fault control lifecycle", { concurrency: 1 }, () => {
+  it("accepts exactly one GREEN pass and rejects a reporter pass count of 10", () => {
+    const base = { timedOut: false, spawnError: null, verified: true, status: 0, stderr: "" };
+    assert.doesNotThrow(() => assertAssertionGreen({ ...base, stdout: "ℹ pass 1\nℹ fail 0\n" }, "single-pass copy"));
+    assert.throws(() => assertAssertionGreen({ ...base, stdout: "ℹ pass 10\nℹ fail 0\n" }, "ten-pass copy"),
+      /exactly one passing assertion/, "a pass count of 10 must not satisfy the exact pass-1 format");
+  });
+
   it("terminates a hung owned run, verifies group absence, and refuses a timeout as RED evidence", { skip: WIN32 }, async () => {
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-g03-lifecycle-timeout-"));
     const marker = FAULT_PROOFS.sideEffectFreeAllowanceOutputEffect.redAssertionMessage;
+    let ownedGroup = null;
     try {
       const hang = `process.stdout.write(${JSON.stringify(`AssertionError [ERR_ASSERTION]: ${marker}`)}); setInterval(() => {}, 1000);`;
       const receipt = await runNamedReplayAssertion({
@@ -54,11 +80,12 @@ describe("G03 replay fault control lifecycle", { concurrency: 1 }, () => {
         timeoutMs: 400,
         terminationGraceMs: 1_000,
       });
-
+      // Capture ownership before any assertion so the finally can reclaim safely.
+      ownedGroup = receipt.ownedGroup;
       assert.equal(receipt.timedOut, true, "the run must report its bounded timeout");
       assert.equal(receipt.verified, true, "the owned group must be proven dead after bounded termination");
-      assert.ok(Number.isInteger(receipt.ownedGroup) && receipt.ownedGroup > 0, "the owned group id must be captured at creation");
-      assert.equal(processGroupExists(receipt.ownedGroup), false, "the owned process group must be gone");
+      assert.ok(Number.isInteger(ownedGroup) && ownedGroup > 0, "the owned group id must be captured at creation");
+      assert.equal(processGroupExists(ownedGroup), false, "the owned process group must be gone");
       assert.match(receipt.stdout, /AssertionError/, "the hung run printed the text that must not be accepted");
       assert.throws(() => assertAssertionRed(receipt, marker), /timed out/i,
         "a timeout that printed the matching text must not be accepted as RED evidence");
@@ -67,7 +94,7 @@ describe("G03 replay fault control lifecycle", { concurrency: 1 }, () => {
       assert.doesNotThrow(() => removeScratchAfterVerifiedGroupDeath([scratch], receipt.ownedGroup));
       assert.equal(existsSync(scratch), false, "verified group death must allow scratch reclamation");
     } finally {
-      if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+      await safeReclaim({ scratch, ownedGroup });
     }
   });
 
@@ -77,7 +104,6 @@ describe("G03 replay fault control lifecycle", { concurrency: 1 }, () => {
     let ownedGroup = null;
     let descendantPid = null;
     let retainedScratch = null;
-    let restored = false;
     try {
       setOwnedGroupSignalDenial(() => { throw new Error("controlled owned-group signal denial"); });
       await assert.rejects(
@@ -92,36 +118,76 @@ describe("G03 replay fault control lifecycle", { concurrency: 1 }, () => {
           },
         }),
         (error) => {
+          // Capture ownership before the remaining assertions.
+          ownedGroup = error.ownedGroup;
+          retainedScratch = error.scratch;
           assert.equal(error.verified, false, "an unverifiable cleanup must be named as such");
           assert.match(error.message, /did not reach a verified dead state/,
             "the cleanup failure must be its own clause on the pending failure");
-          assert.ok(Number.isInteger(error.ownedGroup) && error.ownedGroup > 0, "the run must preserve owned-group ownership");
+          assert.ok(Number.isInteger(ownedGroup) && ownedGroup > 0, "the run must preserve owned-group ownership");
           assert.equal(error.scratchRetained, true, "the pending failure must preserve retained-scratch ownership");
-          assert.ok(typeof error.scratch === "string" && error.scratch.length > 0, "the pending failure must carry the retained scratch path");
-          assert.deepEqual(error.scratchPaths, [error.scratch], "the receipt paths must point at the retained scratch");
-          ownedGroup = error.ownedGroup;
-          retainedScratch = error.scratch;
+          assert.ok(typeof retainedScratch === "string" && retainedScratch.length > 0, "the pending failure must carry the retained scratch path");
+          assert.deepEqual(error.scratchPaths, [retainedScratch], "the receipt paths must point at the retained scratch");
           return true;
         },
       );
-      assert.equal(existsSync(retainedScratch), true, "the scratch must be retained while the owned group is not proven dead");
       descendantPid = Number(readFileSync(pidFile, "utf8"));
       assert.ok(Number.isInteger(descendantPid) && descendantPid > 0, "the private fixture must record its descendant pid");
+      assert.equal(existsSync(retainedScratch), true, "the scratch must be retained while the owned group is not proven dead");
       assert.equal(isAlive(descendantPid), true, "the unverified group descendant must still be alive");
     } finally {
       setOwnedGroupSignalDenial(null);
+      await safeReclaim({ scratch: retainedScratch, ownedGroup, descendantPid, pidDir });
     }
-    // Restore only creation-recorded resources, verify death, then reclaim.
-    if (descendantPid) { try { process.kill(descendantPid, "SIGKILL"); } catch {} }
-    if (Number.isInteger(ownedGroup) && ownedGroup > 0) { try { process.kill(-ownedGroup, "SIGKILL"); } catch {} }
-    assert.equal(await waitForGone(descendantPid, ownedGroup), true, "the retained owned group must reach verified death before reclamation");
-    assert.equal(isAlive(descendantPid), false, "the recorded descendant must be gone");
-    assert.equal(processGroupExists(ownedGroup), false, "the owned process group must be gone");
-    removeScratchAfterVerifiedGroupDeath([retainedScratch], ownedGroup);
-    restored = true;
-    assert.equal(existsSync(retainedScratch), false, "the retained scratch is reclaimed only after verified death");
-    rmSync(pidDir, { recursive: true, force: true });
-    assert.equal(restored, true);
+    assert.equal(existsSync(retainedScratch), false, "verified death must reclaim the retained scratch");
+  });
+
+  it("retains scratch when an injected runner throws after spawning, then reclaims after verified death", { skip: WIN32 }, async () => {
+    const pidDir = mkdtempSync(join(tmpdir(), "bifrost-g03-lifecycle-throw-"));
+    const pidFile = join(pidDir, "descendant.pid");
+    let ownedGroup = null;
+    let descendantPid = null;
+    let retainedScratch = null;
+    try {
+      await assert.rejects(
+        runReplayGuardFaultProof({
+          root: ROOT,
+          proof: FAULT_PROOFS.autoBoundaryToolSideEffect,
+          runAssertion: async ({ scratch, onOwned }) => {
+            // Spawn a real owned descendant that outlives the leader, then throw
+            // before returning any receipt — the shape that previously lost
+            // ownership and let finalize delete a live group's scratch.
+            const child = spawnOwned(execPath, [NORMAL_CLOSE_CLI], {
+              cwd: scratch,
+              env: { ...process.env, BIFROST_DESCENDANT_PID_FILE: pidFile },
+              stdio: ["ignore", "ignore", "ignore"],
+            });
+            ownedGroup = child.pid;
+            onOwned(child.pid);
+            await once(child, "close");
+            throw new Error("controlled throw after spawn before any receipt");
+          },
+        }),
+        (error) => {
+          // Capture ownership before the remaining assertions.
+          ownedGroup = ownedGroup ?? error.ownedGroups?.[0] ?? null;
+          retainedScratch = error.scratch;
+          assert.match(error.message, /controlled throw after spawn/,
+            "the injected failure must be preserved, not replaced by a delete error");
+          assert.equal(error.scratchRetained, true, "an incomplete receipt must retain scratch ownership");
+          assert.ok(typeof retainedScratch === "string" && existsSync(retainedScratch), "the retained scratch must still exist");
+          assert.ok(error.ownedGroups.includes(ownedGroup), "creation-time ownership must survive the throw");
+          return true;
+        },
+      );
+      descendantPid = Number(readFileSync(pidFile, "utf8"));
+      assert.ok(Number.isInteger(descendantPid) && descendantPid > 0, "the private fixture must record its descendant pid");
+      assert.equal(existsSync(retainedScratch), true, "the scratch must survive an injected post-spawn throw");
+      assert.equal(isAlive(descendantPid), true, "the spawned descendant must still be alive while scratch is retained");
+    } finally {
+      await safeReclaim({ scratch: retainedScratch, ownedGroup, descendantPid, pidDir });
+    }
+    assert.equal(existsSync(retainedScratch), false, "verified death must reclaim the retained scratch");
   });
 
   it("preserves a real assertion failure and reclaims scratch once the owned group is verified dead", { skip: WIN32 }, async () => {

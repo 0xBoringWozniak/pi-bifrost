@@ -210,8 +210,11 @@ export function createReplayScratchTree(root, scratchPrefix = "bifrost-g03-fault
  * Spawns the nested runner detached as its own group leader (captured at
  * creation), bounds the run, then always terminates the group and records
  * whether its death was independently verified. `command`/`args` are injectable
- * so focused lifecycle controls can drive private CLI fixtures. Returns the
- * process receipt; it never deletes anything.
+ * so focused lifecycle controls can drive private CLI fixtures. `onOwned` is
+ * invoked synchronously with the owned group id the instant the leader exists,
+ * before any await can throw, so a caller can retain ownership even when the
+ * runner never reaches its return. Returns the process receipt; it never
+ * deletes anything.
  */
 export async function runNamedReplayAssertion({
   scratch,
@@ -222,7 +225,7 @@ export async function runNamedReplayAssertion({
   env = process.env,
   command = process.execPath,
   args,
-  spawn = spawnOwned,
+  onOwned,
 } = {}) {
   const childEnv = { ...env };
   // A nested `node --test` must not inherit the runner's child marker.
@@ -235,11 +238,14 @@ export async function runNamedReplayAssertion({
     `--test-name-pattern=${testName}`,
     testFile,
   ];
-  const child = spawn(command, resolvedArgs, {
+  const child = spawnOwned(command, resolvedArgs, {
     cwd: scratch,
     env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  // Ownership is captured at creation, before any later await can throw.
+  const ownedGroup = child.pid;
+  if (typeof onOwned === "function") onOwned(ownedGroup);
 
   let stdout = "";
   let stderr = "";
@@ -266,7 +272,6 @@ export async function runNamedReplayAssertion({
   // event says nothing about a descendant that inherited the pipes.
   const lifecycle = closeTracking(child);
   const verified = await lifecycle.terminate(terminationGraceMs);
-  const ownedGroup = child.pid;
   if (!verified) detachOwnedHandles(child);
   return {
     timedOut,
@@ -307,7 +312,7 @@ export function assertAssertionGreen(receipt, phase) {
   if (receipt.status !== 0) {
     throw new Error(`G03 replay fault proof expected GREEN in ${phase} but exit was ${receipt.status}:\n${output}`);
   }
-  if (!/ℹ pass 1/u.test(output) || /ℹ fail [1-9]/u.test(output)) {
+  if (!/^ℹ pass 1$/mu.test(output) || /^ℹ fail [1-9]/mu.test(output)) {
     throw new Error(`G03 replay fault proof expected exactly one passing assertion in ${phase}:\n${output}`);
   }
 }
@@ -350,13 +355,22 @@ export function removeScratchAfterVerifiedGroupDeath(paths, ownedGroup) {
   for (const path of unique) rmSync(path, { recursive: true, force: true });
 }
 
-/** Decide reclaim vs. retain for a finished proof. Retention wins whenever a
- * group is not proven dead, and a pending assertion failure is never masked by
- * a delete error. Returns { retained, ownedGroups, throwError }. */
-function finalizeScratchLifecycle({ scratch, keepScratch, receipts, pendingError }) {
-  const ownedGroups = [...new Set(receipts.map((receipt) => receipt.ownedGroup).filter((group) => Number.isInteger(group) && group > 0))];
+/** Decide reclaim vs. retain for a finished proof. Ownership is the union of
+groups captured at creation and groups reported by receipts, so a run that
+throws after spawning is still covered. Reclaim requires every started run to
+have produced a verified receipt AND every owned group to be absent: any
+incomplete/unknown receipt is treated as unverified and retained. A pending
+assertion failure is never masked by a delete error. Returns
+{ retained, ownedGroups, throwError }. */
+function finalizeScratchLifecycle({ scratch, keepScratch, receipts, ownedGroupsAtCreation, startedRuns, pendingError }) {
+  const ownedGroups = [...new Set([
+    ...ownedGroupsAtCreation,
+    ...receipts.map((receipt) => receipt?.ownedGroup).filter((group) => Number.isInteger(group) && group > 0),
+  ])];
   if (keepScratch) return { retained: true, ownedGroups, throwError: null };
-  const unverified = receipts.some((receipt) => receipt.verified === false);
+  const everyStartedRunReturned = startedRuns > 0 && receipts.length === startedRuns;
+  const unverified = !everyStartedRunReturned
+    || receipts.some((receipt) => !receipt || receipt.verified !== true);
   const liveGroups = ownedGroups.filter((group) => processGroupExists(group));
   if (unverified || liveGroups.length > 0) {
     const detail = liveGroups.length > 0 ? liveGroups.join(",") : "(unverified)";
@@ -388,7 +402,10 @@ function finalizeScratchLifecycle({ scratch, keepScratch, receipts, pendingError
  * are proven dead; otherwise it is retained with ownership preserved.
  *
  * `runAssertion`/`runOptions` are injectable so focused lifecycle controls can
- * drive private owned fixtures through the exact same finalization path.
+ * drive private owned fixtures through the exact same finalization path. Any
+ * injected runner must call `onOwned(groupId)` at creation; ownership is also
+ * captured from the default runner before its result is awaited. If a runner
+ * throws after spawning, the group stays owned and the scratch is retained.
  */
 export async function runReplayGuardFaultProof({
   root,
@@ -410,12 +427,19 @@ export async function runReplayGuardFaultProof({
   const scratch = createReplayScratchTree(root);
   log(`G03 replay fault proof scratch: ${scratch} (created at proof start)`);
   const receipts = [];
+  const ownedGroupsAtCreation = new Set();
+  let startedRuns = 0;
   let pendingError = null;
+  const captureOwned = (group) => { if (Number.isInteger(group) && group > 0) ownedGroupsAtCreation.add(group); };
+  const runPhase = async () => {
+    startedRuns += 1;
+    return runAssertion({ scratch, testFile: proof.testFile, testName: proof.testName, ...runOptions, onOwned: captureOwned });
+  };
   try {
     const { testFile, testName, redAssertionMessage } = proof;
 
     // 2. GREEN on the pristine copy.
-    const green = await runAssertion({ scratch, testFile, testName, ...runOptions });
+    const green = await runPhase();
     receipts.push(green);
     assertAssertionGreen(green, "pristine copy");
 
@@ -427,7 +451,7 @@ export async function runReplayGuardFaultProof({
     log(`G03 replay fault proof ${proof.guard} mutant sha256=${mutantHash}`);
 
     // 4. RED against the mutant.
-    const red = await runAssertion({ scratch, testFile, testName, ...runOptions });
+    const red = await runPhase();
     receipts.push(red);
     assertAssertionRed(red, redAssertionMessage);
     log(`G03 replay fault proof RED: ${redAssertionMessage}`);
@@ -436,7 +460,7 @@ export async function runReplayGuardFaultProof({
     writeFileSync(join(scratch, "index.ts"), original);
     const restoredHash = sha256(readFileSync(join(scratch, "index.ts"), "utf8"));
     if (restoredHash !== originalHash) throw new Error(`G03 replay fault proof restore hash mismatch: ${restoredHash}`);
-    const restoredGreen = await runAssertion({ scratch, testFile, testName, ...runOptions });
+    const restoredGreen = await runPhase();
     receipts.push(restoredGreen);
     assertAssertionGreen(restoredGreen, "restored copy");
 
@@ -455,7 +479,7 @@ export async function runReplayGuardFaultProof({
       redAssertionMessage,
       scratch,
       scratchRetained: false,
-      ownedGroups: [...new Set(receipts.map((receipt) => receipt.ownedGroup).filter((group) => Number.isInteger(group) && group > 0))],
+      ownedGroups: [...ownedGroupsAtCreation],
       phases: {
         copy: "ok",
         green: green.status,
@@ -469,7 +493,7 @@ export async function runReplayGuardFaultProof({
     pendingError.scratchRetained = false;
     throw error;
   } finally {
-    const lifecycle = finalizeScratchLifecycle({ scratch, keepScratch, receipts, pendingError });
+    const lifecycle = finalizeScratchLifecycle({ scratch, keepScratch, receipts, ownedGroupsAtCreation, startedRuns, pendingError });
     if (pendingError) {
       pendingError.scratch = scratch;
       pendingError.scratchRetained = lifecycle.retained;
