@@ -507,13 +507,36 @@ function applyOp(run: Run, rng: Rng, op: Op): void {
 
 // ── Scenario runner ────────────────────────────────────────────────────────
 
-function runScenario(commands: Iterable<fc.Command<Run, Rng>>): void {
-  const rng: Rng = { ref: new Reference(), label: "scenario" };
+/** Builds the oracle used for a run; a faulty model is injected by control only. */
+type ModelFactory = () => Reference;
+
+function runScenario(commands: Iterable<fc.Command<Run, Rng>>, model: ModelFactory = () => new Reference()): void {
+  const rng: Rng = { ref: model(), label: "scenario" };
   fc.modelRun(() => ({ model: { state: emptyReliabilityV2State() }, real: rng }), commands);
+}
+
+/**
+ * Faulty model control: it forgets to advance the scope generation on a
+ * failure settlement, so it drifts from production on the first such step.
+ */
+function faultyGenerationModel(): Reference {
+  const model = new Reference();
+  const settle = model.settle.bind(model);
+  model.settle = (ownerToken, dispatchId, outcomeId, kind) => {
+    const result = settle(ownerToken, dispatchId, outcomeId, kind);
+    if (kind === "failure") {
+      const d = model.dispatches.get(dispatchId);
+      const scope = d ? model.scopes.get(d.scopeKey) : undefined;
+      if (scope && scope.generation > 0) scope.generation -= 1;
+    }
+    return result;
+  };
+  return model;
 }
 
 const SEQUENCE_SEED = 20260101;
 const SWEEP_SEED = 20260102;
+const FAULT_SEED = 20260103;
 
 function scenarioCommands(maxCommands: number, replayPath?: string): fc.Arbitrary<Iterable<fc.Command<Run, Rng>>> {
   const opArb: fc.Arbitrary<Op> = fc.oneof(
@@ -538,6 +561,36 @@ describe("reliability v2 state machine", () => {
 
   it("matches the independent model across a wider generated sample", () => {
     fc.assert(fc.property(scenarioCommands(12), (commands) => runScenario(commands)), { seed: SWEEP_SEED, numRuns: 400 });
+  });
+
+  it("shrinks and replays a faulty model control to a minimal sequence", () => {
+    const faulty = fc.property(scenarioCommands(12), (commands) => runScenario(commands, faultyGenerationModel));
+    const rejected = fc.check(faulty, { seed: FAULT_SEED, numRuns: 400 });
+    assert.equal(rejected.failed, true, "a faulty model must be rejected by the comparison");
+    assert.ok(rejected.numShrinks > 0, "the faulty control must shrink to a minimal sequence");
+    assert.ok((rejected.counterexamplePath ?? "").length > 0, "a rejected control must report a replay path");
+    assert.ok(rejected.counterexample, "the rejected control must report its counterexample");
+
+    // The reported seed and path must replay to the same shrunk sequence.
+    const replayPath = String(rejected.counterexample[0]).match(/replayPath="([^"]+)"/)?.[1];
+    assert.ok(replayPath, "generated commands must expose their replay path");
+    const replay = fc.check(
+      fc.property(scenarioCommands(12, replayPath), (commands) => runScenario(commands, faultyGenerationModel)),
+      { seed: rejected.seed, path: rejected.counterexamplePath ?? undefined, numRuns: 400 },
+    );
+    assert.equal(replay.failed, true, "the replayed seed and path must still fail");
+    assert.equal(replay.counterexamplePath, rejected.counterexamplePath, "replay must reproduce the same path");
+    assert.deepEqual(
+      [...replay.counterexample![0]].map(String),
+      [...rejected.counterexample[0]].map(String),
+      "the replayed seed and path must reproduce the same shrunk operation sequence",
+    );
+
+    // The unmutated model accepts exactly the same operations.
+    assert.doesNotThrow(
+      () => runScenario(rejected.counterexample![0]),
+      "the production machine must accept the sequence that rejected the faulty model",
+    );
   });
 
   it("predicts exact half-open lease expiry boundaries", () => {
