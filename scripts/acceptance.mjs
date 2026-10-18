@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gateDirectory, git, gitTruth, installedToolVersions, matchNamedTestEvent, parseArgs, processGroupExists, sourceFingerprint, summarizeCases, terminateProcessGroup, verificationGateEnvironment } from "./acceptance/core.mjs";
 import { exportCiReportIfConfigured } from "./ci-report.mjs";
+import { changeEvidenceCase } from "./acceptance/change-evidence.mjs";
 export { processGroupExists, terminateProcessGroup, verificationGateEnvironment };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -285,6 +286,8 @@ async function runDeterministic({ root, artifactDir }) {
   } catch {}
   const cases = buildGateEvidenceCases({ verification, root, artifactDir, terminalCaptures });
   const eventPath = relative(root, testEventsArtifact);
+  const changeEvidence = changeEvidenceCase({ root, testEvents });
+  if (changeEvidence) cases.push({ ...changeEvidence, artifacts: [eventPath], detail: changeEvidence.detail });
   for (const target of SUPPORTING_TESTS) {
     cases.push(supportingTestCase({ target, testEvents, artifactDir, root, eventPath }));
   }
@@ -349,7 +352,7 @@ async function runDeterministic({ root, artifactDir }) {
 }
 
 export function supportingTestCase({ target, testEvents, artifactDir, root, eventPath }) {
-  const result = matchNamedTestEvent(testEvents, target);
+  const result = matchNamedTestEvent(testEvents, target, root);
   const caseArtifact = target.caseArtifact ? join(artifactDir, target.caseArtifact) : undefined;
   const hasCaseArtifact = caseArtifact ? existsSync(caseArtifact) : true;
   const status = !result ? "blocked" : !result.passed ? "failed" : !hasCaseArtifact ? "blocked" : "passed";

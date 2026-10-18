@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "base": "888a07413a2b26be3c5f66d0117d7199a7b536ee",
+  "contracts": [
+    {
+      "id": "per-change-execution",
+      "requirement": "R16",
+      "files": [
+        "scripts/acceptance/change-evidence.mjs",
+        "scripts/acceptance/core.mjs",
+        "scripts/acceptance.mjs",
+        "tests/change-evidence.test.mjs",
+        "tests/acceptance-runner.test.mjs",
+        "docs/testing-coverage.md",
+        ".github/workflows/verification.yml"
+      ],
+      "boundary": "deterministic acceptance validator with real local Git fixture; not Pi generation",
+      "assertions": "Every changed file is mapped; named completed events are unique and passed; absent or stale metadata fails closed.",
+      "boundaryTest": {
+        "file": "tests/change-evidence.test.mjs",
+        "name": "checks real git diff and fails closed for missing PR metadata or declaration"
+      },
+      "invariant": {
+        "file": "tests/change-evidence.test.mjs",
+        "name": "rejects missing ambiguous failed skipped TODO and nonterminal evidence"
+      },
+      "fault": {
+        "file": "tests/change-evidence.test.mjs",
+        "name": "the missing-case assertion detects a disabled execution guard"
+      }
+    }
+  ]
+}

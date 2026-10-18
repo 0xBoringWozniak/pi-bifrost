@@ -263,8 +263,8 @@ describe("acceptance runner boundary", () => {
       { file: "/repo/tests/routing.test.ts", name: "defaults to first", passed: true },
       { file: "/repo/tests/routing.test.ts", name: "file:///repo/tests/routing.test.ts", passed: true },
     ];
-    assert.equal(matchNamedTestEvent(events, { file: "tests/routing.test.ts", name: "defaults to random" }), undefined);
-    assert.equal(matchNamedTestEvent(events, { file: "tests/routing.test.ts", name: "defaults to first" }).passed, true);
+    assert.equal(matchNamedTestEvent(events, { file: "tests/routing.test.ts", name: "defaults to random" }, "/repo"), undefined);
+    assert.equal(matchNamedTestEvent(events, { file: "tests/routing.test.ts", name: "defaults to first" }, "/repo").passed, true);
   });
 
   it("rejects ambiguous duplicate exact test events instead of accepting the first pass", () => {
@@ -272,7 +272,7 @@ describe("acceptance runner boundary", () => {
       { file: "/repo/tests/routing.test.ts", name: "defaults to first", passed: true },
       { file: "/repo/tests/routing.test.ts", name: "defaults to first", passed: false, skipped: true },
     ];
-    assert.equal(matchNamedTestEvent(events, { file: "tests/routing.test.ts", name: "defaults to first" }), undefined);
+    assert.equal(matchNamedTestEvent(events, { file: "tests/routing.test.ts", name: "defaults to first" }, "/repo"), undefined);
   });
 
   it("reports real Node skip and TODO results as non-passing required events", () => {
@@ -356,7 +356,7 @@ describe("acceptance runner boundary", () => {
     writeFileSync(artifact, "{}\n");
     const input = {
       target,
-      testEvents: [{ file: "/repo/tests/example.test.mjs", name: target.name, passed: true }],
+      testEvents: [{ file: join(directory, "tests/example.test.mjs"), name: target.name, passed: true }],
       artifactDir,
       root: directory,
       eventPath: "events.jsonl",

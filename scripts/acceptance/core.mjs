@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, join, sep } from "node:path";
+import { delimiter, join, resolve, sep } from "node:path";
 
 const PROFILES = new Set(["deterministic", "contract", "live"]);
 
@@ -158,8 +158,15 @@ export function summarizeCases(cases) {
   };
 }
 
-export function matchNamedTestEvent(events, { file, name }) {
-  const matches = events.filter((event) => event.file?.endsWith(file) && event.name === name);
+export function normalizedTestPath(root, file) {
+  const resolved = resolve(root, file);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function matchNamedTestEvent(events, { file, name }, root) {
+  const target = normalizedTestPath(root, file);
+  const matches = events.filter((event) => typeof event.file === "string"
+    && normalizedTestPath(root, event.file) === target && event.name === name);
   return matches.length === 1 ? matches[0] : undefined;
 }
 
