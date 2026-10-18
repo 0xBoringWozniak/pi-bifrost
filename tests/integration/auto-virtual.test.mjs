@@ -6,6 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readd
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REPLAY_GUARD_BASELINE_SHA256, REPLAY_GUARD_FUNCTIONS, FAULT_PROOFS, runReplayGuardFaultProof } from "../fixtures/replay-fault-control.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -1264,5 +1265,43 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }
+  });
+});
+
+// This is an integrity anchor plus executable fault proofs — see
+// tests/fixtures/replay-fault-control.mjs for the guard inventory, the named
+// proof specs, and the still-outstanding follow-ups.
+describe("G03 replay guard integrity anchor", () => {
+  it("anchors the baseline source hash and proves isSideEffectFreeAllowanceFailure faults the output-effect no-replay assertion", async () => {
+    const source = readFileSync(EXTENSION_PATH, "utf8");
+    const hash = createHash("sha256").update(source).digest("hex");
+    assert.equal(hash, REPLAY_GUARD_BASELINE_SHA256);
+    for (const fn of REPLAY_GUARD_FUNCTIONS) {
+      assert.ok(source.includes(`function ${fn}`), `missing production replay guard: ${fn}`);
+    }
+
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, log: (message) => process.stderr.write(`${message}\n`) });
+    assert.equal(receipt.guard, "isSideEffectFreeAllowanceFailure");
+    assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
+    assert.notEqual(receipt.mutantSha256, receipt.baselineSha256, "the guard bypass must change the source hash");
+    assert.equal(receipt.restoredSha256, REPLAY_GUARD_BASELINE_SHA256, "the proof must restore the baseline source");
+    assert.equal(receipt.phases.green, 0);
+    assert.equal(receipt.phases.red, 1);
+    assert.equal(receipt.phases.restoredGreen, 0);
+  });
+
+  it("proves autoBoundaryStillActive faults the synthetic tool side-effect no-replay assertion", async () => {
+    const proof = FAULT_PROOFS.autoBoundaryToolSideEffect;
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
+
+    assert.equal(receipt.guard, proof.guard);
+    assert.equal(receipt.testName, proof.testName);
+    assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
+    assert.notEqual(receipt.mutantSha256, receipt.baselineSha256, "the auto-boundary fault must change the source hash");
+    assert.equal(receipt.restoredSha256, REPLAY_GUARD_BASELINE_SHA256, "the proof must restore the baseline source");
+    assert.equal(receipt.redAssertionMessage, proof.redAssertionMessage);
+    assert.equal(receipt.phases.green, 0);
+    assert.equal(receipt.phases.red, 1);
+    assert.equal(receipt.phases.restoredGreen, 0);
   });
 });
