@@ -419,6 +419,16 @@ function reclaimSourceCopy(scratch, released) {
   return false;
 }
 
+// Share the guarded operation with the regression so bypassing it is observable.
+function reclaimControlArtifacts(scratch, released, receipt) {
+  const actualSafety = receipt
+    ? { removed: true, failures: [], receipts: [receipt], retained: [] }
+    : undefined;
+  if (!ownedCleanupObserved(actualSafety)) return false;
+  for (const path of released?.retained ?? []) rmSync(path, { recursive: true, force: true });
+  return reclaimSourceCopy(scratch, actualSafety);
+}
+
 // ── artifact helpers ────────────────────────────────────────────
 
 function artifact(project, name) {
@@ -1180,16 +1190,7 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
       assert.equal(reclaimSourceCopy(scratch, actual), true, "the owner must reclaim once actual safety is observed");
       assert.equal(existsSync(scratch), false, "the reclaimed private copy must be gone");
     } finally {
-      const actualSafety = actualSafetyReceipt
-        ? { removed: true, failures: [], receipts: [actualSafetyReceipt], retained: [] }
-        : undefined;
-      // Gate the entire outer reclaim, including retained home/work, on the same
-      // actual close + group-absence predicate. A missing or unsafe actual receipt
-      // retains every exact path and preserves the original cleanup error.
-      if (actualSafety && ownedCleanupObserved(actualSafety)) {
-        for (const path of released?.retained ?? []) rmSync(path, { recursive: true, force: true });
-        reclaimSourceCopy(scratch, actualSafety);
-      }
+      reclaimControlArtifacts(scratch, released, actualSafetyReceipt);
     }
   });
 
@@ -1251,22 +1252,24 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
       assert.match(String(cleanupError.message), /privacy scratch retained at/u, "the real cleanup error must be preserved");
       assert.equal(cleanupError.released, released, "the cleanup error must carry the owned receipts");
 
-      // Every exact owned path stays retained until an actual safe receipt proves
-      // close and group absence. The separate hygiene receipt is not used to clear
-      // the submitted unknown cleanup during these assertions.
+      // Exercise the same outer teardown with the submitted unknown receipt,
+      // then inspect retention after finally. The safe receipt is hygiene only.
+      let propagatedError;
+      try {
+        try { throw cleanupError; }
+        finally { reclaimControlArtifacts(scratch, released, observedReceipt); }
+      } catch (error) {
+        propagatedError = error;
+      }
+      assert.equal(propagatedError, cleanupError, "outer teardown must preserve the original cleanup Error identity");
+      assert.equal(released.retained.length, 2, "the missing-receipt proof must witness both home and work paths");
       assert.equal(existsSync(scratch), true, "the private source copy must survive a missing actual receipt");
       assert.equal(existsSync(join(scratch, "classifier-pi-native.ts")), true, "the retained copy must keep its source evidence");
       for (const path of released?.retained ?? []) {
         assert.equal(existsSync(path), true, `retained owned path must survive a missing actual receipt: ${path}`);
       }
     } finally {
-      const actualSafety = actualSafetyReceipt
-        ? { removed: true, failures: [], receipts: [actualSafetyReceipt], retained: [] }
-        : undefined;
-      if (actualSafety && ownedCleanupObserved(actualSafety)) {
-        for (const path of released?.retained ?? []) rmSync(path, { recursive: true, force: true });
-        reclaimSourceCopy(scratch, actualSafety);
-      }
+      reclaimControlArtifacts(scratch, released, actualSafetyReceipt);
     }
   });
 });
