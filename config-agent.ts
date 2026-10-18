@@ -245,6 +245,7 @@ export interface ConfigAgentPreviewResult {
   readonly cases: readonly ConfigAgentPreviewCase[];
   readonly tiers: readonly ConfigAgentPreviewTier[];
   readonly issues: readonly ConfigAgentIssueSummary[];
+  readonly routing: ConfigAgentRoutingSummary | null;
   readonly notes: readonly string[];
 }
 
@@ -849,6 +850,7 @@ export async function previewConfigCandidate(input: ConfigAgentPreviewInput): Pr
     return {
       ...base,
       status: "blocked",
+      routing: null,
       notes: ["Preview needs a candidate that passes validation; run check and fix the reported errors.", ...checked.notes],
     };
   }
@@ -860,10 +862,11 @@ export async function previewConfigCandidate(input: ConfigAgentPreviewInput): Pr
       registry: routerRegistry(catalog),
       now,
     });
-  } catch (error) {
+} catch (error) {
     return {
       ...base,
       status: "blocked",
+      routing: null,
       notes: [
         `Preview could not evaluate this candidate with Bifrost's resolver: ${error instanceof Error ? error.message : "unknown error"}`,
         "Nothing was written and no model was called.",
@@ -936,7 +939,7 @@ export async function previewConfigCandidate(input: ConfigAgentPreviewInput): Pr
   if (catalog.available.length === 0) {
     notes.push("The model catalog reported no available models, so every tier resolves empty.");
   }
-  return { ...base, status: "ok", cases, tiers, notes };
+  return { ...base, status: "ok", cases, tiers, routing, notes };
 }
 
 // ── apply ──────────────────────────────────────────────────────
@@ -1054,6 +1057,29 @@ export async function applyConfigCandidate(input: ConfigAgentApplyInput): Promis
       status: "declined",
       reason: "the user did not approve this change",
       notes: ["Nothing was written."],
+    };
+  }
+
+  // ── Revalidate after confirmation ────────────────────────────────
+  // The user confirmed the proposal before it was shown. Immediately before
+  // writing, re-check that nothing has changed so the confirmed proposal
+  // still matches the current state. This prevents the confirmation race.
+  // Note: the original liveSource/liveEffective checks above (before confirmation) are still valid,
+  // but we re-check here to catch changes that occurred between confirmation and write.
+  if (sourceDigestText(liveSource.digest) !== sourceDigestText(request.sourceDigest)) {
+    return {
+      ...withCheck,
+      status: "stale",
+      reason: "the selected source changed after this proposal was generated",
+      notes: ["Nothing was written. Run check again against the current source."],
+    };
+  }
+  if (catalogDigest(catalog) !== request.catalogDigest) {
+    return {
+      ...withCheck,
+      status: "stale",
+      reason: "the model inventory changed after this proposal was generated",
+      notes: ["Nothing was written. Run check and preview again against the current catalog."],
     };
   }
 
