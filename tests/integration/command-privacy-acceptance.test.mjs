@@ -1112,6 +1112,7 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
   it("cleanup control: an uncertain reported receipt retains the private source copy and preserves the real cleanup error", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-trace-cleanup-control-"));
     let observedReceipt;
+    let actualSafetyReceipt;
     let released;
     let cleanupError;
     try {
@@ -1140,6 +1141,10 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
             sessions.push({
               close: async (home) => {
                 const receipt = await rpc.close(home);
+                // Capture the actual safety receipt independently of the reported
+                // receipt, which is deliberately made uncertain below. This is test
+                // hygiene only and never clears the submitted unknown cleanup.
+                actualSafetyReceipt = receipt;
                 observedReceipt = receipt;
                 return { ...receipt, closed: false, groupGone: false };
               },
@@ -1175,8 +1180,93 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
       assert.equal(reclaimSourceCopy(scratch, actual), true, "the owner must reclaim once actual safety is observed");
       assert.equal(existsSync(scratch), false, "the reclaimed private copy must be gone");
     } finally {
-      for (const path of released?.retained ?? []) rmSync(path, { recursive: true, force: true });
-      reclaimSourceCopy(scratch, { removed: true, failures: [], receipts: [observedReceipt].filter(Boolean), retained: [] });
+      const actualSafety = actualSafetyReceipt
+        ? { removed: true, failures: [], receipts: [actualSafetyReceipt], retained: [] }
+        : undefined;
+      // Gate the entire outer reclaim, including retained home/work, on the same
+      // actual close + group-absence predicate. A missing or unsafe actual receipt
+      // retains every exact path and preserves the original cleanup error.
+      if (actualSafety && ownedCleanupObserved(actualSafety)) {
+        for (const path of released?.retained ?? []) rmSync(path, { recursive: true, force: true });
+        reclaimSourceCopy(scratch, actualSafety);
+      }
+    }
+  });
+
+  it("cleanup control: a missing actual receipt retains every owned path and preserves the real cleanup error", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "bifrost-trace-cleanup-missing-receipt-"));
+    let actualSafetyReceipt;
+    let observedReceipt;
+    let released;
+    let cleanupError;
+    try {
+      try {
+        for (const entry of readdirSync(ROOT)) {
+          if (entry.endsWith(".ts") || ["schema.json", "package.json"].includes(entry)) {
+            copyFileSync(join(ROOT, entry), join(scratch, entry));
+          }
+        }
+        symlinkSync(join(ROOT, "node_modules"), join(scratch, "node_modules"));
+
+        const extension = join(scratch, "index.ts");
+        released = await scenario({
+          fixtureOptions: {
+            extension,
+            config: {
+              enabled: true, default: "general", strategy: "first",
+              classifier: { enabled: true, backend: "pi-native", piNative: { model: "fake/classifier" } },
+              models: { general: ["fake/chat"] }, debug: { enabled: true },
+            },
+          },
+          body: async ({ env, sessions }) => {
+            const rpc = startRpc({ home: env.home, work: env.work, extension });
+            sessions.push({
+              close: async (home) => {
+                const receipt = await rpc.close(home);
+                // The actual owned run is already safe here, but the reported/
+                // assigned receipt is deliberately lost before assignment. This is
+                // test hygiene only; it must not clear the submitted unknown cleanup.
+                actualSafetyReceipt = receipt;
+                throw new Error("G09_INJECTED_CLOSE_FAILURE");
+              },
+            });
+            await rpc.userTurn(CANARY_PROMPT);
+            await rpc.close(env.home);
+          },
+        });
+      } catch (error) {
+        cleanupError = error;
+        released = error.released;
+      }
+
+      // The submitted cleanup outcome has no actual receipt, so it must not be
+      // treated as observed-safe even though a separate safe receipt exists.
+      assert.equal(observedReceipt, undefined, "the reported receipt must be missing");
+      assert.ok(actualSafetyReceipt, "the real owned run must have produced a separate safe receipt");
+      assert.equal(actualSafetyReceipt.closed, true, "the real owned run must actually close");
+      assert.equal(actualSafetyReceipt.groupGone, true, "the real owned process group must actually be absent");
+      assert.equal(actualSafetyReceipt.violations, "", "the real owned run must report no network violations");
+      assert.equal(ownedCleanupObserved(released), false, "a missing actual receipt must not count as observed-safe cleanup");
+      assert.ok(cleanupError, "missing-actual-receipt cleanup must surface its real error");
+      assert.match(String(cleanupError.message), /privacy scratch retained at/u, "the real cleanup error must be preserved");
+      assert.equal(cleanupError.released, released, "the cleanup error must carry the owned receipts");
+
+      // Every exact owned path stays retained until an actual safe receipt proves
+      // close and group absence. The separate hygiene receipt is not used to clear
+      // the submitted unknown cleanup during these assertions.
+      assert.equal(existsSync(scratch), true, "the private source copy must survive a missing actual receipt");
+      assert.equal(existsSync(join(scratch, "classifier-pi-native.ts")), true, "the retained copy must keep its source evidence");
+      for (const path of released?.retained ?? []) {
+        assert.equal(existsSync(path), true, `retained owned path must survive a missing actual receipt: ${path}`);
+      }
+    } finally {
+      const actualSafety = actualSafetyReceipt
+        ? { removed: true, failures: [], receipts: [actualSafetyReceipt], retained: [] }
+        : undefined;
+      if (actualSafety && ownedCleanupObserved(actualSafety)) {
+        for (const path of released?.retained ?? []) rmSync(path, { recursive: true, force: true });
+        reclaimSourceCopy(scratch, actualSafety);
+      }
     }
   });
 });
