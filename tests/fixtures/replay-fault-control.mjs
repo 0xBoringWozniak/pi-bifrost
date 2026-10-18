@@ -80,6 +80,10 @@ export const REPLAY_GUARD_LINES = {
 //         "OUTSTANDING" — no executable proof covers this pair yet.
 // `mutation` records the injected fault so the direction of the proof is clear
 // (a permissive bypass vs. a restrictive over-fire).
+// `hardBlock`, on an OUTSTANDING pair, records the measured reason a single
+// production fault cannot turn that exact assertion RED: independent guards
+// mask each other. It is kept visible instead of being replaced by a weaker
+// proof under a stronger claim.
 export const NAMED_REPLAY_ASSERTIONS = [
   {
     testFile: "tests/integration/auto-virtual.test.mjs",
@@ -101,14 +105,15 @@ export const NAMED_REPLAY_ASSERTIONS = [
     guard: null,
     mutation: null,
     status: "OUTSTANDING",
+    hardBlock: "No single production fault REDs this assertion. Independent checks stop the replay: the side-effect/tool gate, the event.context queued-work checks, the host pending-message gate, and the active-boundary ownership check. A permissive side-effect gate plus both event.context queued-work checks removed still stayed GREEN.",
   },
   // reliability-v2-auto titles are mode-parameterized; each concrete mode is listed.
   {
     testFile: "tests/integration/reliability-v2-auto.test.mjs",
     testName: "retries one zero-effect allowance failure with a configured alternate in v1 Auto",
-    guard: null,
-    mutation: null,
-    status: "OUTSTANDING",
+    guard: "allowanceRetryBoundaryStillSafe",
+    mutation: "return false",
+    status: "PROVEN",
   },
   {
     testFile: "tests/integration/reliability-v2-auto.test.mjs",
@@ -123,6 +128,7 @@ export const NAMED_REPLAY_ASSERTIONS = [
     guard: null,
     mutation: null,
     status: "OUTSTANDING",
+    hardBlock: "The limit is only reached when two independent gates both permit it: the branch-side-effect gate and the recorded-alternate gate. Removing the attempt record alone only drops the retry log line; bypassing both gates (permissive side-effect plus neutralized previousAttempt) is required before a third model is dispatched.",
   },
   {
     testFile: "tests/integration/reliability-v2-auto.test.mjs",
@@ -130,6 +136,7 @@ export const NAMED_REPLAY_ASSERTIONS = [
     guard: null,
     mutation: null,
     status: "OUTSTANDING",
+    hardBlock: "Same two gates as v1 plus the v2 recovery receipt's retryEligible=false gate. Three independent faults (permissive side-effect, neutralized previousAttempt, recovery retry-eligible) are required before a third model is dispatched.",
   },
 ];
 
@@ -156,6 +163,18 @@ export const FAULT_PROOFS = {
     testName: "does not replay an allowance failure after a synthetic tool side effect",
     redAssertionMessage: "Pi must execute the provider-requested synthetic tool",
   },
+};
+
+// The v1 zero-effect retry is the only remaining pair whose exact assertion is
+// single-guard fault-sensitive: the same restrictive fault that proves the v2
+// pair cancels its prepared retry and REDs it with the documented message.
+// The single-alternate and unsafe-tool pairs are hard-blocked; their named
+// assertions are masked by multiple independent guards, so no single-fault
+// proof would honestly support a PROVEN status (see NAMED_REPLAY_ASSERTIONS).
+FAULT_PROOFS.allowanceRetryBoundaryV1 = {
+  ...FAULT_PROOFS.allowanceRetryBoundaryV2,
+  testName: "retries one zero-effect allowance failure with a configured alternate in v1 Auto",
+  redAssertionMessage: "the prepared usage-limit retry was cancelled because the turn changed; no model was dispatched."
 };
 
 /** Injected fault per guard. `return false` proves the guard's restrictive half
