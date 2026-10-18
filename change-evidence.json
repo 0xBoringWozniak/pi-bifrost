@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "base": "ad66b4a0e95deb20cebbb72dafccdff66397f642",
+  "base": "888a07413a2b26be3c5f66d0117d7199a7b536ee",
   "contracts": [
     {
       "id": "per-change-execution",
