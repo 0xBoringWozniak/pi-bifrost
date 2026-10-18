@@ -4,183 +4,39 @@
 // pinning or flipping state.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import {
+  createHttpFixture,
+  readStats,
+  runPi as runPinnedPi,
+  startFakeProviderServer,
+  startRpc,
+} from "../fixtures/http-pi-harness.mjs";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, "..", "..");
-const EXTENSION_PATH = join(ROOT, "index.ts");
-const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
-const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
-let fakePort;
+let server;
 
-function startFakeServer() {
-  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    let settled = false;
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.kill();
-      reject(error);
-    };
-    const timer = setTimeout(() => fail(new Error("fake server start timeout")), 10_000);
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      buf += chunk;
-      try {
-        const parsed = JSON.parse(buf);
-        if (parsed.port) {
-          settled = true;
-          clearTimeout(timer);
-          resolve({ child, port: parsed.port });
-        }
-      } catch {
-        // partial JSON; wait for more
-      }
-    });
-    child.on("error", (error) => fail(error));
-    child.on("close", () => fail(new Error("fake server exited before ready")));
+// Legacy fixture policy: workspace-root config source (`<work>/bifrost.json`),
+// raw model entries (no injected defaults), the ambient-minus-credentials child
+// env, and the older 120s reject-on-timeout contract. The isolated env / server
+// handshake / pinned-Pi / RPC / stats / guarded-shutdown mechanics live in the
+// shared fixture (tests/fixtures/http-pi-harness.mjs).
+function legacyFixture({ models, bifrost }) {
+  return createHttpFixture({
+    prefix: "bifrost-legacy",
+    port: server.port,
+    models,
+    apiKey: "test",
+    config: bifrost,
+    configDir: "",
   });
 }
 
-function writeFixture({ home, work, port, models, bifrost }) {
-  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-  writeFileSync(
-    join(home, ".pi", "agent", "models.json"),
-    JSON.stringify({
-      providers: {
-        fake: { baseUrl: `http://127.0.0.1:${port}/v1`, api: "openai-completions", apiKey: "test", models },
-      },
-    }),
-  );
-  writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ retry: { enabled: false } }));
-  writeFileSync(join(work, "bifrost.json"), JSON.stringify(bifrost));
-}
-
-function runPi({ home, work, args }) {
-  return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    delete env.TYPESAFE_API_KEY;
-    const child = spawn("pi", ["-e", EXTENSION_PATH, "--approve", "--no-tools", ...args], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...env,
-        HOME: home,
-        PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
-        PI_SKIP_VERSION_CHECK: "1",
-        PI_OFFLINE: "1",
-        NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
-        BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
-        BIFROST_TEST_NETWORK_VIOLATIONS: join(home, "test-network-violations.log"),
-      },
-      cwd: work,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`pi timed out: ${args.join(" ")}`));
-    }, 120_000);
-    child.on("error", (err) => { clearTimeout(timer); reject(err); });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      try {
-        const violations = readFileSync(join(home, "test-network-violations.log"), "utf8");
-        assert.equal(violations, "", "test network guard recorded a blocked external request");
-      } catch (error) {
-        if (error.code !== "ENOENT") {
-          reject(error);
-          return;
-        }
-      }
-      resolve({ code, stdout, stderr });
-    });
-  });
-}
-
-function startRpc({ home, work }) {
-  const env = { ...process.env };
-  delete env.TYPESAFE_API_KEY;
-  const child = spawn("pi", ["-e", EXTENSION_PATH, "--approve", "--mode", "rpc", "--no-session", "--no-tools", "--model", "fake/fast"], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      ...env,
-      HOME: home,
-      PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
-      PI_SKIP_VERSION_CHECK: "1",
-      PI_OFFLINE: "1",
-      NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
-      BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${fakePort}`,
-      BIFROST_TEST_NETWORK_VIOLATIONS: join(home, "test-network-violations.log"),
-    },
-    cwd: work,
-  });
-  const records = [];
-  let pending = "";
-  let stderr = "";
-  let wake;
-  let closed;
-  let spawnError;
-  const childClosed = new Promise((resolve) => child.once("close", (code) => { closed = code; wake?.(); resolve(code); }));
-  child.once("error", (error) => { spawnError = error; wake?.(); });
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    const lines = `${pending}${chunk}`.split("\n");
-    pending = lines.pop();
-    for (const line of lines) { try { records.push(JSON.parse(line)); } catch { /* wait for the expected response */ } }
-    wake?.();
-  });
-  child.stderr.on("data", (chunk) => { stderr += chunk; wake?.(); });
-  const wait = (deadline) => new Promise((resolve) => {
-    const finish = () => { clearTimeout(timer); if (wake === finish) wake = undefined; resolve(); };
-    const timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
-    wake = finish;
-  });
-  async function prompt(message) {
-    const id = `legacy-reload-${Date.now()}-${records.length}`;
-    const start = records.length;
-    child.stdin.write(`${JSON.stringify({ id, type: "prompt", message })}\n`);
-    const deadline = Date.now() + 30_000;
-    let index = start;
-    let settled = false;
-    while (Date.now() < deadline) {
-      while (index < records.length) {
-        const record = records[index++];
-        if (record.id === id && record.type === "response") {
-          assert.equal(record.success, true, JSON.stringify(record));
-          if (record.data?.disposition !== "started") return records.slice(start);
-          settled = true;
-        }
-        if (settled && record.type === "agent_settled") return records.slice(start);
-      }
-      assert.ifError(spawnError);
-      assert.equal(closed, undefined, `Pi RPC exited before handling: ${message}`);
-      await wait(deadline);
-    }
-    throw new Error(`Pi RPC timed out: ${message}\n${stderr}`);
-  }
-  async function close() {
-    child.stdin.end();
-    await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-    if (closed === undefined) { child.kill("SIGKILL"); await childClosed; }
-    assert.equal(closed, 0, stderr);
-    try {
-      assert.equal(readFileSync(join(home, "test-network-violations.log"), "utf8"), "",
-        "test network guard recorded a blocked external request");
-    } catch (error) { if (error.code !== "ENOENT") throw error; }
-  }
-  return { prompt, close, get stderr() { return stderr; } };
+async function runPi({ fixture, args }) {
+  const result = await runPinnedPi({ fixture, server, args, timeoutMs: 120_000, onTimeout: "reject", inherit: true });
+  assert.equal(result.violations, "", "test network guard recorded a blocked external request");
+  return result;
 }
 
 function readState(work) {
@@ -191,125 +47,102 @@ function readState(work) {
   }
 }
 
-async function fakeStats(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/_stats`);
-  assert.equal(response.ok, true);
-  return response.json();
-}
-
 describe("legacy physical routing regression", { timeout: 240_000, concurrency: 1 }, () => {
-  let server;
   before(async () => {
-    server = await startFakeServer();
-    fakePort = server.port;
+    server = await startFakeProviderServer();
   });
-  after(() => {
-    server?.child.kill();
+  after(async () => {
+    await server?.stop();
   });
 
   it("input-time routing still switches models on a rule match", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }, { id: "strong", reasoning: false }],
+      bifrost: {
+        enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+        models: { quick: ["fake/fast"], frontier: ["fake/strong"] },
+        rules: [{ pattern: "architecture", model: "frontier" }],
+        debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
+      },
+    });
     try {
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }, { id: "strong", reasoning: false }],
-        bifrost: {
-          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
-          models: { quick: ["fake/fast"], frontier: ["fake/strong"] },
-          rules: [{ pattern: "architecture", model: "frontier" }],
-          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
-        },
-      });
       const { code, stderr } = await runPi({
-        home, work,
+        fixture,
         args: ["--no-session", "--model", "fake/fast", "-p", "architecture design"],
       });
       assert.equal(code, 0);
       assert.match(stderr, /\[bifrost\] classify: frontier/);
-      const debugLog = readFileSync(join(work, ".pi", "bifrost-debug.jsonl"), "utf8");
+      const debugLog = readFileSync(join(fixture.work, ".pi", "bifrost-debug.jsonl"), "utf8");
       assert.match(debugLog, /"event":"model_selected"[^}]*"model":"fake\/strong"/, "rule match must select fake/strong");
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
   it("unmatched prompts keep the legacy default-tier fallback", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }],
+      bifrost: {
+        enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+        models: { quick: ["fake/fast"], frontier: ["fake/strong"] },
+        rules: [{ pattern: "architecture", model: "frontier" }],
+      },
+    });
     try {
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }],
-        bifrost: {
-          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
-          models: { quick: ["fake/fast"], frontier: ["fake/strong"] },
-          rules: [{ pattern: "architecture", model: "frontier" }],
-        },
-      });
       const { code, stderr } = await runPi({
-        home, work,
+        fixture,
         args: ["--no-session", "--model", "fake/fast", "-p", "just chatting"],
       });
       assert.equal(code, 0);
       assert.doesNotMatch(stderr, /\[bifrost\] classify: frontier/);
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
   it("keeps the active physical model when the resolved tier has no available model", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }],
+      bifrost: {
+        enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+        models: { quick: ["fake/missing"] },
+      },
+    });
     try {
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }],
-        bifrost: {
-          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
-          models: { quick: ["fake/missing"] },
-        },
-      });
-      const before = await fakeStats(server.port);
+      const before = await readStats(server.port);
       const { code, stderr } = await runPi({
-        home, work,
+        fixture,
         args: ["--no-session", "--model", "fake/fast", "-p", "hello"],
       });
-      const after = await fakeStats(server.port);
+      const after = await readStats(server.port);
 
       assert.equal(code, 0);
       assert.match(stderr, /no healthy model available/);
       assert.equal((after.attempts.fast ?? 0) - (before.attempts.fast ?? 0), 1,
         "legacy physical mode must continue this turn on Pi's active model");
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
   it("does not generate on the active physical model after an explicit boundary is exhausted", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }],
+      bifrost: {
+        schemaVersion: 2,
+        enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+        models: { quick: ["fake/fast"], restricted: ["fake/missing"] },
+        tierPolicies: { restricted: { fallbackTiers: [] } },
+        rules: [{ pattern: "restricted", model: "restricted" }],
+      },
+    });
     try {
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }],
-        bifrost: {
-          schemaVersion: 2,
-          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
-          models: { quick: ["fake/fast"], restricted: ["fake/missing"] },
-          tierPolicies: { restricted: { fallbackTiers: [] } },
-          rules: [{ pattern: "restricted", model: "restricted" }],
-        },
-      });
-      const before = await fakeStats(server.port);
+      const before = await readStats(server.port);
       const { code, stderr } = await runPi({
-        home, work,
+        fixture,
         args: ["--no-session", "--model", "fake/fast", "-p", "restricted keep this turn"],
       });
-      const after = await fakeStats(server.port);
+      const after = await readStats(server.port);
 
       assert.equal(code, 0);
       assert.match(stderr, /tier "restricted" matched but no healthy model available/);
@@ -317,39 +150,36 @@ describe("legacy physical routing regression", { timeout: 240_000, concurrency: 
       assert.equal((after.attempts.fast ?? 0) - (before.attempts.fast ?? 0), 0,
         "an exhausted strict physical route must not fall through to Pi's active model");
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
   it("keeps the last-good strict boundary after a null project reload and blocks active-model generation", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const strictConfig = {
+      schemaVersion: 2,
+      enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+      models: { quick: ["fake/fast"], restricted: ["fake/missing"] },
+      tierPolicies: { restricted: { fallbackTiers: [] } },
+      rules: [{ pattern: "restricted", model: "restricted" }],
+    };
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }],
+      bifrost: strictConfig,
+    });
+    const { work } = fixture;
     try {
-      const strictConfig = {
-        schemaVersion: 2,
-        enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
-        models: { quick: ["fake/fast"], restricted: ["fake/missing"] },
-        tierPolicies: { restricted: { fallbackTiers: [] } },
-        rules: [{ pattern: "restricted", model: "restricted" }],
-      };
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }],
-        bifrost: strictConfig,
-      });
-      const rpc = startRpc({ home, work });
+      const rpc = startRpc({ fixture, server, model: "fake/fast", approve: true, inherit: true });
       try {
         const handshake = await rpc.prompt("/bifrost inspect --json");
-        assert.ok(handshake.some((record) => record.type === "response" && record.data?.disposition === "handled"),
+        assert.ok(handshake.records.some((record) => record.type === "response" && record.data?.disposition === "handled"),
           "Pi must finish the inspect handshake with the valid strict config before the source changes");
         writeFileSync(join(work, "bifrost.json"), "null\n");
 
-        const before = await fakeStats(server.port);
+        const before = await readStats(server.port);
         const reload = await rpc.prompt("/bifrost reload");
         const rejectedTurn = await rpc.prompt("restricted keep this turn");
-        const after = await fakeStats(server.port);
-        const messages = [...reload, ...rejectedTurn]
+        const after = await readStats(server.port);
+        const messages = [...reload.records, ...rejectedTurn.records]
           .filter((record) => record.type === "extension_ui_request" && record.method === "notify")
           .map((record) => record.message);
         const output = `${messages.join("\n")}\n${rpc.stderr}`;
@@ -360,80 +190,69 @@ describe("legacy physical routing regression", { timeout: 240_000, concurrency: 
         assert.equal((after.attempts.fast ?? 0) - (before.attempts.fast ?? 0), 0,
           "a malformed project layer must not erase the last-good strict boundary and continue on Pi's active model");
       } finally {
-        await rpc.close();
+        await rpc.close({ assertClean: true });
       }
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
   it("pin locks the current model for the session (deliberately never persisted)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }, { id: "strong", reasoning: false }],
+      bifrost: {
+        enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+        models: { quick: ["fake/fast"], frontier: ["fake/strong"] },
+        rules: [{ pattern: "architecture", model: "frontier" }],
+      },
+    });
     try {
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }, { id: "strong", reasoning: false }],
-        bifrost: {
-          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
-          models: { quick: ["fake/fast"], frontier: ["fake/strong"] },
-          rules: [{ pattern: "architecture", model: "frontier" }],
-        },
-      });
       // Pin takes effect for the session: the rule-matched prompt must not switch.
       const pinned = await runPi({
-        home, work,
+        fixture,
         args: ["--no-session", "--model", "fake/fast", "-p", "/bifrost pin", "architecture design"],
       });
       assert.equal(pinned.code, 0);
       assert.match(pinned.stderr, /Bifrost pinned/);
       assert.doesNotMatch(pinned.stderr, /\[bifrost\] classify:/, "pinned prompts must bypass routing entirely");
       // pin is session-local by design (runtime-state.ts): never persisted.
-      const state = readState(work);
+      const state = readState(fixture.work);
       assert.notEqual(state?.pinned, true, "pin must not survive the session");
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
   it("/bifrost off disables routing", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }],
+      bifrost: { enabled: true, default: "quick", classifier: { enabled: false }, models: { quick: ["fake/fast"] } },
+    });
     try {
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }],
-        bifrost: { enabled: true, default: "quick", classifier: { enabled: false }, models: { quick: ["fake/fast"] } },
-      });
-      const { code } = await runPi({ home, work, args: ["--no-session", "--model", "fake/fast", "-p", "/bifrost off"] });
+      const { code } = await runPi({ fixture, args: ["--no-session", "--model", "fake/fast", "-p", "/bifrost off"] });
       assert.equal(code, 0);
-      const state = readState(work);
+      const state = readState(fixture.work);
       assert.equal(state?.enabled, false, "off must persist to runtime state");
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
   it("session restore never pins or flips routing state", async () => {
-    const home = mkdtempSync(join(tmpdir(), "bifrost-legacy-home-"));
-    const work = mkdtempSync(join(tmpdir(), "bifrost-legacy-work-"));
+    const fixture = legacyFixture({
+      models: [{ id: "fast", reasoning: false }],
+      bifrost: {
+        enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+        models: { quick: ["fake/fast"] },
+        debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
+      },
+    });
+    const { work } = fixture;
     const sessions = mkdtempSync(join(tmpdir(), "bifrost-legacy-sessions-"));
     try {
-      writeFixture({
-        home, work, port: server.port,
-        models: [{ id: "fast", reasoning: false }],
-        bifrost: {
-          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
-          models: { quick: ["fake/fast"] },
-          debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
-        },
-      });
       // Turn 1: record a session with model fake/fast active.
       const first = await runPi({
-        home, work,
+        fixture,
         args: ["--session-dir", sessions, "--model", "fake/fast", "-p", "hello there"],
       });
       assert.equal(first.code, 0);
@@ -444,7 +263,7 @@ describe("legacy physical routing regression", { timeout: 240_000, concurrency: 
       writeFileSync(join(work, ".pi", "bifrost-state.json"), JSON.stringify({ enabled: true, pinned: false, classifierEnabled: true }));
       // Turn 2: restore the recorded session (no --model — Pi replays the selection).
       const second = await runPi({
-        home, work,
+        fixture,
         args: ["--session-dir", sessions, "--session", join(sessions, saved[0]), "-p", "and again"],
       });
       assert.equal(second.code, 0);
@@ -452,8 +271,7 @@ describe("legacy physical routing regression", { timeout: 240_000, concurrency: 
       assert.equal(state?.pinned, false, "restore must not pin the replayed model");
       assert.equal(state?.enabled, true, "restore must not flip routing state");
     } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      fixture.cleanup();
       rmSync(sessions, { recursive: true, force: true });
     }
   });
