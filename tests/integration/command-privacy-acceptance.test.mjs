@@ -51,10 +51,13 @@ const CANARY_PROMPT = `${PROMPT_CANARY} implement a small routing helper and men
 const RAW_LEAK_MARKERS = [...CANARIES];
 
 // ── explicit debug-trace allowlist ──────────────────────────────
-// Every top-level key any debug/measure record may carry. A new field must be
-// added here deliberately after a privacy review; an unexpected key fails the
-// allowlist assertion. `decision` is the one structured nested payload and is
-// separately checked for sensitive content below.
+// Every top-level key a routing/measure debug record may carry in the
+// prompt-backend witness below (case 1). A new field must be added here
+// deliberately after a privacy review; an unexpected key fails the allowlist
+// assertion. This set is deliberately not a claim about the other Bifrost
+// subsystems: the pi-native and TypeSafe detailed traces are governed by their
+// own declared per-backend sets below, and the route `decision` payload is the
+// one structured nested value, checked separately for sensitive content.
 const DEBUG_KEY_ALLOWLIST = new Set([
   "ts", "module", "event", "entryType", "duration_ms", "_meta_error",
   "run_correlation_id", "session_correlation_id", "turn_correlation_id",
@@ -81,6 +84,50 @@ const SENSITIVE_KEYS = new Set([
   "authorization", "secret", "credentials", "endpoint", "url", "error",
   "errorText", "errorMessage", "stack", "criteria", "systemPrompt",
 ]);
+
+// ── declared per-backend detailed-trace key sets ────────────────
+// The pi-native and TypeSafe classifiers emit their own debug rows when their
+// gate is open. Each row must stay inside that backend's declared set; these are
+// the union of every field the backend's trace() calls can emit plus the shared
+// debug() base fields. Adding a field to a backend trace is therefore a
+// deliberate, reviewable change to this list. `endpoint` is the pinned
+// TypeSafe service URL addressed by the gated `request` row; that row is only
+// reachable once a credential exists, so it is declared here rather than
+// exercised by the missing-credential witness.
+const DEBUG_BASE_KEYS = ["ts", "module", "event", "entryType", "pattern_run_id", "subagent_run_id", "_meta_error"];
+const PI_NATIVE_TRACE_KEYS = new Set([
+  ...DEBUG_BASE_KEYS,
+  "trace_id", "model", "tiers", "prompt_length", "timeout_ms", "max_attempts",
+  "outcome", "attempts", "tier", "confidence", "elapsed_ms", "cause", "provider",
+  "attempt", "remaining_ms", "valid", "min_confidence", "stop_reason", "retryable",
+]);
+const TYPESAFE_TRACE_KEYS = new Set([
+  ...DEBUG_BASE_KEYS,
+  "trace_id", "model", "tiers", "prompt_length", "timeout_ms", "max_attempts",
+  "outcome", "attempts", "tier", "confidence", "elapsed_ms", "attempt",
+  "remaining_ms", "endpoint", "status", "ok", "valid", "min_confidence",
+  "retryable", "delay_ms", "category",
+]);
+
+/**
+ * Named per-backend trace contract. The backend's rows must be present (a silent
+ * non-emission is a failure, not a pass), must identify their backend, must
+ * include the opening `start` row, and must stay inside the declared key set.
+ * Key sets do not constrain values, so callers keep their sensitive-string and
+ * canary checks as well.
+ */
+function assertBackendTraceContract(rows, backend, declared) {
+  const own = rows.filter((row) => row.module === backend);
+  assert.ok(own.length > 0, `${backend} trace must emit at least one row when its gate is open`);
+  assert.ok(own.every((row) => row.module === backend), `${backend} trace rows must identify their backend`);
+  assert.ok(own.some((row) => row.event === "start"), `${backend} trace must include its opening start row`);
+  for (const row of own) {
+    for (const key of Object.keys(row)) {
+      assert.equal(declared.has(key), true, `${backend} trace key outside declared backend set: ${key} (${row.event})`);
+    }
+  }
+  return own;
+}
 
 let server;
 
@@ -376,6 +423,87 @@ function normalize(text) {
   return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").split(" ").filter(Boolean).sort().join(" ");
 }
 
+// ── declared persistence key sets (reliability sidecars) ────────
+// Bifrost writes two independent reliability sidecars. Every object either can
+// persist has a declared key set, and the free-form marker strings are pinned to
+// their documented witness values, so a text-carrying field cannot hide behind a
+// keys-only check. These sets are derived from reliability.ts, reliability-v2.ts
+// and runtime-reliability-v2.ts and must change deliberately with them.
+
+const RELIABILITY_ARTIFACT_KEYS = ["models", "version"];
+const RELIABILITY_RECORD_KEYS = new Set([
+  "failures", "openUntil", "trialActive", "cooldownMultiplier", "lastFailureAt",
+  "lastFailureSource", "lastFailureReason", "lastSuccessAt", "lastSuccessSource",
+]);
+const PROVIDER_ARTIFACT_KEYS = ["dispatches", "revision", "scopes", "settledOutcomes", "version"];
+const PROVIDER_SCOPE_KEYS = new Set(["generation", "failures", "openUntil", "cooldownMultiplier", "lease"]);
+const PROVIDER_LEASE_KEYS = new Set(["ownerToken", "dispatchId", "outcomeId", "leaseId", "generation", "expiresAt", "maxExpiresAt"]);
+const PROVIDER_DISPATCH_KEYS = new Set(["ownerToken", "dispatchId", "outcomeId", "admittedAt", "proofUntil", "scopes", "settledAt", "settledKind"]);
+const PROVIDER_SCOPE_RECEIPT_KEYS = new Set(["scopeKey", "modelKey", "generation", "leaseId", "expiresAt", "maxExpiresAt"]);
+const PROVIDER_OUTCOME_KEYS = new Set(["expiresAt", "observation"]);
+const PROVIDER_OBSERVATION_KEYS = new Set(["modelKey", "category", "categoryEvidence", "observedAt", "retryAt", "source"]);
+
+function assertDeclaredKeys(record, declared, label) {
+  const allowed = declared instanceof Set ? declared : new Set(declared);
+  for (const key of Object.keys(record)) {
+    assert.equal(allowed.has(key), true, `${label}: key outside declared set: ${key}`);
+  }
+}
+
+/** Every string value in a parsed artifact, recursively. */
+function stringValues(value, found = []) {
+  if (typeof value === "string") found.push(value);
+  else if (Array.isArray(value)) for (const item of value) stringValues(item, found);
+  else if (value && typeof value === "object") for (const item of Object.values(value)) stringValues(item, found);
+  return found;
+}
+
+function assertNoCanaryValues(value, label) {
+  const values = stringValues(value);
+  for (const marker of RAW_LEAK_MARKERS) {
+    assert.equal(values.some((text) => text.includes(marker)), false, `${label} must not carry canary ${marker} in any string value`);
+  }
+}
+
+/** Legacy v1 model circuit: exact envelope and exact record key set. */
+function assertReliabilityArtifact(text) {
+  assert.equal(typeof text, "string", "bifrost-reliability.json must exist");
+  const state = JSON.parse(text);
+  assertDeclaredKeys(state, RELIABILITY_ARTIFACT_KEYS, "bifrost-reliability.json");
+  assert.equal(state.version, 1, "legacy reliability artifact must be version 1");
+  assert.equal(typeof state.models, "object");
+  for (const [model, record] of Object.entries(state.models)) {
+    assertDeclaredKeys(record, RELIABILITY_RECORD_KEYS, `bifrost-reliability.json models["${model}"]`);
+  }
+  return state;
+}
+
+/** Provider-scoped v2 sidecar: exact envelope and nested key sets at every level. */
+function assertProviderReliabilityArtifact(text) {
+  assert.equal(typeof text, "string", "bifrost-provider-reliability.json must exist");
+  const state = JSON.parse(text);
+  assertDeclaredKeys(state, PROVIDER_ARTIFACT_KEYS, "bifrost-provider-reliability.json");
+  assert.equal(state.version, 2, "provider reliability artifact must be version 2");
+  for (const [scopeKey, scope] of Object.entries(state.scopes)) {
+    const encoded = /^model:(\d+):(.+)$/.exec(scopeKey);
+    assert.ok(encoded, `provider scope key must encode model:<length>:<model>: ${scopeKey}`);
+    assert.equal(Number(encoded[1]), encoded[2].length, `provider scope key length prefix must match: ${scopeKey}`);
+    assertDeclaredKeys(scope, PROVIDER_SCOPE_KEYS, `scopes["${scopeKey}"]`);
+    if (scope.lease !== undefined) assertDeclaredKeys(scope.lease, PROVIDER_LEASE_KEYS, `scopes["${scopeKey}"].lease`);
+  }
+  for (const [id, receipt] of Object.entries(state.dispatches)) {
+    assertDeclaredKeys(receipt, PROVIDER_DISPATCH_KEYS, `dispatches["${id}"]`);
+    for (const [index, scopeReceipt] of receipt.scopes.entries()) {
+      assertDeclaredKeys(scopeReceipt, PROVIDER_SCOPE_RECEIPT_KEYS, `dispatches["${id}"].scopes[${index}]`);
+    }
+  }
+  for (const [id, outcome] of Object.entries(state.settledOutcomes)) {
+    assertDeclaredKeys(outcome, PROVIDER_OUTCOME_KEYS, `settledOutcomes["${id}"]`);
+    if (outcome.observation !== undefined) assertDeclaredKeys(outcome.observation, PROVIDER_OBSERVATION_KEYS, `settledOutcomes["${id}"].observation`);
+  }
+  return state;
+}
+
 // ── named redaction assertion (shared by the live case and its fault control) ──
 
 /**
@@ -422,6 +550,36 @@ async function debugProjectionScenario(extension) {
 
 function debugRowsFrom(raw) {
   return raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+/**
+ * Run one real Pi turn through the pi-native classifier with global debug on and
+ * enforce the named per-backend trace contract. `extension` lets the fault
+ * control point at a private mutated copy of the tree instead of production.
+ */
+async function assertPiNativeTraceScenario(extension) {
+  let rows = [];
+  await scenario({
+    fixtureOptions: {
+      extension,
+      config: {
+        enabled: true, default: "general", strategy: "first",
+        classifier: { enabled: true, backend: "pi-native", piNative: { model: "fake/classifier" } },
+        models: { general: ["fake/chat"] }, debug: { enabled: true },
+      },
+    },
+    body: async ({ env, sessions }) => {
+      const rpc = startRpc({ home: env.home, work: env.work, extension });
+      sessions.push(rpc);
+      await rpc.userTurn(CANARY_PROMPT);
+      await rpc.close(env.home);
+      rows = debugRows(env.project);
+    },
+  });
+  const own = assertBackendTraceContract(rows, "pi-native", PI_NATIVE_TRACE_KEYS);
+  assert.ok(own.some((row) => row.event === "model_missing"), "pi-native witness must reach the detailed trace");
+  assert.equal(rows.some((row) => sensitiveStringKeys(row).length > 0), false, "pi-native trace must not carry sensitive string channels");
+  return rows;
 }
 
 // ── scenarios ───────────────────────────────────────────────────
@@ -503,15 +661,16 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
     });
   });
 
-  it("persists reliability and runtime state without prompt, secret, or error canaries", async () => {
+  it("persists reliability and runtime state inside declared key sets without canaries", async () => {
     await scenario({
       fixtureOptions: {
+        models: ["chat", "classifier", "credits-exhausted"],
         config: {
           enabled: true,
           default: "general",
           strategy: "first",
           classifier: { enabled: true, backend: "prompt", model: "fake/classifier" },
-          models: { general: ["fake/fail"] },
+          models: { general: ["fake/credits-exhausted"] },
           reliability: { enabled: true },
           debug: { enabled: true },
         },
@@ -524,9 +683,31 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
         assert.equal(off.response.data?.disposition, "handled");
         await rpc.userTurn(CANARY_PROMPT);
         await rpc.close(env.home);
-        const reliability = artifact(env.project, "bifrost-reliability.json");
-        assertNoCanaries(reliability, "reliability artifact");
-        assertNoCanaries(artifact(env.project, "bifrost-provider-reliability.json") ?? "", "provider reliability artifact");
+        // Bifrost writes two independent reliability sidecars for this witness:
+        // the legacy v1 model circuit and the provider-scoped v2 cooldown. Both
+        // are inspected against their declared key sets — not merely
+        // canary-scanned — and both must carry a real witness.
+        const reliabilityText = artifact(env.project, "bifrost-reliability.json");
+        const reliability = assertReliabilityArtifact(reliabilityText);
+        assertNoCanaries(reliabilityText, "bifrost-reliability.json");
+        assertNoCanaryValues(reliability, "bifrost-reliability.json");
+        const exhausted = reliability.models["fake/credits-exhausted"];
+        assert.ok(exhausted, "legacy reliability artifact must witness the exhausted model");
+        assert.ok(exhausted.failures.length >= 1, "legacy witness must carry at least one recorded failure");
+        assert.equal(exhausted.trialActive, false, "legacy witness must not claim a half-open trial");
+        assert.equal(exhausted.lastFailureSource, "agent_settled", "legacy witness must preserve the documented failure-source marker");
+        assert.equal(exhausted.lastFailureReason, "allowance_exhausted", "legacy witness must preserve the documented allowance marker; a free-form value here would hide unsanctioned text");
+
+        // A missing provider artifact cannot prove the provider-side contract, so
+        // existence is asserted directly rather than defaulted to an empty string.
+        const providerText = artifact(env.project, "bifrost-provider-reliability.json");
+        const provider = assertProviderReliabilityArtifact(providerText);
+        assertNoCanaries(providerText, "bifrost-provider-reliability.json");
+        assertNoCanaryValues(provider, "bifrost-provider-reliability.json");
+        const scopeKeys = Object.keys(provider.scopes);
+        assert.ok(scopeKeys.length >= 1, "provider witness must carry at least one cooldown scope");
+        assert.ok(scopeKeys.some((key) => provider.scopes[key].openUntil > 0), "provider witness must carry an open cooldown");
+
         const runtime = artifact(env.project, "bifrost-state.json");
         assertNoCanaries(runtime, "runtime mode state");
         assert.deepEqual(Object.keys(JSON.parse(runtime)).sort(), ["classifierEnabled", "enabled"], "runtime state must hold only mode booleans");
@@ -681,25 +862,11 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
   });
 
   it("gates the pi-native detailed trace on global debug and the typesafe trace on both gates", async () => {
-    // pi-native: only the global debug.enabled gate.
-    await scenario({
-      fixtureOptions: {
-        config: {
-          enabled: true, default: "general", strategy: "first",
-          classifier: { enabled: true, backend: "pi-native", piNative: { model: "fake/classifier" } },
-          models: { general: ["fake/chat"] }, debug: { enabled: true },
-        },
-      },
-      body: async ({ env, sessions }) => {
-        const rpc = startRpc({ home: env.home, work: env.work });
-        sessions.push(rpc);
-        await rpc.userTurn(CANARY_PROMPT);
-        await rpc.close(env.home);
-        const rows = debugRows(env.project);
-        assert.ok(rows.some((row) => row.module === "pi-native" && row.event === "start"), "pi-native trace must appear when global debug is on");
-        assert.equal(rows.some((row) => sensitiveStringKeys(row).length > 0), false, "pi-native trace must not carry sensitive string channels");
-      },
-    });
+    // pi-native: only the global debug.enabled gate. The witness is a real Pi
+    // turn whose classifier model is absent from the fixture catalog, so it
+    // reaches start/model_missing/finish. That proves the gate and the row
+    // contract, not a completed pi-native classification against a live model.
+    await assertPiNativeTraceScenario(EXTENSION);
     // pi-native: global debug off -> no trace at all.
     await scenario({
       fixtureOptions: {
@@ -735,7 +902,12 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
         assert.equal(rows.some((row) => row.module === "typesafe"), false, "typesafe trace must stay off without typesafe.debug");
       },
     });
-    // typesafe: both gates on -> trace rows appear and carry only allowlisted keys.
+    // typesafe: both gates on -> trace rows appear and stay inside the declared
+    // backend key set. Boundary: with no auth.json the witness reaches
+    // start/credential_missing/finish(missing_key), so it proves both trace gates
+    // and the row contract, not a completed TypeSafe classification. That path
+    // never emits the gated `request` row whose pinned `endpoint` key is in
+    // SENSITIVE_KEYS, so no sensitive string can appear here.
     await scenario({
       fixtureOptions: {
         config: {
@@ -750,8 +922,8 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
         await rpc.userTurn(CANARY_PROMPT);
         await rpc.close(env.home);
         const rows = debugRows(env.project);
-        const typesafe = rows.filter((row) => row.module === "typesafe");
-        assert.ok(typesafe.some((row) => row.event === "start"), "typesafe trace must appear when both gates are on");
+        const typesafe = assertBackendTraceContract(rows, "typesafe", TYPESAFE_TRACE_KEYS);
+        assert.ok(typesafe.some((row) => row.event === "credential_missing"), "typesafe witness must reach the credential-missing trace");
         for (const row of typesafe) {
           assert.equal(sensitiveStringKeys(row).length, 0, "typesafe trace must not carry sensitive string channels");
         }
@@ -824,6 +996,45 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
       // GREEN + restore: the committed source is untouched and still passes.
       assert.equal(sha256(readFileSync(sourcePath, "utf8")), PRODUCTION_INDEX_SHA256, "production source must be unchanged after the proof");
       await debugProjectionScenario(sourcePath);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("fault control: an undeclared pi-native trace key turns the per-backend allowlist assertion RED", async () => {
+    const sourcePath = join(ROOT, "classifier-pi-native.ts");
+    const original = readFileSync(sourcePath, "utf8");
+    const originalHash = sha256(original);
+    const anchor = 'trace("start", { tiers: request.tiers, prompt_length: request.prompt.length, timeout_ms: timeoutMs, max_attempts: maxAttempts });';
+    assert.ok(original.includes(anchor), "pi-native start trace anchor must exist");
+    const mutated = original.replace(anchor, 'trace("start", { tiers: request.tiers, prompt_length: request.prompt.length, timeout_ms: timeoutMs, max_attempts: maxAttempts, leaked_prompt: request.prompt });');
+    assert.notEqual(mutated, original, "pi-native trace mutation must apply");
+    assert.notEqual(sha256(mutated), originalHash, "mutation must be a real source change");
+
+    const scratch = mkdtempSync(join(tmpdir(), "bifrost-trace-key-fault-"));
+    try {
+      for (const entry of readdirSync(ROOT)) {
+        if (entry.endsWith(".ts") || ["schema.json", "package.json"].includes(entry)) {
+          copyFileSync(join(ROOT, entry), join(scratch, entry));
+        }
+      }
+      symlinkSync(join(ROOT, "node_modules"), join(scratch, "node_modules"));
+      writeFileSync(join(scratch, "classifier-pi-native.ts"), mutated);
+
+      // RED: the mutated private copy must fail the named per-backend assertion,
+      // which runs before any canary or value check.
+      const redError = await assertPiNativeTraceScenario(join(scratch, "index.ts")).then(
+        () => undefined,
+        (error) => error,
+      );
+      assert.ok(redError, "an undeclared pi-native trace key must fail the backend allowlist assertion");
+      assert.match(String(redError.message), /pi-native trace key outside declared backend set/u, "mutation must fail the named trace-contract assertion");
+      assert.equal(redError.name, "AssertionError", "mutation must fail by assertion, not by startup or runtime error");
+      assert.equal(sha256(readFileSync(join(scratch, "classifier-pi-native.ts"), "utf8")), sha256(mutated), "mutated copy must stay mutated");
+
+      // GREEN + restore: production is untouched and still inside its declared set.
+      assert.equal(sha256(readFileSync(sourcePath, "utf8")), originalHash, "production classifier source must be unchanged after the proof");
+      await assertPiNativeTraceScenario(join(ROOT, "index.ts"));
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
