@@ -1,240 +1,39 @@
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  attemptsDelta,
+  assertOffline,
+  createHttpFixture,
+  readStats,
+  reportJson,
+  runPi,
+  startFakeProviderServer,
+  startRpc,
+  statsEntriesDelta,
+} from "../fixtures/http-pi-harness.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const PI = join(ROOT, "node_modules", ".bin", "pi");
-const EXTENSION = join(ROOT, "index.ts");
-const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
-const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 let server;
 
-function piEnvironment(home) {
-  const base = Object.fromEntries(["PATH", "TMPDIR", "LANG", "TERM"]
-    .filter((key) => process.env[key] !== undefined)
-    .map((key) => [key, process.env[key]]));
-  return {
-    ...base,
-    HOME: home,
-    PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
-    PI_SKIP_VERSION_CHECK: "1",
-    PI_OFFLINE: "1",
-    NODE_OPTIONS: `--require=${OUTBOUND_GUARD}`,
-    BIFROST_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${server.port}`,
-    BIFROST_TEST_NETWORK_VIOLATIONS: join(home, "network-violations.log"),
-  };
-}
-
-function startFakeServer() {
-  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
-  return new Promise((resolve, reject) => {
-    let output = "";
-    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("fake provider startup timed out")); }, 10_000);
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-      try {
-        const ready = JSON.parse(output);
-        clearTimeout(timer);
-        resolve({ child, port: ready.port });
-      } catch { /* wait for the startup record */ }
-    });
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("close", () => { clearTimeout(timer); reject(new Error("fake provider exited before startup")); });
-  });
-}
-
+// Command-policy fixture policy: narrow child env, project (.pi) config source,
+// the synthetic provider discovered with reasoning/context defaults, and only
+// the fake provider family enabled. The isolated env / server handshake /
+// pinned-Pi / RPC / stats / guarded-shutdown mechanics live in the shared
+// fixture (tests/fixtures/http-pi-harness.mjs).
 function fixture({ models = [], config = {}, initialConfig, ownership, apiKey = "fixture-only" } = {}) {
-  const home = mkdtempSync(join(tmpdir(), "bifrost-command-policy-home-"));
-  const work = mkdtempSync(join(tmpdir(), "bifrost-command-policy-work-"));
-  const agent = join(home, ".pi", "agent");
-  const project = join(work, ".pi");
-  mkdirSync(agent, { recursive: true });
-  mkdirSync(project, { recursive: true });
-  writeFileSync(join(agent, "models.json"), JSON.stringify({
-    providers: {
-      fake: {
-        baseUrl: `http://127.0.0.1:${server.port}/v1`,
-        api: "openai-completions",
-        apiKey,
-        models: models.map((model) => ({ reasoning: false, contextWindow: 8192, maxTokens: 512, ...model })),
-      },
-    },
-  }));
-  writeFileSync(join(agent, "settings.json"), JSON.stringify({ retry: { enabled: false }, enabledModels: ["fake/*"] }));
-  if (initialConfig !== undefined) writeFileSync(join(project, "bifrost.json"), initialConfig);
-  else writeFileSync(join(project, "bifrost.json"), JSON.stringify(config));
-  if (ownership !== undefined) writeFileSync(join(project, "bifrost-reconcile-ownership.json"), ownership);
-  return { home, work, project };
-}
-
-function runPi({ home, work, args, timeoutMs = 30_000 }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(PI, ["-e", EXTENSION, "--approve", "--no-tools", ...args], {
-      cwd: work,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: piEnvironment(home),
-    });
-    let stdout = "";
-    let stderr = "";
-    let killTimer;
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      killTimer = setTimeout(() => child.kill("SIGKILL"), 1_000);
-    }, timeoutMs);
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
-      let violations = "";
-      try { violations = readFileSync(join(home, "network-violations.log"), "utf8"); }
-      catch (error) { if (error.code !== "ENOENT") { reject(error); return; } }
-      resolve({ code, stdout, stderr, violations, timedOut: Boolean(killTimer) });
-    });
+  return createHttpFixture({
+    prefix: "bifrost-command-policy",
+    port: server.port,
+    models,
+    apiKey,
+    modelDefaults: { reasoning: false, contextWindow: 8192, maxTokens: 512 },
+    settings: { retry: { enabled: false }, enabledModels: ["fake/*"] },
+    config,
+    initialConfig,
+    ownership,
   });
-}
-
-function startRpc({ home, work, model = "fake/chat", timeoutMs = 30_000 }) {
-  const child = spawn(PI, ["-e", EXTENSION, "--mode", "rpc", "--no-session", "--no-tools", "--model", model], {
-    cwd: work,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: piEnvironment(home),
-  });
-  const records = [];
-  let incompleteLine = "";
-  let stderr = "";
-  let wake;
-  let closePromise;
-  let closeInfo;
-  let spawnError;
-  const childClosed = new Promise((resolve) => child.once("close", (code, signal) => {
-    closeInfo = { code, signal };
-    wake?.();
-    resolve(closeInfo);
-  }));
-  child.once("error", (error) => { spawnError = error; wake?.(); });
-  child.stdin.on("error", (error) => { spawnError ??= error; wake?.(); });
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    const lines = `${incompleteLine}${chunk}`.split("\n");
-    incompleteLine = lines.pop();
-    for (const line of lines) {
-      try { records.push(JSON.parse(line)); }
-      catch { /* malformed output remains a protocol assertion failure */ }
-    }
-    wake?.();
-  });
-  child.stderr.on("data", (chunk) => { stderr += chunk; wake?.(); });
-
-  function waitForActivity(deadline) {
-    const remaining = Math.max(0, deadline - Date.now());
-    return new Promise((resolve) => {
-      let timer;
-      const finish = () => {
-        clearTimeout(timer);
-        if (wake === finish) wake = undefined;
-        resolve();
-      };
-      wake = finish;
-      timer = setTimeout(finish, remaining);
-    });
-  }
-
-  async function prompt(message) {
-    const id = `command-${records.length}-${Date.now()}`;
-    const start = records.length;
-    const stderrStart = stderr.length;
-    const deadline = Date.now() + timeoutMs;
-    child.stdin.write(`${JSON.stringify({ id, type: "prompt", message })}\n`);
-    let index = start;
-    while (Date.now() < deadline) {
-      while (index < records.length) {
-        const record = records[index++];
-        if (record.type === "extension_ui_request" && record.method === "confirm") {
-          child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: record.id, confirmed: true })}\n`);
-        } else if (record.id === id && record.type === "response") {
-          assert.equal(record.success, true, JSON.stringify(record));
-          return { response: record, stderr: stderr.slice(stderrStart) };
-        }
-      }
-      assert.ifError(spawnError);
-      if (closeInfo) throw new Error(`Pi RPC exited before responding: ${message}`);
-      await waitForActivity(deadline);
-    }
-    throw new Error(`Pi RPC timed out on ${message}`);
-  }
-
-  async function userTurn(message) {
-    const start = records.length;
-    const accepted = await prompt(message);
-    if (accepted.response.data?.disposition !== "started") return accepted;
-    const deadline = Date.now() + timeoutMs;
-    let index = start;
-    while (Date.now() < deadline) {
-      while (index < records.length) {
-        const record = records[index++];
-        if (record.type === "agent_settled") return accepted;
-      }
-      assert.ifError(spawnError);
-      if (closeInfo) throw new Error(`Pi RPC exited before settling: ${message}`);
-      await waitForActivity(deadline);
-    }
-    throw new Error(`Pi RPC turn did not settle: ${message}`);
-  }
-
-  async function close() {
-    closePromise ??= (async () => {
-      child.stdin.end();
-      await Promise.race([
-        childClosed,
-        new Promise((resolve) => setTimeout(resolve, 2_000)),
-      ]);
-      if (!closeInfo) {
-        child.kill("SIGKILL");
-        await Promise.race([childClosed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-      }
-      assert.ok(closeInfo, "Pi RPC child must close before its fixture is removed");
-      let violations = "";
-      try { violations = readFileSync(join(home, "network-violations.log"), "utf8"); }
-      catch (error) { if (error.code !== "ENOENT") throw error; }
-      return { ...closeInfo, violations };
-    })();
-    return closePromise;
-  }
-
-  return { prompt, userTurn, close };
-}
-
-async function stats() {
-  const response = await fetch(`http://127.0.0.1:${server.port}/_stats`);
-  assert.equal(response.ok, true);
-  return response.json();
-}
-
-function report(output) {
-  const line = `${output.stderr}\n${output.stdout}`.split("\n").find((item) => item.startsWith("[bifrost-json] "));
-  assert.ok(line, `expected Pi command JSON report; output was:\n${output.stderr}\n${output.stdout}`);
-  return JSON.parse(line.slice("[bifrost-json] ".length));
-}
-
-function assertOffline(output) {
-  assert.equal(output.code, 0, output.stderr);
-  assert.equal(output.timedOut, false);
-  assert.equal(output.violations, "", "Pi attempted a non-fixture network connection");
 }
 
 function writeFixtureReceipt(generatedByTier) {
@@ -245,17 +44,8 @@ function writeFixtureReceipt(generatedByTier) {
 }
 
 describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 180_000 }, () => {
-  before(async () => { server = await startFakeServer(); });
-  after(async () => {
-    if (!server?.child || server.child.exitCode !== null) return;
-    const child = server.child;
-    child.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolve) => child.once("close", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 2_000)),
-    ]);
-    if (child.exitCode === null) child.kill("SIGKILL");
-  });
+  before(async () => { server = await startFakeProviderServer(); });
+  after(async () => { await server?.stop(); });
 
   it("dispatches to the fresh declared billing-class preference and makes no classifier call", async () => {
     const env = fixture({
@@ -291,16 +81,16 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       },
     });
     try {
-      const beforeStats = await stats();
-      const result = await runPi({ home: env.home, work: env.work, args: ["--no-session", "--model", "fake/metered", "-p", "ordinary implementation task"] });
-      const afterStats = await stats();
+      const beforeStats = await readStats(server.port);
+      const result = await runPi({ fixture: env, server, args: ["--no-session", "--model", "fake/metered", "-p", "ordinary implementation task"] });
+      const afterStats = await readStats(server.port);
       assertOffline(result);
       assert.equal(result.code, 0, result.stderr);
-      const delta = afterStats.stats.slice(beforeStats.stats.length);
+      const delta = statsEntriesDelta(beforeStats, afterStats);
       assert.deepEqual(delta.map((item) => [item.kind, item.model]), [["generation", "subscription"]]);
-      const changes = Object.fromEntries(Object.keys(afterStats.attempts).map((key) => [key, (afterStats.attempts[key] ?? 0) - (beforeStats.attempts[key] ?? 0)]));
+      const changes = attemptsDelta(beforeStats, afterStats);
       assert.deepEqual(changes, { subscription: 1 });
-    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+    } finally { env.cleanup(); }
   });
 
   it("runs inspect, validate, and a direct-rule preview offline without provider requests", async () => {
@@ -318,18 +108,18 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       apiKey: "synthetic-provider-secret-canary",
     });
     try {
-      const beforeStats = await stats();
+      const beforeStats = await readStats(server.port);
       const commandOutputs = [];
       for (const command of ["/bifrost inspect --json", "/bifrost validate --json", "/bifrost preview --json POLICY_ACCEPTANCE_DIRECT"]) {
-        const result = await runPi({ home: env.home, work: env.work, args: ["--no-session", "-p", command] });
+        const result = await runPi({ fixture: env, server, args: ["--no-session", "-p", command] });
         commandOutputs.push(`${command}: ${result.stderr}\n${result.stdout}`);
         assertOffline(result);
         if (command.includes("preview")) {
-          const preview = report(result);
+          const preview = reportJson(result);
           assert.equal(preview.source, "regex");
           assert.equal(preview.selected, "fake/chat");
         } else {
-          const diagnostic = report(result);
+          const diagnostic = reportJson(result);
           assert.equal(diagnostic.kind, command.includes("inspect") ? "inspection" : "validation");
           if (diagnostic.kind === "inspection") {
             assert.ok(diagnostic.tiers.some((tier) => tier.candidates.some((candidate) => candidate.model === "fake/chat" && candidate.available === true)));
@@ -337,7 +127,7 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
         }
         assert.doesNotMatch(`${result.stderr}\n${result.stdout}`, /private-config-canary|synthetic-provider-secret-canary/u);
       }
-      const afterStats = await stats();
+      const afterStats = await readStats(server.port);
       assert.deepEqual(afterStats.attempts, beforeStats.attempts, `commands made provider attempts:\n${commandOutputs.join("\n")}`);
       assert.deepEqual(afterStats.stats, beforeStats.stats, `commands made provider requests:\n${commandOutputs.join("\n")}`);
       assert.equal(afterStats.catalogRequests, beforeStats.catalogRequests, "offline diagnostics must not refresh provider catalogs");
@@ -346,7 +136,7 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
         const debugLog = readFileSync(debugPath, "utf8");
         assert.doesNotMatch(debugLog, /private-config-canary|synthetic-provider-secret-canary/u);
       }
-    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+    } finally { env.cleanup(); }
   });
 
   it("applies only a reviewed Pi-command reconciliation digest and preserves manual config", async () => {
@@ -356,17 +146,17 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       initialConfig: original,
       ownership: writeFixtureReceipt(["fake/old"]),
     });
-    const rpc = startRpc({ home: env.home, work: env.work, model: "fake/new" });
+    const rpc = startRpc({ fixture: env, server, model: "fake/new" });
     try {
-      const beforeStats = await stats();
+      const beforeStats = await readStats(server.port);
       const previewOutput = await rpc.prompt("/bifrost config reconcile --tier general --provider fake --refresh --json");
-      const refreshedPreview = report(previewOutput);
+      const refreshedPreview = reportJson(previewOutput);
       assert.equal(refreshedPreview.status, "ready", JSON.stringify(refreshedPreview));
       assert.equal(refreshedPreview.inventoryStatus, "complete");
       assert.deepEqual(readFileSync(join(env.project, "bifrost.json")), original, "preview must not change config bytes");
 
       const offlinePreviewOutput = await rpc.prompt("/bifrost config reconcile --tier general --provider fake --json");
-      const proposal = report(offlinePreviewOutput);
+      const proposal = reportJson(offlinePreviewOutput);
       assert.equal(proposal.status, "ready", JSON.stringify(proposal));
       assert.equal(proposal.proposalDigest, refreshedPreview.proposalDigest);
       assert.ok(proposal.proposalDigest);
@@ -375,13 +165,13 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       const configBeforeRejectedApply = readFileSync(join(env.project, "bifrost.json"));
       const receiptBeforeRejectedApply = readFileSync(join(env.project, "bifrost-reconcile-ownership.json"));
       const rejectedOutput = await rpc.prompt(`/bifrost config reconcile --tier general --provider fake --apply --proposal ${"0".repeat(64)} --json`);
-      const rejected = report(rejectedOutput);
+      const rejected = reportJson(rejectedOutput);
       assert.notEqual(rejected.status, "committed", "an unreviewed digest must not commit");
       assert.deepEqual(readFileSync(join(env.project, "bifrost.json")), configBeforeRejectedApply);
       assert.deepEqual(readFileSync(join(env.project, "bifrost-reconcile-ownership.json")), receiptBeforeRejectedApply);
 
       const appliedOutput = await rpc.prompt(`/bifrost config reconcile --tier general --provider fake --apply --proposal ${proposal.proposalDigest} --json`);
-      const applied = report(appliedOutput);
+      const applied = reportJson(appliedOutput);
       assert.equal(applied.status, "committed");
       const config = JSON.parse(readFileSync(join(env.project, "bifrost.json"), "utf8"));
       assert.deepEqual(config.models.general, ["handwritten/model", "fake/new"]);
@@ -396,7 +186,7 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       const oldReceipt = writeFixtureReceipt(["fake/old"]);
       assert.ok(existsSync(applied.applyResult.ownershipBackupPath));
       assert.deepEqual(readFileSync(applied.applyResult.ownershipBackupPath), Buffer.from(oldReceipt));
-      const afterStats = await stats();
+      const afterStats = await readStats(server.port);
       assert.deepEqual(afterStats.attempts, beforeStats.attempts);
       assert.deepEqual(afterStats.stats, beforeStats.stats);
       assert.equal(afterStats.catalogRequests, beforeStats.catalogRequests,
@@ -407,8 +197,7 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
         assert.equal(stopped.code, 0);
         assert.equal(stopped.violations, "");
       } finally {
-        rmSync(env.home, { recursive: true, force: true });
-        rmSync(env.work, { recursive: true, force: true });
+        env.cleanup();
       }
     }
   });
@@ -427,17 +216,17 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       initialConfig: original,
     });
     try {
-      const beforeStats = await stats();
+      const beforeStats = await readStats(server.port);
       const result = await runPi({
-        home: env.home,
-        work: env.work,
+        fixture: env,
+        server,
         args: ["--no-session", "-p", "/bifrost init -f --write"],
         timeoutMs: 70_000,
       });
-      const afterStats = await stats();
+      const afterStats = await readStats(server.port);
       assertOffline(result);
       assert.equal(result.code, 0, result.stderr);
-      assert.deepEqual(afterStats.stats.slice(beforeStats.stats.length).map((item) => [item.kind, item.model]), [
+      assert.deepEqual(statsEntriesDelta(beforeStats, afterStats).map((item) => [item.kind, item.model]), [
         ["probe", "new"],
         ["probe", "probe-slow"],
       ]);
@@ -453,7 +242,7 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       assert.ok(generated.includes("fake/new"));
       assert.ok(generated.includes("fake/probe-slow"));
       assert.equal(generated.includes("handwritten/model"), false);
-    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+    } finally { env.cleanup(); }
   });
 
   it("warns on prompt-classifier timeout, falls back locally, then generates on the physical model", async () => {
@@ -469,19 +258,20 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       },
     });
     try {
-      const beforeStats = await stats();
-      const result = await runPi({ home: env.home, work: env.work, args: ["--no-session", "--model", "fake/healthy", "-p", "a task that needs a model"], timeoutMs: 20_000 });
-      const afterStats = await stats();
+      const beforeStats = await readStats(server.port);
+      const result = await runPi({ fixture: env, server, args: ["--no-session", "--model", "fake/healthy", "-p", "a task that needs a model"], timeoutMs: 20_000 });
+      const afterStats = await readStats(server.port);
       assertOffline(result);
       assert.equal(result.code, 0, result.stderr);
       assert.match(result.stderr, /classifier time budget expired/i);
-      assert.deepEqual(afterStats.stats.slice(beforeStats.stats.length).map((item) => [item.kind, item.model]), [
+      assert.deepEqual(statsEntriesDelta(beforeStats, afterStats).map((item) => [item.kind, item.model]), [
         ["classifier", "slow"],
         ["generation", "healthy"],
       ]);
-      assert.equal((afterStats.attempts.slow ?? 0) - (beforeStats.attempts.slow ?? 0), 1);
-      assert.equal((afterStats.attempts.healthy ?? 0) - (beforeStats.attempts.healthy ?? 0), 1);
-    } finally { rmSync(env.home, { recursive: true, force: true }); rmSync(env.work, { recursive: true, force: true }); }
+      const attempts = attemptsDelta(beforeStats, afterStats);
+      assert.equal(attempts.slow ?? 0, 1);
+      assert.equal(attempts.healthy ?? 0, 1);
+    } finally { env.cleanup(); }
   });
 
   it("uses reloaded v2 model-scope allowance policy for the next Auto turn", async () => {
@@ -505,7 +295,7 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       },
     };
     const env = fixture({ models: [{ id: "usage-exhausted" }, { id: "sibling" }], config });
-    const rpc = startRpc({ home: env.home, work: env.work, model: "bifrost/auto" });
+    const rpc = startRpc({ fixture: env, server, model: "bifrost/auto" });
     try {
       const migrated = await rpc.prompt("/bifrost reliability migrate --fresh");
       assert.equal(migrated.response.data.disposition, "handled");
@@ -516,13 +306,14 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
       const reloaded = await rpc.prompt("/bifrost reload");
       assert.equal(reloaded.response.data.disposition, "handled");
 
-      const before = await stats();
+      const before = await readStats(server.port);
       const firstTurn = await rpc.userTurn("first ordinary coding task");
-      const afterFailure = await stats();
+      const afterFailure = await readStats(server.port);
       assert.equal(firstTurn.response.data.disposition, "started");
-      assert.equal((afterFailure.attempts["usage-exhausted"] ?? 0) - (before.attempts["usage-exhausted"] ?? 0), 1,
-        `expected one usage-exhausted provider call; stats delta: ${JSON.stringify(afterFailure.stats.slice(before.stats.length))}`);
-      assert.equal((afterFailure.attempts.sibling ?? 0) - (before.attempts.sibling ?? 0), 0,
+      const failureDelta = attemptsDelta(before, afterFailure);
+      assert.equal(failureDelta["usage-exhausted"] ?? 0, 1,
+        `expected one usage-exhausted provider call; stats delta: ${JSON.stringify(statsEntriesDelta(before, afterFailure))}`);
+      assert.equal(failureDelta.sibling ?? 0, 0,
         "allowance retry is disabled, so the failed turn must stop on its original model");
 
       const providerStatePath = join(env.project, "bifrost-provider-reliability.json");
@@ -537,10 +328,11 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
         "the allowance failure should be recorded against the failed model");
 
       await rpc.userTurn("second ordinary coding task");
-      const afterSecond = await stats();
-      assert.equal((afterSecond.attempts["usage-exhausted"] ?? 0) - (afterFailure.attempts["usage-exhausted"] ?? 0), 0,
+      const afterSecond = await readStats(server.port);
+      const secondDelta = attemptsDelta(afterFailure, afterSecond);
+      assert.equal(secondDelta["usage-exhausted"] ?? 0, 0,
         "the model-scoped pause must exclude the failed model on the following turn");
-      assert.equal((afterSecond.attempts.sibling ?? 0) - (afterFailure.attempts.sibling ?? 0), 1,
+      assert.equal(secondDelta.sibling ?? 0, 1,
         "the next Auto turn should use the healthy sibling on the same provider");
     } finally {
       try {
@@ -548,8 +340,7 @@ describe("pinned Pi command and routing acceptance", { concurrency: 1, timeout: 
         assert.equal(stopped.code, 0);
         assert.equal(stopped.violations, "");
       } finally {
-        rmSync(env.home, { recursive: true, force: true });
-        rmSync(env.work, { recursive: true, force: true });
+        env.cleanup();
       }
     }
   });
