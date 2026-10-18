@@ -379,11 +379,44 @@ async function scenario(run) {
   const released = await releaseScratch(env, sessions);
   if (!released.removed || released.failures.length > 0) {
     const cleanup = new Error(`privacy scratch retained at ${released.retained.join(", ")}: ${released.failures.map((f) => f.message).join("; ")}`);
-    if (bodyError) { cleanup.cause = bodyError; throw cleanup; }
+    // Carry the owned receipts so a caller can distinguish observed-safe cleanup
+    // from an uncertain report and retain its own private copy instead of
+    // deleting it while an owned run may still be live.
+    cleanup.released = released;
+    if (bodyError) cleanup.cause = bodyError;
     throw cleanup;
   }
-  if (bodyError) throw bodyError;
+  if (bodyError) { bodyError.released = released; throw bodyError; }
   return released;
+}
+
+/**
+ * True only when every owned run was observed closed with its process group
+ * absent and no ownership failure was recorded. A missing or partial receipt is
+ * never treated as observed-safe.
+ */
+function ownedCleanupObserved(released) {
+  return Boolean(released)
+    && released.removed === true
+    && released.failures.length === 0
+    && released.receipts.length > 0
+    && released.receipts.every((receipt) => receipt.closed === true && receipt.groupGone === true);
+}
+
+/**
+ * A source-copy owner reclaims its private extension copy only after every owned
+ * run is observed closed with its group absent. On uncertain cleanup it retains
+ * the exact path — a still-live run may import it and the proof needs its source
+ * evidence — and returns false so the caller surfaces the original cleanup error
+ * rather than an expected-assert mismatch.
+ */
+function reclaimSourceCopy(scratch, released) {
+  if (ownedCleanupObserved(released)) {
+    rmSync(scratch, { recursive: true, force: true });
+    return true;
+  }
+  console.error(`G09 retained private source copy at ${scratch} after uncertain cleanup`);
+  return false;
 }
 
 // ── artifact helpers ────────────────────────────────────────────
@@ -508,13 +541,14 @@ function assertProviderReliabilityArtifact(text) {
 
 /**
  * Run one real Pi turn with debug tracing enabled and assert the debug prompt
- * projection stays content-free. Returns the raw debug text so the caller can
- * make broader claims. The exact named assertion below is what the fault
- * control must break.
+ * projection stays content-free. Returns the raw debug text plus the owned
+ * cleanup outcome so a source-copy owner can gate its private-copy reclamation
+ * on observed close and group absence. The exact named assertion below is what
+ * the fault control must break.
  */
 async function debugProjectionScenario(extension) {
   let raw = "";
-  await scenario({
+  const released = await scenario({
     fixtureOptions: {
       extension,
       config: {
@@ -536,16 +570,21 @@ async function debugProjectionScenario(extension) {
       raw = artifact(env.project, "bifrost-debug.jsonl") ?? "";
     },
   });
-  assert.notEqual(raw, "", "debug artifact must be written");
-  const promptRows = debugRowsFrom(raw).filter((row) => row.module === "input" && row.event === "prompt");
-  assert.equal(promptRows.length, 1, `exactly one debug prompt record; trace was:\n${raw}`);
-  assert.deepEqual(
-    Object.keys(promptRows[0]).sort(),
-    ["entryType", "event", "length", "module", "ts"],
-    "debug prompt projection must stay content-free",
-  );
-  assertNoCanaries(raw, "debug trace");
-  return raw;
+  try {
+    assert.notEqual(raw, "", "debug artifact must be written");
+    const promptRows = debugRowsFrom(raw).filter((row) => row.module === "input" && row.event === "prompt");
+    assert.equal(promptRows.length, 1, `exactly one debug prompt record; trace was:\n${raw}`);
+    assert.deepEqual(
+      Object.keys(promptRows[0]).sort(),
+      ["entryType", "event", "length", "module", "ts"],
+      "debug prompt projection must stay content-free",
+    );
+    assertNoCanaries(raw, "debug trace");
+    return { raw, released };
+  } catch (error) {
+    error.released = released;
+    throw error;
+  }
 }
 
 function debugRowsFrom(raw) {
@@ -556,10 +595,12 @@ function debugRowsFrom(raw) {
  * Run one real Pi turn through the pi-native classifier with global debug on and
  * enforce the named per-backend trace contract. `extension` lets the fault
  * control point at a private mutated copy of the tree instead of production.
+ * Returns the emitted rows plus the owned cleanup outcome so a source-copy owner
+ * can reclaim its private copy only after observed close and group absence.
  */
 async function assertPiNativeTraceScenario(extension) {
   let rows = [];
-  await scenario({
+  const released = await scenario({
     fixtureOptions: {
       extension,
       config: {
@@ -576,10 +617,22 @@ async function assertPiNativeTraceScenario(extension) {
       rows = debugRows(env.project);
     },
   });
-  const own = assertBackendTraceContract(rows, "pi-native", PI_NATIVE_TRACE_KEYS);
-  assert.ok(own.some((row) => row.event === "model_missing"), "pi-native witness must reach the detailed trace");
-  assert.equal(rows.some((row) => sensitiveStringKeys(row).length > 0), false, "pi-native trace must not carry sensitive string channels");
-  return rows;
+  try {
+    const own = assertBackendTraceContract(rows, "pi-native", PI_NATIVE_TRACE_KEYS);
+    assert.ok(own.some((row) => row.event === "model_missing"), "pi-native witness must reach the detailed trace");
+    assert.equal(rows.some((row) => sensitiveStringKeys(row).length > 0), false, "pi-native trace must not carry sensitive string channels");
+    // An allowed key name does not constrain its value. `cause` is a declared
+    // pi-native key, so a free-form prompt/error could ride inside it; scan every
+    // emitted row for the seeded canaries. This runs after the key-contract
+    // assertions so the undeclared-key control still reaches its named assertion.
+    assertNoCanaries(JSON.stringify(rows), "pi-native trace");
+    return { rows, released };
+  } catch (error) {
+    // Propagate the owned cleanup outcome so a source-copy owner can gate its
+    // private-copy reclamation on observed close and group absence.
+    error.released = released;
+    throw error;
+  }
 }
 
 // ── scenarios ───────────────────────────────────────────────────
@@ -973,6 +1026,8 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
     assert.notEqual(sha256(mutated), PRODUCTION_INDEX_SHA256, "mutation must be a real source change");
 
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-privacy-fault-"));
+    let released;
+    let proofError;
     try {
       for (const entry of readdirSync(ROOT)) {
         if (entry.endsWith(".ts") || ["schema.json", "package.json"].includes(entry)) {
@@ -984,20 +1039,26 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
 
       // RED: the mutated private copy must fail the named assertion, not a
       // startup or syntax error.
-      const redError = await debugProjectionScenario(join(scratch, "index.ts")).then(
-        () => undefined,
-        (error) => error,
-      );
-      assert.ok(redError, "mutated prompt projection must fail the redaction assertion");
-      assert.match(String(redError.message), /debug prompt projection must stay content-free/u, "mutation must fail the named assertion");
-      assert.equal(redError.name, "AssertionError", "mutation must fail by assertion, not by startup or runtime error");
+      try {
+        ({ released } = await debugProjectionScenario(join(scratch, "index.ts")));
+      } catch (error) {
+        proofError = error;
+        released = error.released;
+      }
+      // Retain the private copy and surface the real cleanup error when the owned
+      // run's cleanup was not observed safe, instead of masking it with the
+      // expected assertion mismatch or deleting a source a live run may import.
+      if (!ownedCleanupObserved(released)) throw proofError ?? new Error("prompt projection fault cleanup was not observed safe");
+      assert.ok(proofError, "mutated prompt projection must fail the redaction assertion");
+      assert.match(String(proofError.message), /debug prompt projection must stay content-free/u, "mutation must fail the named assertion");
+      assert.equal(proofError.name, "AssertionError", "mutation must fail by assertion, not by startup or runtime error");
       assert.equal(sha256(readFileSync(join(scratch, "index.ts"), "utf8")), sha256(mutated), "mutated copy must stay mutated");
 
       // GREEN + restore: the committed source is untouched and still passes.
       assert.equal(sha256(readFileSync(sourcePath, "utf8")), PRODUCTION_INDEX_SHA256, "production source must be unchanged after the proof");
       await debugProjectionScenario(sourcePath);
     } finally {
-      rmSync(scratch, { recursive: true, force: true });
+      reclaimSourceCopy(scratch, released);
     }
   });
 
@@ -1012,6 +1073,8 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
     assert.notEqual(sha256(mutated), originalHash, "mutation must be a real source change");
 
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-trace-key-fault-"));
+    let released;
+    let proofError;
     try {
       for (const entry of readdirSync(ROOT)) {
         if (entry.endsWith(".ts") || ["schema.json", "package.json"].includes(entry)) {
@@ -1023,20 +1086,97 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
 
       // RED: the mutated private copy must fail the named per-backend assertion,
       // which runs before any canary or value check.
-      const redError = await assertPiNativeTraceScenario(join(scratch, "index.ts")).then(
-        () => undefined,
-        (error) => error,
-      );
-      assert.ok(redError, "an undeclared pi-native trace key must fail the backend allowlist assertion");
-      assert.match(String(redError.message), /pi-native trace key outside declared backend set/u, "mutation must fail the named trace-contract assertion");
-      assert.equal(redError.name, "AssertionError", "mutation must fail by assertion, not by startup or runtime error");
+      try {
+        ({ released } = await assertPiNativeTraceScenario(join(scratch, "index.ts")));
+      } catch (error) {
+        proofError = error;
+        released = error.released;
+      }
+      // Retain the private copy and surface the real cleanup error when the owned
+      // run's cleanup was not observed safe, instead of masking it with the
+      // expected assertion mismatch or deleting a source a live run may import.
+      if (!ownedCleanupObserved(released)) throw proofError ?? new Error("pi-native trace fault cleanup was not observed safe");
+      assert.ok(proofError, "an undeclared pi-native trace key must fail the backend allowlist assertion");
+      assert.match(String(proofError.message), /pi-native trace key outside declared backend set/u, "mutation must fail the named trace-contract assertion");
+      assert.equal(proofError.name, "AssertionError", "mutation must fail by assertion, not by startup or runtime error");
       assert.equal(sha256(readFileSync(join(scratch, "classifier-pi-native.ts"), "utf8")), sha256(mutated), "mutated copy must stay mutated");
 
       // GREEN + restore: production is untouched and still inside its declared set.
       assert.equal(sha256(readFileSync(sourcePath, "utf8")), originalHash, "production classifier source must be unchanged after the proof");
       await assertPiNativeTraceScenario(join(ROOT, "index.ts"));
     } finally {
-      rmSync(scratch, { recursive: true, force: true });
+      reclaimSourceCopy(scratch, released);
+    }
+  });
+
+  it("cleanup control: an uncertain reported receipt retains the private source copy and preserves the real cleanup error", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "bifrost-trace-cleanup-control-"));
+    let observedReceipt;
+    let released;
+    let cleanupError;
+    try {
+      try {
+        for (const entry of readdirSync(ROOT)) {
+          if (entry.endsWith(".ts") || ["schema.json", "package.json"].includes(entry)) {
+            copyFileSync(join(ROOT, entry), join(scratch, entry));
+          }
+        }
+        symlinkSync(join(ROOT, "node_modules"), join(scratch, "node_modules"));
+
+        const extension = join(scratch, "index.ts");
+        released = await scenario({
+          fixtureOptions: {
+            extension,
+            config: {
+              enabled: true, default: "general", strategy: "first",
+              classifier: { enabled: true, backend: "pi-native", piNative: { model: "fake/classifier" } },
+              models: { general: ["fake/chat"] }, debug: { enabled: true },
+            },
+          },
+          body: async ({ env, sessions }) => {
+            const rpc = startRpc({ home: env.home, work: env.work, extension });
+            // The real owned run closes and its group dies inside rpc.close();
+            // only the REPORTED receipt is made uncertain, and only afterwards.
+            sessions.push({
+              close: async (home) => {
+                const receipt = await rpc.close(home);
+                observedReceipt = receipt;
+                return { ...receipt, closed: false, groupGone: false };
+              },
+            });
+            await rpc.userTurn(CANARY_PROMPT);
+            await rpc.close(env.home);
+          },
+        });
+      } catch (error) {
+        cleanupError = error;
+        released = error.released;
+      }
+
+      // Actual safety was observed first; only the report was uncertain.
+      assert.ok(observedReceipt, "the real owned run must report its receipt");
+      assert.equal(observedReceipt.closed, true, "the real owned run must actually close");
+      assert.equal(observedReceipt.groupGone, true, "the real owned process group must actually be absent");
+      assert.equal(observedReceipt.violations, "", "the real owned run must report no network violations");
+      assert.equal(ownedCleanupObserved(released), false, "an uncertain reported receipt must not count as observed-safe cleanup");
+      assert.ok(cleanupError, "uncertain cleanup must surface its real error");
+      assert.match(String(cleanupError.message), /privacy scratch retained at/u, "the real cleanup error must be preserved, not an expected-assert mismatch");
+      assert.equal(cleanupError.released, released, "the cleanup error must carry the owned receipts");
+
+      // The source-copy owner retains its private copy while the report is uncertain.
+      assert.equal(reclaimSourceCopy(scratch, released), false, "an uncertain reported receipt must retain the private source copy");
+      assert.equal(existsSync(scratch), true, "the private source copy must survive an uncertain report");
+      assert.equal(existsSync(join(scratch, "classifier-pi-native.ts")), true, "the retained copy must keep its source evidence");
+
+      // The outer control reclaims with the actual creation receipts, now that
+      // the reported uncertainty is resolved by the observed close and group death.
+      const actual = { removed: true, failures: [], receipts: [observedReceipt], retained: [] };
+      assert.equal(ownedCleanupObserved(actual), true, "the actual receipts must prove every owned run closed with its group absent");
+      assert.equal(reclaimSourceCopy(scratch, actual), true, "the owner must reclaim once actual safety is observed");
+      assert.equal(existsSync(scratch), false, "the reclaimed private copy must be gone");
+    } finally {
+      for (const path of released?.retained ?? []) rmSync(path, { recursive: true, force: true });
+      reclaimSourceCopy(scratch, { removed: true, failures: [], receipts: [observedReceipt].filter(Boolean), retained: [] });
     }
   });
 });
