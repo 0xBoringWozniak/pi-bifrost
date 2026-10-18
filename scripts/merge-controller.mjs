@@ -8,15 +8,15 @@
 // policy; it is a local trust boundary. Every check fails closed.
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import {
   dependencyEvidence,
   evaluateEligibility,
   getReviewThreads,
   getReviews,
   parseDependencies,
-  runEvidence,
   workflowHashesMatch,
 } from "./merge-eligibility.mjs";
 
@@ -52,16 +52,16 @@ function fail(code, message) {
   throw new ControllerError(code, message);
 }
 
-function ghRaw(args) {
-  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+function ghRaw(args, cwd) {
+  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, cwd });
 }
 
-function gh(args) {
-  return ghRaw(args).trim();
+function gh(args, cwd) {
+  return ghRaw(args, cwd).trim();
 }
 
-function ghJson(args) {
-  return JSON.parse(gh(args));
+function ghJson(args, cwd) {
+  return JSON.parse(gh(args, cwd));
 }
 
 function sha256Text(text) {
@@ -103,12 +103,23 @@ export function parseArgs(argv) {
   return values;
 }
 
-export function candidateRoot(cwd = process.cwd()) {
+export function candidateRoot() {
+  const directory = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
   try {
-    return realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8", cwd }).trim());
-  } catch {
-    return realpathSync(cwd);
-  }
+    const root = realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8", cwd: directory, stdio: ["ignore", "pipe", "ignore"] }).trim());
+    if (root === directory) return root;
+  } catch { /* missing target context must fail closed */ }
+  fail("candidate-context", "controller candidate Git root unavailable or mismatched");
+}
+
+function readTrustedReceipt(path, root) {
+  const canonical = resolveTrustedReceiptPath(path, root);
+  let text, receipt;
+  try {
+    text = readFileSync(canonical, "utf8");
+    receipt = JSON.parse(text);
+  } catch { fail("receipt-malformed", "trusted review receipt is not valid JSON"); }
+  return { canonical, receipt, digest: sha256Text(text) };
 }
 
 export function resolveTrustedReceiptPath(receiptPath, root) {
@@ -176,14 +187,15 @@ function collectEvidence(repo, number) {
   const workflow = ghJson(["api", `repos/${repo}/actions/workflows/verification.yml`]);
   const baseWorkflow = ghJson(["api", `repos/${repo}/contents/${WORKFLOW_PATH}?ref=${pr.baseRefOid}`]);
   const headWorkflow = ghJson(["api", `repos/${repo}/contents/${WORKFLOW_PATH}?ref=${pr.headRefOid}`]);
-  const workflowRuns = runEvidence(repo, workflow.id, pr.headRefOid);
+  const currentRun = latestExactRun(repo, workflow.id, pr.headRefOid, "pull_request");
+  const workflowRuns = currentRun ? [{ ...currentRun, workflow_path: currentRun.path }] : [];
   const reviews = getReviews(repo, number);
   const reviewThreads = getReviewThreads(repo, number);
   const refs = parseDependencies(pr.body ?? "");
   const dependencies = refs.map((ref) => dependencyEvidence(repo, ref, pr.baseRefName, pr.baseRefOid));
   const workflowFileMatchesBase = workflowHashesMatch(baseWorkflow, headWorkflow);
   const eligibility = evaluateEligibility({ pr, workflowFileMatchesBase, workflowRuns, reviews, reviewThreads, dependencies });
-  return { pr, workflow, workflowRuns, reviews, reviewThreads, dependencies, workflowFileMatchesBase, eligibility };
+  return { pr, workflow, currentRun, workflowRuns, reviews, reviewThreads, dependencies, workflowFileMatchesBase, eligibility };
 }
 
 export function fetchHeadTree(repo, headSha) {
@@ -199,7 +211,9 @@ export function fetchPrDiffDigest(repo, number) {
 
 export function fetchChangedFiles(repo, number) {
   const pr = ghJson(["pr", "view", String(number), "--repo", repo, "--json", "files"]);
-  return Array.isArray(pr.files) ? pr.files.map((file) => file.path).filter((path) => typeof path === "string" && path) : null;
+  if (!Array.isArray(pr.files) || pr.files.some((file) => typeof file?.path !== "string" || !file.path || file.path.includes("\0"))
+    || new Set(pr.files.map((file) => file.path)).size !== pr.files.length) fail("evidence", "PR changed files unavailable or malformed");
+  return pr.files.map((file) => file.path);
 }
 
 export function fetchProposedMerge(repo, number) {
@@ -212,24 +226,112 @@ export function fetchProposedMerge(repo, number) {
   return { sha: pr.merge_commit_sha, parents, tree };
 }
 
+// Select before inspecting success. An older success can never mask a failed rerun.
+function latestExactRun(repo, workflowId, sha, event) {
+  const page = ghJson(["api", `repos/${repo}/actions/workflows/${workflowId}/runs?head_sha=${sha}&event=${event}&per_page=100`]);
+  const runs = page.workflow_runs;
+  if (!Array.isArray(runs) || runs.length === 0 || page.total_count !== runs.length) return null;
+  if (runs.some((run) => !Number.isSafeInteger(run?.id) || !Number.isSafeInteger(run.run_attempt)
+    || run.run_attempt < 1 || run.head_sha !== sha || run.event !== event || run.workflow_id !== workflowId
+    || run.path !== WORKFLOW_PATH || !Number.isFinite(Date.parse(run.created_at)))) return null;
+  const [latest] = [...runs].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id || b.run_attempt - a.run_attempt);
+  if (latest.status !== "completed" || latest.conclusion !== "success"
+    || runs.filter((run) => run.id === latest.id && run.run_attempt === latest.run_attempt).length !== 1) return null;
+  const run = ghJson(["api", `repos/${repo}/actions/runs/${latest.id}/attempts/${latest.run_attempt}`]);
+  if (run.id !== latest.id || run.run_attempt !== latest.run_attempt || run.head_sha !== sha || run.event !== event
+    || run.workflow_id !== workflowId || run.path !== WORKFLOW_PATH || run.repository?.full_name !== repo
+    || run.status !== "completed" || run.conclusion !== "success") return null;
+  const pageJobs = ghJson(["api", `repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`]);
+  const jobs = pageJobs.jobs;
+  if (!Array.isArray(jobs) || pageJobs.total_count !== jobs.length) return null;
+  const gates = jobs.filter((job) => job?.name === REQUIRED_JOB);
+  if (gates.length !== 1 || gates[0].conclusion !== "success") return null;
+  return { ...run, jobs };
+}
+
 export function pushGatePassed(repo, workflowId, sha) {
-  const runs = ghJson(["api", `repos/${repo}/actions/workflows/${workflowId}/runs?head_sha=${sha}&event=push&per_page=100`]).workflow_runs ?? [];
-  const successful = runs.filter((run) => run?.head_sha === sha && run.event === "push" && run.conclusion === "success");
-  if (!successful.length) return false;
-  const latest = successful.sort((a, b) => Number(b.id) - Number(a.id))[0];
-  const jobs = ghJson(["api", `repos/${repo}/actions/runs/${latest.id}/jobs?per_page=100`]).jobs ?? [];
-  return jobs.some((job) => job?.name === REQUIRED_JOB && job.conclusion === "success");
+  return latestExactRun(repo, workflowId, sha, "push") !== null;
+}
+
+// Read bounded JSON members without extracting or executing anything from the ZIP.
+const READ_EVIDENCE_ZIP = `import io,json,sys,zipfile
+z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()))
+items=[i for i in z.infolist() if i.filename == "evidence.json" or i.filename.endswith("/evidence.json")]
+assert 0 < len(items) <= 100
+assert all(i.file_size <= 2*1024*1024 for i in items)
+assert sum(i.file_size for i in items) <= 8*1024*1024
+print(json.dumps([json.loads(z.read(i)) for i in items]))`;
+
+function testedSource(repo, run, artifacts, name, revision, stepName) {
+  const matches = artifacts.filter((artifact) => artifact?.name === name);
+  const artifact = matches[0];
+  const started = Date.parse(run.run_started_at), ended = Date.parse(run.updated_at);
+  const created = Date.parse(artifact?.created_at);
+  const steps = run.jobs.find((job) => job.name === REQUIRED_JOB)?.steps;
+  const uploads = Array.isArray(steps) ? steps.filter((step) => step.name === stepName && step.conclusion === "success") : [];
+  const uploadStart = Date.parse(uploads[0]?.started_at), uploadEnd = Date.parse(uploads[0]?.completed_at);
+  if (matches.length !== 1 || !Number.isSafeInteger(artifact?.id) || artifact.expired !== false
+    || !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes <= 0 || artifact.size_in_bytes > 64*1024*1024
+    || artifact.workflow_run?.id !== run.id || artifact.workflow_run?.head_sha !== run.head_sha
+    || !Number.isFinite(started) || !Number.isFinite(ended) || !Number.isFinite(created) || created < started || created > ended
+    || uploads.length !== 1 || !Number.isFinite(uploadStart) || !Number.isFinite(uploadEnd) || created < uploadStart || created > uploadEnd
+    || !/^sha256:[0-9a-f]{64}$/.test(artifact.digest ?? "")) fail("tested-source", "current-attempt tested-source artifact missing or ambiguous");
+  const archive = execFileSync("gh", ["api", `repos/${repo}/actions/artifacts/${artifact.id}/zip`], { maxBuffer: 64*1024*1024 });
+  if (archive.length !== artifact.size_in_bytes || "sha256:" + createHash("sha256").update(archive).digest("hex") !== artifact.digest) fail("tested-source", "tested-source artifact digest mismatch");
+  const evidence = JSON.parse(execFileSync("python3", ["-c", READ_EVIDENCE_ZIP], { input: archive, encoding: "utf8", maxBuffer: 8*1024*1024 }));
+  const candidates = evidence.filter((item) => item?.source?.revisionAtStart === revision);
+  const item = candidates[0], source = item?.source;
+  if (candidates.length !== 1 || item.schemaVersion !== 1 || item.profile !== "deterministic" || item.exitCode !== 0
+    || source.revisionAtEnd !== revision || source.changedDuringRun !== false
+    || !SHA256_64.test(source.fingerprintAtStart ?? "") || source.fingerprintAtEnd !== source.fingerprintAtStart
+    || !Array.isArray(source.dirtyPathsAtStart) || source.dirtyPathsAtStart.length !== 0
+    || !Array.isArray(source.dirtyPathsAtEnd) || source.dirtyPathsAtEnd.length !== 0
+    || !Array.isArray(item.cases) || !item.cases.some((test) => test.id === "candidate-stable" && test.required === true && test.status === "passed")
+    || item.cases.some((test) => test.required === true && test.status !== "passed")) fail("tested-source", "tested-source acceptance evidence missing, failed, or stale");
+  return { id: artifact.id, digest: artifact.digest, revision, runId: run.id, attempt: run.run_attempt };
+}
+
+function testedSources(repo, run, headSha, proposed) {
+  if (!run) fail("tested-source", "successful current release-gates attempt unavailable");
+  const page = ghJson(["api", `repos/${repo}/actions/runs/${run.id}/artifacts?per_page=100`]);
+  if (!Array.isArray(page.artifacts) || page.total_count !== page.artifacts.length) fail("tested-source", "tested-source artifact inventory incomplete");
+  return [testedSource(repo, run, page.artifacts, `acceptance-evidence-${headSha}`, headSha, "Upload acceptance evidence"),
+    testedSource(repo, run, page.artifacts, `merge-result-evidence-${proposed.sha}`, proposed.sha, "Upload merge-result evidence")];
 }
 
 function writeOutcome(path, payload) {
   if (!path) return;
-  try { writeFileSync(resolve(path), JSON.stringify(payload, null, 2)); } catch { /* outcome preservation is best effort */ }
+  const target = resolve(path), temp = target + ".tmp-" + process.pid;
+  let fd;
+  try {
+    fd = openSync(temp, "wx", 0o600);
+    writeFileSync(fd, JSON.stringify(payload, null, 2) + "\n");
+    fsyncSync(fd); closeSync(fd); fd = undefined;
+    renameSync(temp, target);
+    fd = openSync(dirname(target), "r"); fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(temp, { force: true });
+  }
 }
 
 function emit(payload, outcomePath) {
-  writeOutcome(outcomePath, payload);
+  try { writeOutcome(outcomePath, payload); }
+  catch (error) {
+    console.log(JSON.stringify({ outcome: "outcome-persistence-failed", error: error.message, operation: payload }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
   console.log(JSON.stringify(payload, null, 2));
   process.exitCode = payload.outcome === "dry-run" || payload.outcome === "merged-and-verified" ? 0 : 1;
+}
+
+function outcomeDestination(path, root) {
+  if (!path) fail("outcome", "--outcome is required for apply and check");
+  const target = resolve(path);
+  const canonical = existsSync(target) ? realpathSync(target) : join(realpathSync(dirname(target)), basename(target));
+  if (canonical === root || canonical.startsWith(root + sep)) fail("outcome", "candidate-owned outcome rejected");
+  return canonical;
 }
 
 function mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree, workflowId }) {
@@ -277,7 +379,7 @@ function mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree
   return { outcome: "merged-and-verified", details: { mergeSha, parents, tree, refSha } };
 }
 
-function checkMerged({ args, repo, baseBranch, workflowId }) {
+function checkMerged({ args, repo, baseBranch, workflowId, headSha, baseSha, proposedTree }) {
   const after = ghJson(["pr", "view", String(args.pr), "--repo", repo, "--json", "state,mergeCommit,headRefOid,baseRefOid"]);
   if (after?.state !== "MERGED" || !SHA40.test(after?.mergeCommit?.oid ?? "")) {
     return { outcome: "not-merged", details: { state: after?.state } };
@@ -286,8 +388,11 @@ function checkMerged({ args, repo, baseBranch, workflowId }) {
   const commit = ghJson(["api", `repos/${repo}/commits/${mergeSha}`]);
   const parents = Array.isArray(commit.parents) ? commit.parents.map((parent) => parent.sha) : [];
   const tree = commit.commit?.tree?.sha ?? commit.tree?.sha;
-  if (parents.length !== 2 || parents[0] !== after.baseRefOid || parents[1] !== after.headRefOid) {
+  if (parents.length !== 2 || parents[0] !== baseSha || parents[1] !== headSha) {
     return { outcome: "postmerge-verification-failed", details: { reason: "merge parents mismatch", parents, mergeSha } };
+  }
+  if (!SHA40.test(tree ?? "") || tree !== proposedTree) {
+    return { outcome: "postmerge-verification-failed", details: { reason: "merge tree mismatch", tree, proposedTree, mergeSha } };
   }
   const ref = ghJson(["api", `repos/${repo}/git/ref/heads/${baseBranch}`]);
   const refSha = ref?.object?.sha ?? ref?.sha;
@@ -296,24 +401,44 @@ function checkMerged({ args, repo, baseBranch, workflowId }) {
   return { outcome: "merged-and-verified", details: { mergeSha, parents, tree } };
 }
 
+let outcomeContext;
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = candidateRoot();
-  const repo = args.repo ?? ghJson(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
+  const repo = args.repo ?? ghJson(["repo", "view", "--json", "nameWithOwner"], root).nameWithOwner;
 
-  if (args.check) {
-    const result = checkMerged({ args, repo, baseBranch: args.base, workflowId: ghJson(["api", `repos/${repo}/actions/workflows/verification.yml`]).id });
-    emit({ pr: args.pr, repo, mode: "check", ...result, limitations: LIMITATIONS }, args.outcome);
-    return;
-  }
-
+  if (args.apply && args.check) fail("cli", "--apply and --check are mutually exclusive");
   if (!args.receipt) fail("cli", "--receipt is required");
-  const receiptPath = resolveTrustedReceiptPath(args.receipt, root);
-  let receipt;
-  try {
-    receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
-  } catch {
-    fail("receipt-malformed", "trusted review receipt is not valid JSON");
+  if (args.apply || args.check) {
+    args.outcome = outcomeDestination(args.outcome, root);
+    if (args.outcome === resolve(args.receipt)) fail("outcome", "outcome must differ from review receipt");
+
+  }
+  if (args.apply) {
+    if (existsSync(args.outcome)) fail("outcome", "apply outcome already exists; use --check for continuation");
+    const payload = { outcome: "preflight", pr: args.pr, repo };
+    writeOutcome(args.outcome, payload);
+    outcomeContext = { path: args.outcome, payload };
+  }
+  const trusted = readTrustedReceipt(args.receipt, root);
+  const receipt = trusted.receipt;
+  if (args.outcome && resolve(args.outcome) === trusted.canonical) fail("outcome", "outcome must differ from review receipt");
+  if (args.check) {
+    const prior = JSON.parse(readFileSync(args.outcome, "utf8"));
+    const intent = prior.applyIntent;
+    if (!["apply", "check"].includes(prior.mode) || !intent || intent.version !== 1 || intent.repo !== repo || intent.pr !== args.pr
+      || intent.baseBranch !== args.base || !SHA40.test(intent.headSha ?? "") || !SHA40.test(intent.baseSha ?? "")
+      || !SHA40.test(intent.proposedTree ?? "") || !Number.isSafeInteger(intent.workflowId)
+      || intent.receiptPath !== trusted.canonical || intent.receiptDigest !== trusted.digest
+      || intent.headSha !== receipt.headSha || intent.baseSha !== receipt.baseSha
+      || validateReceiptShape(receipt).errors.length || bindReceiptToExpectedIdentities(receipt, args).length) fail("intent", "trusted frozen apply intent unavailable or mismatched");
+    outcomeContext = { path: args.outcome, payload: prior };
+    let result;
+    try { result = checkMerged({ args, ...intent }); }
+    catch (error) { result = { outcome: "waiting-for-push-verification", details: { reason: "post-merge evidence unavailable", error: error.message } }; }
+    emit({ pr: args.pr, repo, mode: "check", applyIntent: intent, ...result, limitations: LIMITATIONS }, args.outcome);
+    return;
   }
 
   const baseBranch = args.base;
@@ -337,6 +462,7 @@ function main() {
   const receiptErrors = [...shape.errors, ...identityErrors, ...evidenceErrors];
   const githubBlockers = (evidence.eligibility.blockers ?? []).filter((blocker) => blocker !== "no independent approval on current head");
   const blockers = [...githubBlockers, ...receiptErrors];
+  const tested = blockers.length ? null : testedSources(repo, evidence.currentRun, headSha, proposed);
 
   const summary = {
     pr: args.pr,
@@ -348,6 +474,7 @@ function main() {
     proposedMerge: { sha: proposed.sha, parents: proposed.parents, tree: proposed.tree },
     trustedReview: { reviewerAgent: receipt?.reviewerAgent, implementerAgent: receipt?.implementerAgent, valid: receiptErrors.length === 0 },
     blockers,
+    testedSources: tested,
     limitations: LIMITATIONS,
   };
 
@@ -369,21 +496,37 @@ function main() {
   const reDelta = fetchPrDiffDigest(repo, args.pr);
   const reFiles = fetchChangedFiles(repo, args.pr);
   const reProposed = fetchProposedMerge(repo, args.pr);
-  const reShape = validateReceiptShape(receipt);
-  const reEvidenceErrors = bindReceiptToEvidence(receipt, { headSha: reHead, baseSha: reBase, sourceTreeSha: reTree, deltaSha256: reDelta, changedFiles: reFiles ?? [] });
+  const reTrusted = readTrustedReceipt(args.receipt, root);
+  const reReceipt = reTrusted.receipt;
+  const reShape = validateReceiptShape(reReceipt);
+  const reEvidenceErrors = bindReceiptToEvidence(reReceipt, { headSha: reHead, baseSha: reBase, sourceTreeSha: reTree, deltaSha256: reDelta, changedFiles: reFiles ?? [] });
   const reGithubBlockers = (recheck.eligibility.blockers ?? []).filter((blocker) => blocker !== "no independent approval on current head");
   const toctouMismatch = reHead !== headSha || reBase !== baseSha || reTree !== sourceTreeSha || reDelta !== deltaSha256
     || JSON.stringify([...(reFiles ?? [])].sort()) !== JSON.stringify([...changedFiles].sort())
     || reProposed.sha !== proposed.sha || reProposed.tree !== proposed.tree
     || JSON.stringify(reProposed.parents) !== JSON.stringify(proposed.parents)
+    || reTrusted.canonical !== trusted.canonical || reTrusted.digest !== trusted.digest
+    || bindReceiptToExpectedIdentities(reReceipt, args).length !== 0
+    || recheck.pr.baseRefName !== baseBranch || reFiles === null
     || reShape.errors.length !== 0 || reEvidenceErrors.length !== 0 || reGithubBlockers.length !== 0;
   if (toctouMismatch) {
     emit({ ...summary, head: reHead, base: reBase, proposedMerge: { sha: reProposed.sha, parents: reProposed.parents, tree: reProposed.tree }, outcome: "rejected-toctou" }, args.outcome);
     return;
   }
 
+  const reTested = testedSources(repo, recheck.currentRun, reHead, reProposed);
+  if (JSON.stringify(reTested) !== JSON.stringify(tested)) fail("tested-source", "tested-source evidence changed at apply recheck");
+  const finalReceipt = readTrustedReceipt(args.receipt, root);
+  if (finalReceipt.canonical !== trusted.canonical || finalReceipt.digest !== trusted.digest) fail("receipt-changed", "trusted receipt changed before apply");
   const workflowId = evidence.workflow.id;
-  const result = mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree: proposed.tree, workflowId });
+  const applyIntent = { version: 1, repo, pr: args.pr, baseBranch, headSha, baseSha, proposedTree: proposed.tree, workflowId,
+    receiptPath: trusted.canonical, receiptDigest: trusted.digest, testedSources: tested };
+  summary.applyIntent = applyIntent;
+  writeOutcome(args.outcome, { ...summary, outcome: "apply-intent" });
+  outcomeContext = { path: args.outcome, payload: { ...summary, outcome: "apply-intent" } };
+  let result;
+  try { result = mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree: proposed.tree, workflowId }); }
+  catch (error) { result = { outcome: "waiting-for-push-verification", details: { reason: "post-merge evidence unavailable; do not repeat apply", error: error.message } }; }
   emit({ ...summary, outcome: result.outcome, postMerge: result.details }, args.outcome);
 }
 
@@ -392,10 +535,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.
     main();
   } catch (error) {
     const payload = { outcome: error.code === "cli" ? "usage-error" : "rejected", error: error.message, code: error.code ?? "unknown", limitations: LIMITATIONS };
-    const outcomeIndex = process.argv.indexOf("--outcome");
-    const outcomePath = outcomeIndex >= 0 ? process.argv[outcomeIndex + 1] : process.argv.find((arg) => arg.startsWith("--outcome="))?.slice("--outcome=".length);
-    writeOutcome(outcomePath, payload);
-    console.log(JSON.stringify(payload, null, 2));
+    emit({ ...outcomeContext?.payload, ...payload }, outcomeContext?.path);
     process.exitCode = 1;
   }
 }

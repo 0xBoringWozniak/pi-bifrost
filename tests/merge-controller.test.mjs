@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +24,15 @@ if (process.env.FAKE_GH_LOG) fs.appendFileSync(process.env.FAKE_GH_LOG, JSON.str
 function out(v) { process.stdout.write(typeof v === "string" ? v : JSON.stringify(v)); process.exit(0); }
 function die(code) { process.stderr.write(code + "\\n"); process.exit(1); }
 const joined = args.join(" ");
+if (world.revokeReceipt && joined.includes("headRefOid,baseRefName")) {
+  world.reads = (world.reads ?? 0) + 1;
+  if (world.reads === 2) fs.writeFileSync(world.receiptPath, JSON.stringify(world.revokedReceipt));
+  fs.writeFileSync(process.env.FAKE_GH_WORLD, JSON.stringify(world));
+}
+if (world.loseOutcome && joined.includes("--json state,mergeCommit")) {
+  fs.rmSync(world.outcomePath, { force: true });
+  fs.rmdirSync(require("node:path").dirname(world.outcomePath));
+}
 if (args[0] === "repo" && args[1] === "view") out({ nameWithOwner: world.repo });
 if (args[0] === "pr" && args[1] === "diff") out(world.diff ?? "");
 if (args[0] === "pr" && args[1] === "merge") {
@@ -44,10 +53,19 @@ if (args[0] === "pr" && args[1] === "view") {
 if (args[0] === "api") {
   if (joined.includes("actions/workflows/verification.yml")) out({ id: world.workflowId ?? 123 });
   if (joined.includes("contents/")) out({ sha: joined.includes(world.pr.baseRefOid) ? (world.baseWorkflowSha ?? "1".repeat(40)) : (world.headWorkflowSha ?? "1".repeat(40)) });
-  if (joined.includes("/runs?head_sha=")) out({ workflow_runs: joined.includes("event=push") ? (world.pushRuns ?? []) : (world.ciRuns ?? []) });
-  if (joined.match(/actions\\/runs\\/\\d+\\/jobs/)) {
-    const id = Number(joined.match(/actions\\/runs\\/(\\d+)\\/jobs/)[1]);
-    out({ jobs: (world.jobs ?? {})[id] ?? [] });
+  if (joined.includes("/runs?head_sha=")) { const runs = joined.includes("event=push") ? (world.pushRuns ?? []) : (world.ciRuns ?? []); out({ total_count: runs.length, workflow_runs: runs }); }
+  if (joined.includes("/artifacts?")) out({ total_count: world.artifacts.length, artifacts: world.artifacts });
+  if (joined.includes("/artifacts/") && joined.endsWith("/zip")) {
+    const id = Number(joined.match(/artifacts\\/(\\d+)/)[1]);
+    process.stdout.write(Buffer.from(world.archives[id], "base64")); process.exit(0);
+  }
+  if (joined.match(/actions\\/runs\\/\\d+\\/attempts\\/\\d+$/)) {
+    const id = Number(joined.match(/runs\\/(\\d+)/)[1]);
+    out(world.runDetails?.[id] ?? [...world.ciRuns, ...world.pushRuns].find(r => r.id === id && r.run_attempt === Number(joined.match(/attempts\\/(\\d+)/)[1])));
+  }
+  if (joined.match(/actions\\/runs\\/\\d+\\/(?:attempts\\/\\d+\\/)?jobs/)) {
+    const id = Number(joined.match(/actions\\/runs\\/(\\d+)/)[1]);
+    { const jobs = (world.jobs ?? {})[id] ?? []; out({ total_count: jobs.length, jobs }); }
   }
   if (joined.includes("/reviews")) out((world.reviews ?? []).map((r) => JSON.stringify({ state: r.state, user: { login: r.author }, commit_id: r.commit_id, submitted_at: r.submitted_at })).join("\\n"));
   if (args.includes("graphql")) out({ data: { repository: { pullRequest: { reviewThreads: { nodes: world.threads ?? [], pageInfo: { hasNextPage: false, endCursor: null } } } } } });
@@ -67,7 +85,28 @@ if (args[0] === "api") {
 die("unhandled: " + joined);
 `;
 
+function makeRun(id, head, event, extra = {}) {
+  return { id, run_attempt: 1, head_sha: head, event, workflow_id: 123,
+    path: ".github/workflows/verification.yml", status: "completed", conclusion: "success",
+    repository: { full_name: "org/repo" }, created_at: "2026-01-01T00:00:00Z",
+    run_started_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:30:00Z", ...extra };
+}
+
+function artifact(id, prefix, revision) {
+  const evidence = { schemaVersion: 1, profile: "deterministic", exitCode: 0,
+    source: { revisionAtStart: revision, revisionAtEnd: revision,
+      fingerprintAtStart: "1".repeat(64), fingerprintAtEnd: "1".repeat(64),
+      dirtyPathsAtStart: [], dirtyPathsAtEnd: [], changedDuringRun: false },
+    cases: [{ id: "candidate-stable", required: true, status: "passed" }] };
+  const archive = execFileSync("python3", ["-c", 'import io,sys,json,zipfile; b=io.BytesIO(); z=zipfile.ZipFile(b,"w"); z.writestr("run/evidence.json",sys.stdin.read()); z.close(); sys.stdout.buffer.write(b.getvalue())'], { input: JSON.stringify(evidence) });
+  return { metadata: { id, name: prefix + revision, expired: false, size_in_bytes: archive.length,
+    digest: "sha256:" + createHash("sha256").update(archive).digest("hex"),
+    workflow_run: { id: 10, head_sha: HEAD }, created_at: "2026-01-01T00:10:00Z" }, archive: archive.toString("base64") };
+}
+
 function makeWorld(overrides = {}) {
+  const candidate = artifact(101, "acceptance-evidence-", HEAD);
+  const proposed = artifact(102, "merge-result-evidence-", PROPOSED_SHA);
   return {
     repo: "org/repo",
     pr: { headRefOid: HEAD, baseRefName: "v2", baseRefOid: BASE, isDraft: false, body: "Refs #1", author: { login: "author-bot" }, files: ["x"] },
@@ -78,9 +117,14 @@ function makeWorld(overrides = {}) {
       [PROPOSED_SHA]: { parents: [{ sha: BASE }, { sha: HEAD }], commit: { tree: { sha: PROPOSED_TREE } } },
       [MERGE_SHA]: { parents: [{ sha: BASE }, { sha: HEAD }], commit: { tree: { sha: PROPOSED_TREE } } },
     },
-    ciRuns: [{ id: 10, run_attempt: 1, head_sha: HEAD, event: "pull_request", workflow_id: 123, path: ".github/workflows/verification.yml", conclusion: "success", created_at: "2026-01-01T00:00:00Z" }],
-    pushRuns: [{ id: 20, head_sha: MERGE_SHA, event: "push", workflow_id: 123, path: ".github/workflows/verification.yml", conclusion: "success" }],
-    jobs: { 10: [{ name: "release-gates", conclusion: "success" }], 20: [{ name: "release-gates", conclusion: "success" }] },
+    ciRuns: [makeRun(10, HEAD, "pull_request")],
+    pushRuns: [makeRun(20, MERGE_SHA, "push")],
+    artifacts: [candidate.metadata, proposed.metadata],
+    archives: { 101: candidate.archive, 102: proposed.archive },
+    jobs: { 10: [{ name: "release-gates", conclusion: "success", steps: [
+      { name: "Upload acceptance evidence", conclusion: "success", started_at: "2026-01-01T00:09:00Z", completed_at: "2026-01-01T00:11:00Z" },
+      { name: "Upload merge-result evidence", conclusion: "success", started_at: "2026-01-01T00:09:00Z", completed_at: "2026-01-01T00:11:00Z" },
+    ] }], 20: [{ name: "release-gates", conclusion: "success" }] },
     reviews: [],
     threads: [],
     ref: { object: { sha: MERGE_SHA } },
@@ -120,17 +164,27 @@ function scaffold({ world = makeWorld(), receipt = defaultReceipt(), receiptText
   writeFileSync(worldPath, JSON.stringify(world));
   const receiptPath = join(dir, "receipt.json");
   writeFileSync(receiptPath, receiptText ?? JSON.stringify(receipt));
-  return { dir, bin, worldPath, logPath, receiptPath, world };
+  const outcomePath = join(dir, "outcome.json");
+  return { dir, bin, worldPath, logPath, receiptPath, outcomePath, world };
 }
 
-function runController(fixture, extraArgs = [], cwd = REPO_ROOT) {
+let receiptNumber = 0;
+
+function runController(fixture, extraArgs = [], cwd = REPO_ROOT, script = SCRIPT) {
   const env = { ...process.env, PATH: fixture.bin + ":" + process.env.PATH, FAKE_GH_WORLD: fixture.worldPath, FAKE_GH_LOG: fixture.logPath };
-  const args = [SCRIPT, "1", "--receipt", fixture.receiptPath, "--expected-reviewer", "reviewer-agent", "--expected-implementer", "implementer-agent", ...extraArgs];
+  const args = [script, "1", "--outcome", fixture.outcomePath, "--receipt", fixture.receiptPath, "--expected-reviewer", "reviewer-agent", "--expected-implementer", "implementer-agent", ...extraArgs];
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env, cwd });
   const calls = existsSync(fixture.logPath) ? readFileSync(fixture.logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
   const mergeCalls = calls.filter((call) => call[0] === "pr" && call[1] === "merge");
   let json = null;
   try { json = JSON.parse(result.stdout); } catch { /* non-JSON */ }
+  if (process.env.CONTROLLER_CORRECTION_EVIDENCE) {
+    const output = process.env.CONTROLLER_CORRECTION_EVIDENCE;
+    mkdirSync(output, { recursive: true });
+    writeFileSync(join(output, `${++receiptNumber}.json`), JSON.stringify({ script, sourceSha256: createHash("sha256").update(readFileSync(script)).digest("hex"), args, cwd,
+      receipt: existsSync(fixture.receiptPath) ? readFileSync(fixture.receiptPath, "utf8") : null,
+      world: JSON.parse(readFileSync(fixture.worldPath, "utf8")), status: result.status, stdout: result.stdout, stderr: result.stderr, calls, mergeCalls, json }, null, 2));
+  }
   return { ...result, calls, mergeCalls, json };
 }
 
@@ -177,6 +231,7 @@ for (const [name, mutate, pattern] of rejectionCases) {
     mutate(fixture);
     fixture.world = JSON.parse(readFileSync(fixture.worldPath, "utf8"));
     const result = runController(fixture, ["--apply"]);
+    assert.equal(result.mergeCalls.length, 0, name === "non-zero blocking findings" ? "blocking findings must reject through the actual CLI validator" : `${name} must not invoke merge`);
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stdout, pattern);
     assert.equal(result.mergeCalls.length, 0);
@@ -265,6 +320,11 @@ test("merge command failure preserves outcome", () => {
 
 test("check mode verifies an already merged PR without merging", () => {
   const fixture = scaffold();
+  const applied = runController(fixture, ["--apply"]);
+  assert.equal(applied.json.outcome, "merged-and-verified");
+  rmSync(fixture.logPath);
+  fixture.world.afterMerge.baseRefOid = MERGE_SHA;
+  writeFileSync(fixture.worldPath, JSON.stringify(fixture.world));
   const result = runController(fixture, ["--check"]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.json.outcome, "merged-and-verified");
@@ -274,30 +334,172 @@ test("check mode verifies an already merged PR without merging", () => {
 test("guard removal control: bypassing receipt validation reddens the named assertion, restore is green", () => {
   const source = readFileSync(SCRIPT, "utf8");
   const sourceHash = createHash("sha256").update(source).digest("hex");
+  const guard = 'if (typeof receipt.unresolvedBlockingFindings !== "number" || !Number.isInteger(receipt.unresolvedBlockingFindings) || receipt.unresolvedBlockingFindings !== 0) {';
   const fixture = scaffold({ receipt: defaultReceipt({ unresolvedBlockingFindings: 1 }) });
-  const red = runController(fixture, ["--apply"]);
-  assert.equal(red.status, 1);
-  assert.match(red.stdout, /zero unresolved blocking findings/);
+  const rejected = runController(fixture, ["--apply"]);
+  assert.match(rejected.stdout, /zero unresolved blocking findings/);
+  assert.equal(rejected.mergeCalls.length, 0, "blocking findings must reject through the actual CLI validator");
+  const root = join(fixture.dir, "source");
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: root }).status, 0);
+  const copy = join(realpathSync(root), "scripts", "merge-controller.mjs");
+  writeFileSync(join(root, "scripts", "merge-eligibility.mjs"), readFileSync(new URL("../scripts/merge-eligibility.mjs", import.meta.url)));
+  const mutant = source.replace(guard, 'if (false) {');
+  assert.notEqual(mutant, source);
+  writeFileSync(copy, mutant);
+  const bypassFixture = scaffold({ receipt: defaultReceipt({ unresolvedBlockingFindings: 1 }) });
+  const bypass = runController(bypassFixture, ["--apply"], REPO_ROOT, copy);
+  assert.equal(bypass.stderr, "", "disabled guard must reach the CLI acceptance boundary rather than import failure");
+  assert.equal(bypass.status, 0, bypass.stdout);
+  assert.equal(bypass.json.outcome, "merged-and-verified");
+  assert.equal(bypass.mergeCalls.length, 1, "disabled guard must invoke the fake merge exactly once");
+  assert.throws(() => assert.equal(bypass.mergeCalls.length, 0, "blocking findings must reject through the actual CLI validator"), /blocking findings must reject/);
+  writeFileSync(copy, source);
+  assert.equal(createHash("sha256").update(readFileSync(copy)).digest("hex"), sourceHash);
+  const restored = runController(scaffold({ receipt: defaultReceipt({ unresolvedBlockingFindings: 1 }) }), ["--apply"], REPO_ROOT, copy);
+  assert.match(restored.stdout, /zero unresolved blocking findings/);
+  assert.equal(restored.mergeCalls.length, 0, "blocking findings must reject through the actual CLI validator");
+  assert.equal(createHash("sha256").update(readFileSync(SCRIPT)).digest("hex"), sourceHash);
+});
 
-  // Load-bearing control: a copy that silently clears the validator must NOT reject.
-  const bypass = source.replace(
-    'if (typeof receipt.unresolvedBlockingFindings !== "number" || !Number.isInteger(receipt.unresolvedBlockingFindings) || receipt.unresolvedBlockingFindings !== 0) {',
-    'if (false) {',
-  );
-  assert.notEqual(bypass, source, "control must change the guard source");
-  const bypassPath = join(fixture.dir, "merge-controller-bypass.mjs");
-  writeFileSync(bypassPath, bypass);
-  const bypassRun = spawnSync(process.execPath, [bypassPath, "1", "--receipt", fixture.receiptPath, "--expected-reviewer", "reviewer-agent", "--expected-implementer", "implementer-agent", "--apply"], {
-    encoding: "utf8",
-    cwd: REPO_ROOT,
-    env: { ...process.env, PATH: fixture.bin + ":" + process.env.PATH, FAKE_GH_WORLD: fixture.worldPath, FAKE_GH_LOG: fixture.logPath },
+function saveWorld(fixture) { writeFileSync(fixture.worldPath, JSON.stringify(fixture.world)); }
+
+for (const conclusion of ["failure", "skipped", null]) {
+  test(`latest ${conclusion ?? "pending"} exact push must stop continuation`, () => {
+    const world = makeWorld();
+    world.pushRuns.push(makeRun(21, MERGE_SHA, "push", { conclusion, status: conclusion ? "completed" : "in_progress" }));
+    world.jobs[21] = [{ name: "release-gates", conclusion }];
+    const result = runController(scaffold({ world }), ["--apply"]);
+    assert.equal(result.json.outcome, "waiting-for-push-verification", "latest failed or skipped exact push must stop dependent continuation");
+    assert.equal(result.mergeCalls.length, 1);
   });
-  assert.doesNotMatch(bypassRun.stdout, /zero unresolved blocking findings/);
+}
 
-  // Restore: source is byte-identical and the real guard is green on a valid receipt.
-  assert.equal(createHash("sha256").update(readFileSync(SCRIPT, "utf8")).digest("hex"), sourceHash);
-  const greenFixture = scaffold();
-  const green = runController(greenFixture, ["--apply"]);
-  assert.equal(green.status, 0, green.stderr);
-  assert.equal(green.json.outcome, "merged-and-verified");
+test("latest rerun attempt must not reuse earlier successful jobs", () => {
+  const world = makeWorld();
+  world.pushRuns.push(makeRun(20, MERGE_SHA, "push", { run_attempt: 2, conclusion: "failure" }));
+  const result = runController(scaffold({ world }), ["--apply"]);
+  assert.equal(result.json.outcome, "waiting-for-push-verification");
+});
+
+test("CI for an old base without current proposed-tree evidence must not invoke merge", () => {
+  const fixture = scaffold();
+  fixture.world.ciRuns[0].pull_requests = [{ number: 1, head: { sha: HEAD }, base: { sha: "0".repeat(40) } }];
+  fixture.world.artifacts = [];
+  saveWorld(fixture);
+  const result = runController(fixture, ["--apply"]);
+  assert.equal(result.mergeCalls.length, 0, "CI for an old base without current proposed-tree evidence must not invoke merge");
+});
+
+for (const fault of ["wrong tested revision", "wrong tested parents", "expired artifact", "old attempt artifact", "digest mismatch", "missing candidate artifact", "failed source evidence"]) {
+  test(`rejects ${fault} before merge`, () => {
+    const fixture = scaffold();
+    if (fault === "wrong tested revision") fixture.world.artifacts[1].name = "merge-result-evidence-" + "0".repeat(40);
+    if (fault === "wrong tested parents") fixture.world.commits[PROPOSED_SHA].parents[0].sha = "0".repeat(40);
+    if (fault === "expired artifact") fixture.world.artifacts[1].expired = true;
+    if (fault === "old attempt artifact") fixture.world.ciRuns[0].run_started_at = "2026-01-01T00:20:00Z";
+    if (fault === "digest mismatch") fixture.world.artifacts[1].digest = "sha256:" + "0".repeat(64);
+    if (fault === "missing candidate artifact") fixture.world.artifacts.shift();
+    if (fault === "failed source evidence") {
+      const bad = artifact(102, "merge-result-evidence-", "0".repeat(40));
+      fixture.world.archives[102] = bad.archive;
+      fixture.world.artifacts[1].digest = bad.metadata.digest;
+      fixture.world.artifacts[1].size_in_bytes = bad.metadata.size_in_bytes;
+    }
+    saveWorld(fixture);
+    const result = runController(fixture, ["--apply"]);
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(result.json.code, fault === "wrong tested parents" ? "proposed-merge-mismatch" : "tested-source");
+    assert.equal(result.mergeCalls.length, 0, "missing or unbound tested source must reject before merge");
+  });
+}
+
+test("check must not verify an unbound tree without its trusted apply evidence", () => {
+  const fixture = scaffold(); rmSync(fixture.receiptPath);
+  const result = runController(fixture, ["--check"]);
+  assert.notEqual(result.json.outcome, "merged-and-verified", "check must not verify an unbound tree without its trusted apply evidence");
+});
+
+for (const tree of [undefined, "0".repeat(40)]) {
+  test(`check rejects ${tree ? "different" : "missing"} merge tree against frozen intent`, () => {
+    const fixture = scaffold();
+    assert.equal(runController(fixture, ["--apply"]).status, 0);
+    fixture.world.commits[MERGE_SHA].commit.tree = tree ? { sha: tree } : undefined;
+    fixture.world.afterMerge.baseRefOid = MERGE_SHA;
+    saveWorld(fixture);
+    const result = runController(fixture, ["--check"]);
+    assert.equal(result.json.outcome, "postmerge-verification-failed", "missing or unbound merge-tree evidence must never count as verified");
+  });
+}
+
+test("candidate-owned receipt remains rejected independently of launch cwd", () => {
+  const fixture = scaffold();
+  const inside = join(REPO_ROOT, "candidate-receipt-other-cwd.json");
+  writeFileSync(inside, JSON.stringify(defaultReceipt())); cleanups.push(inside);
+  const other = join(fixture.dir, "other"); mkdirSync(other);
+  assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: other }).status, 0);
+  const result = runController({ ...fixture, receiptPath: inside }, ["--apply"], other);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /candidate-owned review receipt rejected/);
+  assert.equal(result.mergeCalls.length, 0, "candidate-owned review receipt must remain rejected independently of launch cwd");
+});
+
+test("revoked trusted receipt at recheck must prevent merge", () => {
+  const fixture = scaffold();
+  fixture.world.revokeReceipt = true; fixture.world.receiptPath = fixture.receiptPath;
+  fixture.world.revokedReceipt = defaultReceipt({ unresolvedBlockingFindings: 1 }); saveWorld(fixture);
+  const result = runController(fixture, ["--apply"]);
+  assert.equal(JSON.parse(readFileSync(fixture.receiptPath)).unresolvedBlockingFindings, 1);
+  assert.equal(result.mergeCalls.length, 0, "revoked trusted receipt at recheck must prevent merge");
+});
+
+test("partly unavailable changed-file inventory must not authorize merge", () => {
+  const world = makeWorld(); world.pr.files = ["x", null];
+  const result = runController(scaffold({ world }), ["--apply"]);
+  assert.match(result.stdout, /changed files unavailable or malformed/);
+  assert.equal(result.mergeCalls.length, 0, "partly unavailable changed-file inventory must not authorize merge");
+});
+
+test("requested durable outcome failure must not be silently successful", () => {
+  const fixture = scaffold();
+  fixture.outcomePath = join(fixture.dir, "absent", "outcome.json");
+  const result = runController(fixture, ["--apply"]);
+  assert.notEqual(result.status, 0, "requested durable outcome failure must not be silently successful");
+  assert.equal(result.mergeCalls.length, 0, "outcome preflight must reject before merge");
+});
+
+test("postmerge persistence failure preserves truthful merge state and stops continuation", () => {
+  const fixture = scaffold();
+  const output = join(fixture.dir, "output"); mkdirSync(output);
+  fixture.outcomePath = join(output, "outcome.json");
+  fixture.world.loseOutcome = true; fixture.world.outcomePath = fixture.outcomePath; saveWorld(fixture);
+  const result = runController(fixture, ["--apply"]);
+  assert.equal(result.status, 1);
+  assert.equal(result.json.outcome, "outcome-persistence-failed");
+  assert.equal(result.json.operation.outcome, "merged-and-verified");
+  assert.equal(result.mergeCalls.length, 1);
+});
+
+test("latest successful push rerun selects its own attempt jobs", () => {
+  const world = makeWorld();
+  world.pushRuns.push(makeRun(20, MERGE_SHA, "push", { run_attempt: 2 }));
+  const result = runController(scaffold({ world }), ["--apply"]);
+  assert.equal(result.json.outcome, "merged-and-verified");
+  assert.ok(result.calls.some((call) => call.includes("repos/org/repo/actions/runs/20/attempts/2/jobs?per_page=100")));
+});
+
+test("repeated apply preserves the frozen intent and never merges twice", () => {
+  const fixture = scaffold();
+  assert.equal(runController(fixture, ["--apply"]).status, 0);
+  const saved = readFileSync(fixture.outcomePath, "utf8"); rmSync(fixture.logPath);
+  const repeated = runController(fixture, ["--apply"]);
+  assert.equal(repeated.status, 1); assert.equal(repeated.mergeCalls.length, 0);
+  assert.equal(readFileSync(fixture.outcomePath, "utf8"), saved);
+});
+
+test("artifact from an earlier upload step cannot authorize a successful rerun", () => {
+  const world = makeWorld();
+  for (const step of world.jobs[10][0].steps) { step.started_at = "2026-01-01T00:20:00Z"; step.completed_at = "2026-01-01T00:21:00Z"; }
+  const result = runController(scaffold({ world }), ["--apply"]);
+  assert.equal(result.json.code, "tested-source"); assert.equal(result.mergeCalls.length, 0);
 });
