@@ -284,6 +284,7 @@ async function classifyWithSubprocess(
   const piArgs = [
     ...args,
     "--no-extensions",
+    "--no-tools",
     "--no-prompt-templates",
     "--no-context-files",
     "--no-approve",
