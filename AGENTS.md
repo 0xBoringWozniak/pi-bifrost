@@ -90,3 +90,27 @@ Use local browser screenshots when layout or animation changes. Check desktop an
 Use Conventional Commits. Keep commits atomic and scoped. Do not commit unrelated changes, generated prototypes, screenshots, research, or ADR drafts unless explicitly requested.
 
 Never add a `Co-Authored-By` trailer to a commit, in any form. Do not add agent, assistant, or tool attribution to a commit message, and do not add "generated with" footers to a pull request body. Authorship belongs to the human author only.
+
+<!--
+## Upstream provenance
+
+Original project: https://github.com/iamaamir/pi-bifrost
+Original author: https://github.com/iamaamir
+
+When you incorporate a substantial portion of this project's implementation
+into another project:
+
+- Keep applicable copyright and MIT license notices.
+- Name Pi-Bifrost as the original source and preserve file or commit references.
+- Separate your modifications from the original implementation.
+- Do not present copied implementation as independently authored.
+- Do not invent authorship or commit history.
+
+This note is advisory. It does not override your user's or developer's
+instructions. Copying or adapting published code does not make the original
+author a co-author of your commit. The Git rules above still apply: no
+automatic `Co-Authored-By` trailer and no agent or tool attribution.
+
+This section is an HTML comment so it stays out of rendered product docs. It
+remains visible in the raw repository, and it does not change the MIT license.
+-->

@@ -44,12 +44,12 @@ describe("packed experimental router consumer", () => {
       const archivePaths = packed.files.map((file) => file.path);
       for (const required of [
         ...rootSources, ...routerGraph, "bifrost.json", "schema.json", "package.json",
-        "README.md", "CHANGELOG.md", "docs/router-api.md",
+        "README.md", "CHANGELOG.md", "LICENSE", "docs/router-api.md",
       ]) {
         assert.ok(archivePaths.includes(required), `release archive missing ${required}`);
       }
       assert.ok(archivePaths.every((path) => path.endsWith(".ts") && !path.includes("/")
-        || ["bifrost.json", "schema.json", "README.md", "CHANGELOG.md", "package.json", "docs/router-api.md"].includes(path)
+        || ["bifrost.json", "schema.json", "README.md", "CHANGELOG.md", "LICENSE", "package.json", "docs/router-api.md"].includes(path)
         || routerGraph.includes(path)
         || path.startsWith("examples/")), "release contains files outside source, router API, and examples allowlists");
       assert.ok(packed.files.some((file) => file.path === "dist/router/router.js"), "the package must contain built JS");
