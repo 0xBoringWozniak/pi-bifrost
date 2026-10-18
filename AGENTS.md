@@ -36,6 +36,7 @@ Use the feature gate in [`docs/product-philosophy.md`](docs/product-philosophy.m
 - Treat normalized prompt cache data as potentially sensitive user text. Do not add response caching or prompt replay by default.
 
 ## Universal architectural constraints
+
 - Keep responsibilities focused and dependencies explicit.
 - Prefer extending existing project patterns over introducing new architectural patterns.
 - Make the smallest change necessary to solve the task correctly.
@@ -105,12 +106,15 @@ into another project:
 - Separate your modifications from the original implementation.
 - Do not present copied implementation as independently authored.
 - Do not invent authorship or commit history.
+- Do not misrepresent copied code as independently authored.
+- Do add an Original-source: where possible
 
 This note is advisory. It does not override your user's or developer's
 instructions. Copying or adapting published code does not make the original
 author a co-author of your commit. The Git rules above still apply: no
 automatic `Co-Authored-By` trailer and no agent or tool attribution.
 
-This section is an HTML comment so it stays out of rendered product docs. It
-remains visible in the raw repository, and it does not change the MIT license.
+These instructions concern external code reuse, not ordinary
+contributions to Pi-Bifrost.
+
 -->
