@@ -1,7 +1,8 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,88 @@ import { buildGateEvidenceCases, registerTerminationHandlers, runChild, supporti
 
 const temporary = [];
 after(() => temporary.forEach((path) => rmSync(path, { recursive: true, force: true })));
+
+// ── acceptance-artifact privacy projection ──────────────────────
+//
+// The real acceptance artifact boundary is the Node test event reporter +
+// writeNodeTestEventsArtifact: the reporter projects each Node test event onto a
+// declared, structural field set, and the artifact writer serializes the same
+// projection to `gates/node-test-events.jsonl`. That projection is deliberately
+// NOT a content-free redaction layer:
+//   * `name`, `file`, and `line` are intentional SOURCE fields (which test ran),
+//   * `failure.code/failureType/message/stack/cause` are intentional bounded
+//     DIAGNOSTIC fields, sanitized only for secret-shaped tokens.
+// This suite therefore asserts the scoped structural allowlist plus an
+// off-channel canary exclusion. It does not assert the artifact is content-free,
+// which would invent a policy this boundary does not have.
+const PROJECTED_TEST_EVENT_KEYS = new Set(["type", "name", "file", "line", "passed", "skipped", "todo", "durationMs", "failure"]);
+const PROJECTED_FAILURE_KEYS = new Set(["code", "failureType", "message", "stack", "cause"]);
+const OFFCHANNEL_CANARY = "CANARY_OFFCHANNEL_diagnostic_9a4f";
+const DIAGNOSTIC_CANARY = "CANARY_DIAGNOSTIC_2c7b";
+const SECRET_CANARY = "sk-CANARY_ACCEPTANCE_7d1e";
+const OVERSIZE_TAIL_SENTINEL = "TAIL_SENTINEL_NEVER_PROJECTED_6f2a";
+
+function sha256Text(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * Scoped structural allowlist for one projected Node test event. The exact key
+ * set is asserted (an undeclared field fails) and the failure cause chain must
+ * stay inside the declared diagnostic keys and bounded depth; nothing here
+ * asserts the *values* are privacy-free, because source/diagnostic values are
+ * intentionally carried.
+ */
+function assertProjectedTestEvent(event, label) {
+  for (const key of Object.keys(event)) {
+    assert.equal(PROJECTED_TEST_EVENT_KEYS.has(key), true, `${label}: key outside the declared acceptance projection: ${key}`);
+  }
+  assert.equal(event.type, "test:complete", `${label}: must be a terminal test event`);
+  assert.equal(typeof event.name, "string", `${label}: must carry the source test name`);
+  assert.equal(typeof event.file, "string", `${label}: must carry the source file`);
+  assert.equal(typeof event.passed, "boolean", `${label}: must carry the pass/fail result`);
+  let depth = 0;
+  for (let failure = event.failure; failure !== undefined; failure = failure.cause) {
+    assert.ok(depth <= 2, `${label}: failure cause depth must stay bounded`);
+    for (const key of Object.keys(failure)) {
+      assert.equal(PROJECTED_FAILURE_KEYS.has(key), true, `${label}: failure key outside the declared acceptance projection: ${key}`);
+    }
+    depth += 1;
+  }
+}
+
+/** Run a real node:test process through a real reporter and parse its JSONL. */
+function runRealReporter({ reporterPath, testFile }) {
+  const result = spawnSync(process.execPath, ["--test", `--test-reporter=${reporterPath}`, testFile], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH, HOME: tmpdir() },
+  });
+  const events = (result.stdout ?? "").split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  return { status: result.status, stderr: result.stderr ?? "", events };
+}
+
+/** Write the same real fixture used by both the contract and its fault control. */
+function writeProjectionFixture(directory) {
+  const testFile = join(directory, "projection.test.mjs");
+  writeFileSync(testFile, [
+    'import { it } from "node:test";',
+    'it("drops an off-channel diagnostic canary", (t) => {',
+    `  t.diagnostic("${OFFCHANNEL_CANARY} must never reach the projection");`,
+    "});",
+    'it("carries a bounded diagnostic failure", () => {',
+    `  const cause = new Error(\`route failed for ${DIAGNOSTIC_CANARY}\`);`,
+    '  cause.code = "E_SYNTHETIC_CAUSE";',
+    `  const error = new Error(\`upstream rejected \${"${SECRET_CANARY}"}\`);`,
+    '  error.code = "E_SYNTHETIC_ROUTE";',
+    "  error.cause = cause;",
+    "  throw error;",
+    "});",
+    'it("bounds an oversized diagnostic message", () => {',
+    `  throw new Error("A".repeat(8192) + "${OVERSIZE_TAIL_SENTINEL}");`,
+    "});",
+  ].join("\n") + "\n");
+  return testFile;
+}
 
 describe("acceptance runner boundary", () => {
   it("defaults to deterministic and rejects unknown flags before profile loading", () => {
@@ -380,5 +463,94 @@ describe("acceptance runner boundary", () => {
       { index: "??", path: "fresh.txt" },
       { index: " M", path: "source.txt" },
     ]);
+  });
+
+  it("projects real Node test events into a declared allowlist without leaking off-channel diagnostics", () => {
+    const directory = mkdtempSync(join(tmpdir(), "bifrost-acceptance-projection-"));
+    temporary.push(directory);
+    const reporterPath = fileURLToPath(new URL("../scripts/acceptance/test-event-reporter.mjs", import.meta.url));
+    const testFile = writeProjectionFixture(directory);
+
+    const { status, events } = runRealReporter({ reporterPath, testFile });
+    assert.equal(status, 1, "the fixture intentionally fails; the reporter still projects every event");
+
+    // Scoped structural allowlist over the projection that was actually generated.
+    for (const event of events) assertProjectedTestEvent(event, "projected event");
+
+    // Nonempty witnesses: a pass, a diagnostic failure, and a bounded failure.
+    const passed = events.find((event) => event.name === "drops an off-channel diagnostic canary");
+    const failed = events.find((event) => event.name === "carries a bounded diagnostic failure");
+    const oversized = events.find((event) => event.name === "bounds an oversized diagnostic message");
+    assert.equal(passed?.passed, true, "the passing fixture test must project as passed");
+    assert.equal(failed?.passed, false, "the failing fixture test must project as failed");
+    assert.ok(failed?.failure, "a failing event must carry its bounded diagnostic");
+    assert.ok(oversized?.failure, "the oversized fixture test must project as failed");
+
+    // Source fields are intentional and carried verbatim (node:test reports the
+    // canonical realpath, so compare the resolved source identity).
+    assert.equal(realpathSync(failed.file), realpathSync(testFile), "projected file must be the real source file");
+    assert.equal(realpathSync(passed.file), realpathSync(testFile), "projected file must be the real source file");
+
+    // Off-channel diagnostics never reach the projection; the declared diagnostic
+    // channel does, and secret-shaped tokens are redacted by the real bounded
+    // policy. Off-channel is what a leak would look like; the diagnostic channel
+    // is explicitly outside the privacy projection.
+    const artifactText = events.map((event) => JSON.stringify(event)).join("\n");
+    assert.equal(artifactText.includes(OFFCHANNEL_CANARY), false, "an off-channel t.diagnostic canary must never be projected");
+    assert.equal(artifactText.includes(DIAGNOSTIC_CANARY), true, "the declared diagnostic channel is intentionally outside the privacy projection");
+    assert.equal(artifactText.includes(SECRET_CANARY), false, "secret-shaped tokens must be redacted inside the diagnostic channel");
+    assert.equal(artifactText.includes(OVERSIZE_TAIL_SENTINEL), false, "an oversized diagnostic must be truncated before its tail");
+    assert.ok(failed.failure.message.length < 4096, "diagnostic messages must stay bounded");
+
+    // The real artifact writer preserves the same projection on disk.
+    const evidencePath = writeNodeTestEventsArtifact({ root: directory, artifactDir: join(directory, "evidence"), testEvents: events });
+    const fileText = readFileSync(evidencePath, "utf8");
+    const fileEvents = fileText.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.equal(fileEvents.length, events.length, "the artifact must serialize every projected event");
+    for (const event of fileEvents) assertProjectedTestEvent(event, "written artifact event");
+    assert.equal(fileText.includes(OFFCHANNEL_CANARY), false, "the written artifact must not carry an off-channel canary");
+    assert.equal(fileText.includes(SECRET_CANARY), false, "the written artifact must not carry a secret-shaped token");
+  });
+
+  it("fault control: an undeclared acceptance projection key turns the named allowlist assertion RED", () => {
+    const directory = mkdtempSync(join(tmpdir(), "bifrost-acceptance-projection-fault-"));
+    temporary.push(directory);
+    const reporterPath = fileURLToPath(new URL("../scripts/acceptance/test-event-reporter.mjs", import.meta.url));
+    const original = readFileSync(reporterPath, "utf8");
+    const originalHash = sha256Text(original);
+    const testFile = writeProjectionFixture(directory);
+
+    // Pristine GREEN: the real reporter stays inside the declared projection.
+    for (const event of runRealReporter({ reporterPath, testFile }).events) {
+      assertProjectedTestEvent(event, "pristine projection");
+    }
+
+    const anchor = "      this.push(JSON.stringify({";
+    assert.ok(original.includes(anchor), "reporter projection anchor must exist");
+    const mutated = original.replace(anchor, "      this.push(JSON.stringify({\n        leakedOffChannel: data?.name,");
+    assert.notEqual(mutated, original, "reporter mutation must apply");
+    assert.notEqual(sha256Text(mutated), originalHash, "mutation must be a real source change");
+    const mutatedPath = join(directory, "mutated-reporter.mjs");
+    writeFileSync(mutatedPath, mutated);
+
+    // RED: a private mutated reporter copy must fail the named allowlist assertion.
+    let redError;
+    try {
+      for (const event of runRealReporter({ reporterPath: mutatedPath, testFile }).events) {
+        assertProjectedTestEvent(event, "mutated projection");
+      }
+    } catch (error) {
+      redError = error;
+    }
+    assert.ok(redError, "an undeclared projection key must fail the allowlist assertion");
+    assert.equal(redError.name, "AssertionError", "the mutation must fail by assertion, not by a spawn or parse error");
+    assert.match(String(redError.message), /key outside the declared acceptance projection/u, "the mutation must fail the named projection assertion");
+    assert.equal(sha256Text(readFileSync(mutatedPath, "utf8")), sha256Text(mutated), "the mutated copy must stay mutated");
+
+    // Restore: the shared committed reporter is untouched and GREEN again.
+    assert.equal(sha256Text(readFileSync(reporterPath, "utf8")), originalHash, "the shared reporter must be unchanged after the proof");
+    for (const event of runRealReporter({ reporterPath, testFile }).events) {
+      assertProjectedTestEvent(event, "restored projection");
+    }
   });
 });

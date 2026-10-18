@@ -12,6 +12,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const source = join(root, "tests/integration/native-faux-lifecycle.test.mjs");
 
 for (const pipes of ["inherit", "ignore"]) {
+  // One composed fault per pipe mode covers the required dimensions: the
+  // shortened deadline (test timeout), inherited/absent descendant pipes, a
+  // denied owned-group kill (EPERM), missing child diagnostics, and a pending
+  // caller assertion that must survive retention.
   it(`bounds the submitted lifecycle parent with denied cleanup and ${pipes} descendant pipes`, { skip: process.platform === "win32", timeout: 15000 }, async () => {
     const scratch = mkdtempSync(join(tmpdir(), "bifrost-lifecycle-control-"));
     const receipt = join(scratch, "receipts.jsonl");
@@ -20,7 +24,11 @@ for (const pipes of ["inherit", "ignore"]) {
     const bytes = readFileSync(source);
     writeFileSync(copied, bytes);
     assert.equal(createHash("sha256").update(readFileSync(copied)).digest("hex"), createHash("sha256").update(bytes).digest("hex"));
+    // The copied parent imports the shared fixture by relative path; link both
+    // shared trees so the submitted worker loads real modules (never a startup
+    // error that would masquerade as the intended assertion fault).
     symlinkSync(join(root, "scripts"), join(scratch, "scripts"));
+    symlinkSync(join(root, "tests", "fixtures"), join(scratch, "tests", "fixtures"));
     const preload = join(scratch, "intercept.cjs");
     // Only this private worker is intercepted. Receipts are captured at spawn;
     // the outer process keeps its real kill implementation for restoration.
@@ -63,6 +71,9 @@ require("node:module").syncBuiltinESMExports();
       assert.notEqual(result, 0, "pending caller assertion must survive retention");
       assert.match(output, /guard probe (must finish|process group must be gone)/);
       assert.match(output, /retaining scratch without verified owned-group death/);
+      // Missing diagnostics: the intercepted child emits no transcript, yet the
+      // pending assertion still names the guard-probe failure and no scenario ran.
+      assert.doesNotMatch(output, /own scripted response/, "missing diagnostics must not mask the pending assertion");
       receipts = readFileSync(receipt, "utf8").trim().split("\n").map(JSON.parse);
       console.log(JSON.stringify({ sourceSha256: createHash("sha256").update(bytes).digest("hex"), pipes, receipts, output }));
       assert.equal(receipts.length, 1, "the failed first probe must stop the parent");
