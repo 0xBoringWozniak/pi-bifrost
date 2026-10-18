@@ -157,6 +157,213 @@ function semanticProjection(decision) {
   };
 }
 
+function candidateProjection(candidate) {
+  return {
+    model: candidate.model,
+    status: candidate.status,
+    exclusion: candidate.exclusion ?? null,
+    reserve: candidate.reserve
+      ? {
+        disposition: candidate.reserve.disposition,
+        wouldReject: candidate.reserve.wouldReject,
+        reasons: candidate.reserve.reasons,
+      }
+      : null,
+  };
+}
+
+function poolProjection(pool) {
+  if (!pool) return null;
+  return {
+    tier: pool.tier,
+    strategy: pool.strategy,
+    patterns: pool.patterns,
+    candidates: pool.candidates.map(candidateProjection),
+    billingPreference: pool.billingPreference ?? null,
+  };
+}
+
+/** Parity projection that adds per-candidate reserve evidence to the shared summary. */
+function economicProjection(decision) {
+  return {
+    outcome: decision.outcome,
+    classifiedTier: decision.classification?.tier ?? null,
+    requested: poolProjection(decision.requested),
+    fallback: poolProjection(decision.fallback),
+    attempted: decision.attempted?.map(poolProjection) ?? null,
+    explicitBoundary: decision.explicitBoundary ?? false,
+    selectedTier: decision.selectedTier ?? null,
+    selected: decision.selected ?? null,
+    selectedStrategy: decision.selectedStrategy ?? null,
+    fallbackReason: decision.fallbackReason ?? null,
+  };
+}
+
+/** Parity projection for affinity observations. `modeSource` and `snapshotAsOf` are
+ * adapter-local metadata (the Pi adapter reports `config`; the pure API does not) and
+ * are deliberately excluded so the routing semantics can be compared directly. */
+function affinityProjection(decision) {
+  const affinity = decision.affinity ?? null;
+  return {
+    ...semanticProjection(decision),
+    affinity: affinity ? {
+      mode: affinity.mode,
+      status: affinity.status,
+      selection: affinity.selection,
+      strategyWinner: affinity.strategyWinner ?? null,
+      selectedModel: affinity.selectedModel ?? null,
+      selectedTier: affinity.selectedTier ?? null,
+      baseStrategyComparison: affinity.baseStrategyComparison ?? null,
+      anchorModel: affinity.anchor?.modelKey ?? null,
+    } : null,
+  };
+}
+
+function economyCatalog() {
+  return [model("ready"), model("alpha"), model("beta")];
+}
+
+function writeEconomyRegistry(agent, catalog) {
+  writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: { fake: {
+    baseUrl: `http://127.0.0.1:${serverPort}/v1`, api: "openai-completions", apiKey: "synthetic-only", models: catalog,
+  } } }));
+  writeFileSync(join(agent, "settings.json"), JSON.stringify({ retry: { enabled: false }, enabledModels: ["fake/*"] }));
+}
+
+function routerModels(catalog) {
+  return catalog.map(({ id, cost, contextWindow }) => ({
+    provider: "fake", id, cost: { input: cost.input, output: cost.output }, contextWindow,
+  }));
+}
+
+/** Runtime config, packed-API economic snapshot, and registry built from one source so
+ * all three surfaces evaluate the same reserve facts without a production-derived oracle. */
+function createEconomicFixture({ mode = "policy", remaining = 0.1 } = {}) {
+  const home = mkdtempSync(join(tmpdir(), "bifrost-parity-econ-home-"));
+  const workspace = mkdtempSync(join(tmpdir(), "bifrost-parity-econ-work-"));
+  temporary.push(home, workspace);
+  const agent = join(home, ".pi", "agent");
+  const project = join(workspace, ".pi");
+  mkdirSync(agent, { recursive: true });
+  mkdirSync(project, { recursive: true });
+  const catalog = economyCatalog();
+  writeEconomyRegistry(agent, catalog);
+  const now = Date.now();
+  const observation = {
+    sourceId: "synthetic", scopeRef: "quota", billing: "metered",
+    observedAt: now - 1, expiresAt: now + 600_000, revision: 1,
+    windows: [{ id: "day", period: { id: "p1", sequence: 1 }, unit: "ratio", remaining }],
+  };
+  const scope = { kind: "model", model: "fake/alpha" };
+  const sources = [{ id: "synthetic", scopeRef: "quota", authority: "declared" }];
+  const admission = [{ id: "daily", scopeRef: "quota", windowId: "day", reserveRatio: 0.2, unknown: "block" }];
+  const config = {
+    schemaVersion: 2,
+    enabled: true,
+    default: "fallback",
+    strategy: "first",
+    models: { primary: ["fake/alpha"], fallback: ["fake/beta"] },
+    rules: [{ pattern: "parity-economics", model: "primary" }],
+    classifier: { enabled: false },
+    affinity: { mode: "off" },
+    reliability: { enabled: true, failureThreshold: 1, windowMinutes: 5, cooldownMinutes: 30 },
+    economics: { mode, scopes: { quota: scope }, sources, admission, observations: [observation] },
+    debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
+  };
+  writeFileSync(join(project, "bifrost.json"), JSON.stringify(config));
+  return {
+    home, workspace, project, config, now,
+    models: routerModels(catalog),
+    apiEconomic: {
+      policy: { mode, scopes: { quota: scope }, sources, admission },
+      snapshot: {
+        revision: 1,
+        signals: [observation],
+        watermarks: [{ sourceId: "synthetic", scopeRef: "quota", windowId: "day", periodId: "p1", periodSequence: 1, revision: 1 }],
+      },
+    },
+  };
+}
+
+function createAffinityFixture(mode = "observe") {
+  const home = mkdtempSync(join(tmpdir(), "bifrost-parity-affinity-home-"));
+  const workspace = mkdtempSync(join(tmpdir(), "bifrost-parity-affinity-work-"));
+  temporary.push(home, workspace);
+  const agent = join(home, ".pi", "agent");
+  const project = join(workspace, ".pi");
+  mkdirSync(agent, { recursive: true });
+  mkdirSync(project, { recursive: true });
+  const catalog = economyCatalog();
+  writeEconomyRegistry(agent, catalog);
+  const config = {
+    schemaVersion: 2,
+    enabled: true,
+    default: "primary",
+    strategy: "first",
+    models: { primary: ["fake/alpha", "fake/beta"] },
+    rules: [{ pattern: "parity-affinity", model: "primary" }],
+    classifier: { enabled: false },
+    affinity: { mode },
+    reliability: { enabled: true, failureThreshold: 1, windowMinutes: 5, cooldownMinutes: 30 },
+    debug: { enabled: true, path: ".pi/bifrost-debug.jsonl" },
+  };
+  writeFileSync(join(project, "bifrost.json"), JSON.stringify(config));
+  return { home, workspace, project, config, now: Date.now(), models: routerModels(catalog) };
+}
+
+function apiClientConfig(config) {
+  const { enabled, debug, economics, ...routerConfig } = config;
+  return routerConfig;
+}
+
+/** Independent reserve facts for API-direct cases: the caller names the model
+ * scope and remaining ratio so the expected outcome is chosen, not derived from
+ * any production path. */
+function economicReserveFor(model, remaining, reserveRatio = 0.5) {
+  const now = Date.now();
+  return {
+    policy: {
+      mode: "policy",
+      scopes: { quota: { kind: "model", model } },
+      sources: [{ id: "synthetic", scopeRef: "quota", authority: "declared" }],
+      admission: [{ id: "daily", scopeRef: "quota", windowId: "day", reserveRatio, unknown: "block" }],
+    },
+    snapshot: {
+      revision: 1,
+      signals: [{
+        sourceId: "synthetic", scopeRef: "quota", billing: "metered",
+        observedAt: now - 1, expiresAt: now + 600_000, revision: 1,
+        windows: [{ id: "day", period: { id: "p1", sequence: 1 }, unit: "ratio", remaining }],
+      }],
+      watermarks: [{ sourceId: "synthetic", scopeRef: "quota", windowId: "day", periodId: "p1", periodSequence: 1, revision: 1 }],
+    },
+  };
+}
+
+/** Resolve the installed packed API for a fixture, optionally with extra snapshot
+ * sections (economic/affinity) or router options, and require a completed result. */
+async function resolveInstalledApi(createRouter, fixture, prompt, snapshot = {}, options) {
+  const router = createRouter({
+    config: apiClientConfig(fixture.config),
+    registry: { knownModels: fixture.models, availableModels: fixture.models },
+    now: fixture.now,
+    ...snapshot,
+  }, options);
+  const result = await router.resolve({ prompt });
+  assert.equal(result.status, "completed", `installed API did not complete: ${JSON.stringify(result)}`);
+  if (result.status !== "completed") throw new Error("installed API returned an aborted result");
+  return result.decision;
+}
+
+/** Poll a predicate across event-loop turns. */
+async function waitFor(predicate, timeoutMs = 5_000) {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function linkInstalledDependencies(source, destination) {
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     if (entry.name.startsWith(".") || entry.name === "pi-bifrost") continue;
@@ -280,5 +487,183 @@ describe("runtime, preview, and installed router semantic parity", { concurrency
         scenarios: surfaces,
       }, null, 2) + "\n");
     }
+  });
+
+  it("aligns active economic reserve decisions across all three surfaces", async () => {
+    const cases = [
+      {
+        name: "a hard reserve rejection excludes the requested tier and falls back",
+        mode: "policy", remaining: 0.1,
+        selected: "fake/beta", selectedTier: "fallback", fallbackReason: "requested_tier_excluded",
+        requested: {
+          model: "fake/alpha", status: "excluded", exclusion: "economic_reserve",
+          reserve: { disposition: "rejected", wouldReject: true, reasons: ["reserve_reached"] },
+        },
+      },
+      {
+        name: "remaining above the reserve admits the requested model",
+        mode: "policy", remaining: 0.9,
+        selected: "fake/alpha", selectedTier: "primary", fallbackReason: null,
+        requested: {
+          model: "fake/alpha", status: "eligible", exclusion: null,
+          reserve: { disposition: "admitted", wouldReject: false, reasons: ["above_reserve"] },
+        },
+      },
+      {
+        name: "observe mode reports the reserve without excluding the model",
+        mode: "observe", remaining: 0.1,
+        selected: "fake/alpha", selectedTier: "primary", fallbackReason: null,
+        requested: {
+          model: "fake/alpha", status: "eligible", exclusion: null,
+          reserve: { disposition: "observed", wouldReject: true, reasons: ["reserve_reached"] },
+        },
+      },
+    ];
+
+    for (const scenario of cases) {
+      const fixture = createEconomicFixture({ mode: scenario.mode, remaining: scenario.remaining });
+      const api = await resolveInstalledApi(routerModule.createRouter, fixture, "parity-economics task", { economic: fixture.apiEconomic });
+      const runtimeRun = await runPi(fixture, "parity-economics task");
+      assert.equal(runtimeRun.code, 0, `${scenario.name}: ${runtimeRun.stderr}`);
+      assert.equal(runtimeRun.violations, "", `${scenario.name}: runtime must not escape the test network`);
+      const runtime = readRuntimeDecision(fixture);
+      const previewRun = await runPi(fixture, "/bifrost preview --offline --trace --json parity-economics task");
+      assert.equal(previewRun.code, 0, `${scenario.name}: ${previewRun.stderr}`);
+      assert.equal(previewRun.violations, "", `${scenario.name}: preview must not escape the test network`);
+      const preview = readPreviewDecision(previewRun);
+
+      for (const [surface, decision] of [["runtime", runtime], ["preview", preview], ["api", api]]) {
+        const projection = economicProjection(decision);
+        assert.equal(projection.selected, scenario.selected, `${scenario.name}: ${surface} selected model`);
+        assert.equal(projection.selectedTier, scenario.selectedTier, `${scenario.name}: ${surface} selected tier`);
+        assert.equal(projection.fallbackReason ?? null, scenario.fallbackReason, `${scenario.name}: ${surface} fallback reason`);
+        assert.deepEqual(
+          projection.requested.candidates.find((candidate) => candidate.model === scenario.requested.model),
+          scenario.requested,
+          `${scenario.name}: ${surface} requested candidate reserve evidence`,
+        );
+      }
+      assert.deepEqual(economicProjection(preview), economicProjection(runtime), `${scenario.name}: preview and runtime economic summaries must agree`);
+      assert.deepEqual(economicProjection(api), economicProjection(runtime), `${scenario.name}: installed API and runtime economic summaries must agree`);
+    }
+  });
+
+  it("aligns affinity observation semantics across all three surfaces without an anchor", async () => {
+    const fixture = createAffinityFixture("observe");
+    const api = await resolveInstalledApi(routerModule.createRouter, fixture, "parity-affinity task", { affinity: { targetOrigin: "automatic" } });
+    const runtimeRun = await runPi(fixture, "parity-affinity task");
+    assert.equal(runtimeRun.code, 0, runtimeRun.stderr);
+    assert.equal(runtimeRun.violations, "");
+    const runtime = readRuntimeDecision(fixture);
+    const previewRun = await runPi(fixture, "/bifrost preview --offline --trace --json parity-affinity task");
+    assert.equal(previewRun.code, 0, previewRun.stderr);
+    assert.equal(previewRun.violations, "");
+    const preview = readPreviewDecision(previewRun);
+
+    assert.equal(runtime.selected, "fake/alpha");
+    const expectedAffinity = {
+      mode: "observe",
+      status: "locality_unknown",
+      selection: "no_anchor",
+      strategyWinner: "fake/alpha",
+      selectedModel: "fake/alpha",
+      selectedTier: "primary",
+      baseStrategyComparison: "no_anchor",
+      anchorModel: null,
+    };
+    assert.deepEqual(affinityProjection(runtime).affinity, expectedAffinity, "runtime affinity observation");
+    assert.deepEqual(affinityProjection(preview), affinityProjection(runtime), "preview and runtime affinity summaries must agree");
+    assert.deepEqual(affinityProjection(api), affinityProjection(runtime), "installed API and runtime affinity summaries must agree");
+  });
+
+  it("retains an eligible anchor and reports a hard-excluded anchor on the installed API", async () => {
+    const now = Date.now();
+    const models = routerModels(economyCatalog());
+    const registry = { knownModels: models, availableModels: models };
+    const config = {
+      schemaVersion: 2,
+      default: "primary",
+      strategy: "first",
+      models: { primary: ["fake/alpha", "fake/beta"] },
+      rules: [{ pattern: "parity-retain", model: "primary" }],
+      classifier: { enabled: false },
+      affinity: { mode: "retain-within-tier" },
+      reliability: { enabled: true, failureThreshold: 1, windowMinutes: 5, cooldownMinutes: 30 },
+    };
+    const anchor = { modelKey: "fake/beta", provider: "fake", lastSuccessfulDispatchAt: now - 1000 };
+
+    const retained = await routerModule.createRouter({
+      config, registry, now, affinity: { targetOrigin: "automatic", anchor },
+    }).resolve({ prompt: "parity-retain task" });
+    assert.equal(retained.status, "completed");
+    assert.equal(retained.decision.selected, "fake/beta", "an eligible anchor is retained over the strategy winner");
+    assert.deepEqual(affinityProjection(retained.decision).affinity, {
+      mode: "retain-within-tier",
+      status: "current_eligible",
+      selection: "retained_anchor",
+      strategyWinner: "fake/alpha",
+      selectedModel: "fake/beta",
+      selectedTier: "primary",
+      baseStrategyComparison: "selected_other",
+      anchorModel: "fake/beta",
+    });
+
+    const excluded = await routerModule.createRouter({
+      config, registry, now,
+      economic: economicReserveFor("fake/beta", 0.1),
+      affinity: { targetOrigin: "automatic", anchor },
+    }).resolve({ prompt: "parity-retain task" });
+    assert.equal(excluded.status, "completed");
+    assert.equal(excluded.decision.selected, "fake/alpha", "a hard-excluded anchor is never retained");
+    assert.deepEqual(
+      economicProjection(excluded.decision).requested.candidates.find((candidate) => candidate.model === "fake/beta"),
+      {
+        model: "fake/beta", status: "excluded", exclusion: "economic_reserve",
+        reserve: { disposition: "rejected", wouldReject: true, reasons: ["reserve_reached"] },
+      },
+      "the excluded anchor is reported as a reserve exclusion",
+    );
+    assert.deepEqual(affinityProjection(excluded.decision).affinity, {
+      mode: "retain-within-tier",
+      status: "switch_required",
+      selection: "anchor_not_eligible",
+      strategyWinner: "fake/alpha",
+      selectedModel: "fake/alpha",
+      selectedTier: "primary",
+      baseStrategyComparison: "selected_other",
+      anchorModel: "fake/beta",
+    });
+  });
+
+  it("returns a cancelled envelope with no classifier call before or after cancellation on the installed API", async () => {
+    const now = Date.now();
+    const models = routerModels([model("alpha")]);
+    let classifyCalls = 0;
+    const router = routerModule.createRouter({
+      config: { models: { primary: ["fake/alpha"] }, default: "primary", rules: [], classifier: { enabled: true } },
+      registry: { knownModels: models, availableModels: models },
+      now,
+    }, {
+      networkClassifierGrant: true,
+      networkClassifier: { classify: () => { classifyCalls += 1; return new Promise(() => {}); } },
+    });
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    const preResult = await router.resolve({ prompt: "parity-cancel pre-aborted", signal: preAborted.signal });
+    assert.deepEqual(preResult, { version: 1, status: "aborted", asOf: now }, "a pre-aborted request returns the aborted envelope");
+    assert.equal(classifyCalls, 0, "a pre-aborted request never starts the classifier");
+
+    const controller = new AbortController();
+    const pending = router.resolve({ prompt: "parity-cancel while pending", signal: controller.signal });
+    await waitFor(() => classifyCalls === 1);
+    controller.abort();
+    const cancelled = await pending;
+    assert.deepEqual(cancelled, { version: 1, status: "aborted", asOf: now }, "cancelling a pending classify returns the aborted envelope");
+    assert.equal(classifyCalls, 1, "cancellation must not start another classifier call");
+
+    const after = await router.resolve({ prompt: "parity-cancel after cancellation", signal: preAborted.signal });
+    assert.deepEqual(after, { version: 1, status: "aborted", asOf: now });
+    assert.equal(classifyCalls, 1, "a cancelled router holds no post-cancel classifier work");
   });
 });
