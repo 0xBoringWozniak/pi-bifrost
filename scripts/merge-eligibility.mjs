@@ -115,7 +115,7 @@ function ghJson(args) {
   return JSON.parse(gh(args));
 }
 
-function getReviews(repo, number) {
+export function getReviews(repo, number) {
   const output = gh(["api", "--paginate", "--jq", ".[]", `repos/${repo}/pulls/${number}/reviews`]);
   return output ? output.split("\n").map((line) => JSON.parse(line)).map((review) => ({
     state: review.state,
@@ -147,7 +147,7 @@ export function getReviewThreads(repo, number, query = ghJson) {
   return threads;
 }
 
-function dependencyEvidence(repo, ref, baseBranch, baseOid) {
+export function dependencyEvidence(repo, ref, baseBranch, baseOid) {
   const dependencyRepo = ref.repo ?? repo.toLowerCase();
   if (dependencyRepo !== repo.toLowerCase()) throw new Error("cross-repository dependency unsupported");
   const issue = ghJson(["api", `repos/${repo}/issues/${ref.number}`]);
