@@ -319,8 +319,7 @@ function apiClientConfig(config) {
 /** Independent reserve facts for API-direct cases: the caller names the model
  * scope and remaining ratio so the expected outcome is chosen, not derived from
  * any production path. */
-function economicReserveFor(model, remaining, reserveRatio = 0.5) {
-  const now = Date.now();
+function economicReserveFor(model, remaining, now, reserveRatio = 0.5) {
   return {
     policy: {
       mode: "policy",
@@ -577,7 +576,7 @@ describe("runtime, preview, and installed router semantic parity", { concurrency
   });
 
   it("retains an eligible anchor and reports a hard-excluded anchor on the installed API", async () => {
-    const now = Date.now();
+    const now = 1_700_000_000_000;
     const models = routerModels(economyCatalog());
     const registry = { knownModels: models, availableModels: models };
     const config = {
@@ -610,7 +609,7 @@ describe("runtime, preview, and installed router semantic parity", { concurrency
 
     const excluded = await routerModule.createRouter({
       config, registry, now,
-      economic: economicReserveFor("fake/beta", 0.1),
+      economic: economicReserveFor("fake/beta", 0.1, now),
       affinity: { targetOrigin: "automatic", anchor },
     }).resolve({ prompt: "parity-retain task" });
     assert.equal(excluded.status, "completed");
