@@ -21,7 +21,7 @@
 //      ROOT resolves inside the scratch tree.
 //   2. GREEN   — run the named replay assertion against the pristine copied
 //      index.ts. It must pass (proves the harness and baseline are healthy).
-//   3. MUTATE  — corrupt one production guard (see REPLAY_GUARD_MUTATORS). The
+//   3. MUTATE  — inject one bounded fault (possibly across redundant guards) (see REPLAY_GUARD_MUTATORS). The
 //      mutant hash must differ.
 //   4. RED     — run the SAME named assertion against the mutant. It must fail
 //      with the meaningful AssertionError message below, NOT a syntax/startup
@@ -74,12 +74,10 @@ export const REPLAY_GUARD_LINES = {
   allowanceRetryBoundaryStillSafe: 2525,
 };
 
-// Every named replay assertion and the guard that is load-bearing for it.
-// status: "PROVEN"  — a committed executable proof mutates that guard and turns
-//                     this exact named assertion RED (see FAULT_PROOFS).
-//         "OUTSTANDING" — no executable proof covers this pair yet.
-// `mutation` records the injected fault so the direction of the proof is clear
-// (a permissive bypass vs. a restrictive over-fire).
+// Each PROVEN pair has an executable fault reaching its exact named assertion.
+// A compound fault covers one semantic claim across redundant enforcement;
+// it does not attribute sensitivity to each guard. OUTSTANDING means unproven.
+// `mutation` records direction; `remainingEvidence` states what is still missing.
 export const NAMED_REPLAY_ASSERTIONS = [
   {
     testFile: "tests/integration/auto-virtual.test.mjs",
@@ -101,14 +99,15 @@ export const NAMED_REPLAY_ASSERTIONS = [
     guard: null,
     mutation: null,
     status: "OUTSTANDING",
+    remainingEvidence: "The attempted side-effect, queued-work and boundary mutations stayed GREEN. Which remaining guard masks them has not been established; continuation-admission fault sensitivity remains unproven.",
   },
   // reliability-v2-auto titles are mode-parameterized; each concrete mode is listed.
   {
     testFile: "tests/integration/reliability-v2-auto.test.mjs",
     testName: "retries one zero-effect allowance failure with a configured alternate in v1 Auto",
-    guard: null,
-    mutation: null,
-    status: "OUTSTANDING",
+    guard: "allowanceRetryBoundaryStillSafe",
+    mutation: "return false",
+    status: "PROVEN",
   },
   {
     testFile: "tests/integration/reliability-v2-auto.test.mjs",
@@ -120,16 +119,16 @@ export const NAMED_REPLAY_ASSERTIONS = [
   {
     testFile: "tests/integration/reliability-v2-auto.test.mjs",
     testName: "stops after the single alternate allowance attempt in v1 Auto",
-    guard: null,
-    mutation: null,
-    status: "OUTSTANDING",
+    guard: "singleAlternateV1",
+    mutation: "compound empty-recovery lineage fault; not individual-guard sensitivity",
+    status: "PROVEN",
   },
   {
     testFile: "tests/integration/reliability-v2-auto.test.mjs",
     testName: "stops after the single alternate allowance attempt in v2 Auto",
-    guard: null,
-    mutation: null,
-    status: "OUTSTANDING",
+    guard: "singleAlternateV2",
+    mutation: "compound empty-recovery lineage fault; not individual-guard sensitivity",
+    status: "PROVEN",
   },
 ];
 
@@ -141,7 +140,7 @@ export const FAULT_PROOF = {
   redAssertionMessage: "the failed allowance/output-effect turn must not dispatch to an alternate",
 };
 
-/** Named guard × assertion proofs, one per guard, executed by the anchor tests. */
+/** Named fault × assertion proofs executed by the anchor tests. */
 export const FAULT_PROOFS = {
   sideEffectFreeAllowanceOutputEffect: FAULT_PROOF,
   allowanceRetryBoundaryV2: {
@@ -158,9 +157,43 @@ export const FAULT_PROOFS = {
   },
 };
 
+// Restrictive first-retry sensitivity is separate from the compound limit fault.
+FAULT_PROOFS.allowanceRetryBoundaryV1 = {
+  ...FAULT_PROOFS.allowanceRetryBoundaryV2,
+  testName: "retries one zero-effect allowance failure with a configured alternate in v1 Auto",
+  redAssertionMessage: "the prepared usage-limit retry was cancelled because the turn changed; no model was dispatched."
+};
+
+for (const mode of ["v1", "v2"]) {
+  FAULT_PROOFS[`singleAlternate${mode.toUpperCase()}`] = {
+    guard: `singleAlternate${mode.toUpperCase()}`,
+    testFile: "tests/integration/reliability-v2-auto.test.mjs",
+    testName: `stops after the single alternate allowance attempt in ${mode} Auto`,
+    redAssertionMessage: "Bifrost must stop after one alternate, without trying a third model",
+  };
+}
+
+// One semantic fault forgets the per-boundary recovery limit across its
+// redundant representations. It preserves tool/output/queue/abort checks;
+// it does not prove each redundant guard individually fault-sensitive.
+function permitRepeatedEmptyRecovery(source, v2) {
+  const edits = [
+    ['if (`${String(message.provider)}/${String(message.model)}` !== failedModelKey\n          || message.stopReason', 'if (message.stopReason'],
+    ['if (previousAttempt?.entryId === boundary.entryId && previousAttempt.userMessage.deref() === boundary.message) {', 'if (false) {'],
+    ...(v2 ? [['retryEligible: activeRouteOrigin === "automatic" || activeRouteOrigin === "explicit_tier",', 'retryEligible: true,']] : []),
+  ];
+  for (const [before, after] of edits) {
+    if (source.split(before).length !== 2) throw new Error(`compound recovery fault requires one exact anchor: ${before}`);
+    source = source.replace(before, after);
+  }
+  return source;
+}
+
 /** Injected fault per guard. `return false` proves the guard's restrictive half
  * (the assertion depends on the guard permitting the safe path). */
 export const REPLAY_GUARD_MUTATORS = {
+  singleAlternateV1: (source) => permitRepeatedEmptyRecovery(source, false),
+  singleAlternateV2: (source) => permitRepeatedEmptyRecovery(source, true),
   isSideEffectFreeAllowanceFailure: (source) => injectGuardStatement(source, "isSideEffectFreeAllowanceFailure", "return [assistantEntryId];"),
   allowanceRetryBoundaryStillSafe: (source) => injectGuardStatement(source, "allowanceRetryBoundaryStillSafe", "return false;"),
   autoBoundaryStillActive: (source) => injectGuardStatement(source, "autoBoundaryStillActive", "return false;"),

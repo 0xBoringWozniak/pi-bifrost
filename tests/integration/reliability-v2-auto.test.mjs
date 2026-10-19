@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { reliabilitySourceFencePath } from "../../reliability-v1-fence.ts";
-import { REPLAY_GUARD_BASELINE_SHA256, FAULT_PROOFS, runReplayGuardFaultProof } from "../fixtures/replay-fault-control.mjs";
+import { REPLAY_GUARD_BASELINE_SHA256, FAULT_PROOFS, NAMED_REPLAY_ASSERTIONS, runReplayGuardFaultProof } from "../fixtures/replay-fault-control.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -567,11 +567,12 @@ describe("pinned Pi reliability v2 Auto path", { timeout: 360_000, concurrency: 
         const result = await runPi({ home, work, messages: [...(mode === "v2" ? ["/bifrost reliability migrate --fresh"] : []), "respond with one word"] });
         const after = await fakeStats(server.port);
         assert.equal(result.timedOut, false);
-        assert.notEqual(result.code, 0, "the alternate also returns an explicit usage limit");
-        assert.equal((after.attempts["usage-exhausted"] ?? 0) - (before.attempts["usage-exhausted"] ?? 0), 1);
-        assert.equal((after.attempts["usage-exhausted-alternate"] ?? 0) - (before.attempts["usage-exhausted-alternate"] ?? 0), 1);
         assert.equal((after.attempts.healthy ?? 0) - (before.attempts.healthy ?? 0), 0,
           "Bifrost must stop after one alternate, without trying a third model");
+        assert.notEqual(result.code, 0, "the alternate also returns an explicit usage limit");
+        assert.equal((after.attempts["usage-exhausted"] ?? 0) - (before.attempts["usage-exhausted"] ?? 0), 1);
+        assert.equal((after.attempts["usage-exhausted-alternate"] ?? 0) - (before.attempts["usage-exhausted-alternate"] ?? 0), 1,
+          "the single configured alternate must receive exactly one generation");
         assert.match(result.stderr, /retrying once with fake\/usage-exhausted-alternate/);
         assert.doesNotMatch(result.stderr, /retrying once with fake\/healthy/);
         assert.match(result.stderr, /The alternate also returned a usage limit\. Automatic retry limit reached\./);
@@ -1217,5 +1218,57 @@ describe("G03 replay guard integrity anchor", () => {
     assert.equal(receipt.phases.green, 0);
     assert.equal(receipt.phases.red, 1);
     assert.equal(receipt.phases.restoredGreen, 0);
+  });
+});
+
+// Additional bounded proofs; the queued-follow-up pair remains unproven.
+describe("G03 remaining zero-effect allowance proof", () => {
+  it("proves allowanceRetryBoundaryStillSafe faults the v1 Auto allowance-retry assertion", async () => {
+    const proof = FAULT_PROOFS.allowanceRetryBoundaryV1;
+    const sourceHash = createHash("sha256").update(readFileSync(EXTENSION, "utf8")).digest("hex");
+    assert.equal(sourceHash, REPLAY_GUARD_BASELINE_SHA256, "the proof requires the baseline production source");
+
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
+    assert.equal(receipt.guard, proof.guard);
+    assert.equal(receipt.testName, proof.testName);
+    assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
+    assert.notEqual(receipt.mutantSha256, receipt.baselineSha256, "the boundary fault must change the source hash");
+    assert.equal(receipt.restoredSha256, REPLAY_GUARD_BASELINE_SHA256, "the proof must restore the baseline source");
+    assert.equal(receipt.redAssertionMessage, proof.redAssertionMessage);
+    assert.deepEqual(receipt.phases, { copy: "ok", green: 0, red: 1, restoredGreen: 0 });
+  });
+
+  for (const mode of ["v1", "v2"]) {
+    it(`proves the ${mode} Auto alternate limit with a compound lineage fault`, async () => {
+      const proof = FAULT_PROOFS[`singleAlternate${mode.toUpperCase()}`];
+      const receipt = await runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
+      assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
+      assert.notEqual(receipt.mutantSha256, receipt.baselineSha256);
+      assert.equal(receipt.restoredSha256, REPLAY_GUARD_BASELINE_SHA256);
+      assert.equal(receipt.redAssertionMessage, proof.redAssertionMessage);
+      assert.deepEqual(receipt.phases, { copy: "ok", green: 0, red: 1, restoredGreen: 0 });
+    });
+  }
+
+  it("keeps PROVEN pairs backed by a matching proof and unproven pairs OUTSTANDING", () => {
+    const proofs = Object.values(FAULT_PROOFS);
+    const proven = NAMED_REPLAY_ASSERTIONS.filter((entry) => entry.status === "PROVEN");
+    for (const entry of proven) {
+      assert.ok(proofs.some((proof) => proof.guard === entry.guard
+        && proof.testFile === entry.testFile && proof.testName === entry.testName),
+      `PROVEN pair has no matching executable proof: ${entry.testName}`);
+    }
+    const provenKeys = new Set(proven.map((entry) => `${entry.testFile}::${entry.testName}`));
+    for (const proof of proofs) {
+      assert.ok(provenKeys.has(`${proof.testFile}::${proof.testName}`),
+        `executable proof is not backed by a PROVEN pair: ${proof.testName}`);
+    }
+    const outstanding = NAMED_REPLAY_ASSERTIONS.filter((entry) => entry.status === "OUTSTANDING");
+    for (const entry of outstanding) {
+      assert.ok(typeof entry.remainingEvidence === "string" && entry.remainingEvidence.length > 0,
+        `OUTSTANDING pair must record its missing evidence: ${entry.testName}`);
+      assert.ok(!proofs.some((proof) => proof.testFile === entry.testFile && proof.testName === entry.testName),
+        `OUTSTANDING pair must not have a weaker proof posing as support: ${entry.testName}`);
+    }
   });
 });
