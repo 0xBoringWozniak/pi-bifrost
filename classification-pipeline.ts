@@ -277,7 +277,12 @@ export interface PipelineDeps {
   /** Query cache. Returns tier or undefined. */
   readonly cacheLookup: (text: string) => string | undefined;
   /** Optional direct backend (typesafe or pi-native) attempted before the prompt classifier. */
-  readonly classifyDirect?: (text: string, tiers: readonly string[], signal?: AbortSignal) => Promise<DirectClassifierOutput>;
+  readonly classifyDirect?: (
+    text: string,
+    tiers: readonly string[],
+    signal?: AbortSignal,
+    identity?: { readonly sessionId: string },
+  ) => Promise<DirectClassifierOutput>;
   /** Classifier models in priority order. Empty array = skip LLM. */
   readonly classifierModels: readonly ClassifierModel[];
   /** Invoke the LLM classifier for a single model. Returns tier or undefined. */
@@ -286,6 +291,7 @@ export interface PipelineDeps {
     text: string,
     tiers: readonly string[],
     signal?: AbortSignal,
+    identity?: { readonly sessionId: string },
   ) => Promise<ClassifierOutput | undefined>;
   /** Regex routing rules. First match wins. */
   readonly regexRules: readonly RouteRule[];
@@ -492,7 +498,7 @@ export function createPipeline(deps: PipelineDeps): ClassificationPipeline {
         endDirect(meta);
       };
       try {
-        const attempt = await invokeExternal((attemptSignal) => classifyDirect(text, tiers, attemptSignal));
+        const attempt = await invokeExternal((attemptSignal) => classifyDirect(text, tiers, attemptSignal, identity));
         if (attempt.status !== "completed") finishDirect({ outcome: attempt.status });
         if (attempt.status === "aborted") return stop("aborted");
         if (attempt.status === "deadline") markOutcome("deadline");
@@ -528,7 +534,7 @@ export function createPipeline(deps: PipelineDeps): ClassificationPipeline {
         endLLM(meta);
       };
       try {
-        const attempt = await invokeExternal((attemptSignal) => classifyWithLLM(model, text, tiers, attemptSignal));
+        const attempt = await invokeExternal((attemptSignal) => classifyWithLLM(model, text, tiers, attemptSignal, identity));
         if (attempt.status !== "completed") finishLLM({ outcome: attempt.status });
         if (attempt.status === "aborted") return stop("aborted");
         if (attempt.status === "deadline") {

@@ -506,7 +506,12 @@ function buildPipeline(
   // Resolve classifier models once at pipeline construction.
   // If classifier is disabled, pass empty array — pipeline skips LLM stage.
   let classifierModels: ClassifierModel[] = [];
-  let classifyDirect: ((text: string, tiers: readonly string[], signal?: AbortSignal) => Promise<DirectClassifierAttempt>) | undefined;
+  let classifyDirect: ((
+    text: string,
+    tiers: readonly string[],
+    signal?: AbortSignal,
+    identity?: { readonly sessionId: string },
+  ) => Promise<DirectClassifierAttempt>) | undefined;
   const directConfigOk = !hasClassifierConfigErrors(config, effective.backend);
   const plan = directStagePlan({
     backend: effective.backend,
@@ -532,12 +537,13 @@ function buildPipeline(
       reliability: reliabilityStore,
       observe: (observation) => classifierMetricsStore.record(observation),
     });
-    classifyDirect = async (text, availableTiers, signal) => {
+    classifyDirect = async (text, availableTiers, signal, identity) => {
       let observation: TypeSafeObservation | undefined;
       const judgment = await classify(
         { prompt: boundedClassifierPrompt(text), tiers: availableTiers, criteria: classifierConfig.criteria ?? DEFAULT_CLASSIFIER_CRITERIA },
         signal,
         (value) => { observation = value; },
+        identity,
       );
       return directClassifierAttempt("typesafe", observation, judgment, reliabilityStore, config);
     };
@@ -562,12 +568,13 @@ function buildPipeline(
       ),
       observe: (observation) => classifierMetricsStore.record(observation),
     });
-    classifyDirect = async (text, availableTiers, signal) => {
+    classifyDirect = async (text, availableTiers, signal, identity) => {
       let observation: TypeSafeObservation | undefined;
       const judgment = await classify(
         { prompt: boundedClassifierPrompt(text), tiers: availableTiers, criteria: config.classifier?.criteria ?? DEFAULT_CLASSIFIER_CRITERIA },
         signal,
         (value) => { observation = value; },
+        identity,
       );
       return directClassifierAttempt("pi-native", observation, judgment, reliabilityStore, config);
     };
@@ -597,24 +604,27 @@ function buildPipeline(
       return undefined;
     },
     classifierModels,
-    classifyWithLLM: async (model, text, tiers, signal) => {
+    classifyWithLLM: async (model, text, tiers, signal, identity) => {
+      const trace = (event: string, meta: Record<string, unknown>) => {
+        debug("classifier", event, meta, identity ? { identity } : undefined);
+      };
       if (model.kind === "registry") {
         const key = modelKey(model.model);
         if (isProviderClassifierUnavailable(model.model)) {
-          debugForSession(ctx.sessionManager, "classifier", "provider_cooldown_skip", { provider: model.model.provider, scope: "provider" });
+          trace("provider_cooldown_skip", { provider: model.model.provider, scope: "provider" });
           return undefined;
         }
         if (config.reliability?.enabled !== false
           && config.reliability?.cooldownOnAllowanceExhausted !== false
           && config.reliability?.stateVersion !== 2
           && hasActiveAllowanceCooldown(reliabilityStore.getState(), key, Date.now())) {
-          debugForSession(ctx.sessionManager, "classifier", "allowance_cooldown_skip", { model: key, scope: "model-only" });
+          trace("allowance_cooldown_skip", { model: key, scope: "model-only" });
           return undefined;
         }
         if (config.reliability?.enabled !== false
           && config.reliability?.stateVersion === 2
           && isGenerationCircuitUnavailable(key)) {
-          debugForSession(ctx.sessionManager, "classifier", "generation_circuit_unavailable_skip", { model: key, scope: "model-only" });
+          trace("generation_circuit_unavailable_skip", { model: key, scope: "model-only" });
           return undefined;
         }
       }
@@ -623,6 +633,7 @@ function buildPipeline(
         maxTokens: config.classifier?.maxTokens,
         temperature: config.classifier?.temperature,
         method: config.classifier?.method,
+        ...(identity ? { identity } : {}),
         onProviderHttpResponse: async (providerModel, status, retryAfter, errorText) => {
           await recordProviderClassifierFailure(providerModel, status, retryAfter, errorText);
         },
