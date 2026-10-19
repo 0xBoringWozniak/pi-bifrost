@@ -13,7 +13,7 @@ function entry(level: LogLevel, bytes: number): LogEntry {
     id: nextId,
     level,
     retention: retentionFor(level, false),
-    destination: { key: "test", path: "/tmp/test.jsonl", legacy: false },
+    destination: { key: "test", path: "/tmp/test.jsonl", shared: false },
     line: `${"x".repeat(Math.max(0, bytes - 1))}\n`,
     bytes,
   };
@@ -34,6 +34,16 @@ describe("bounded logging queue", () => {
     assert.equal(result.accepted, true);
     assert.deepEqual(result.evicted.map((item) => item.id), [first.id]);
     assert.equal(queue.totalEntries, 2);
+  });
+
+  it("admits without eviction only when there is room", () => {
+    const queue = new BoundedQueue(1, 100);
+    const first = entry("debug", 10);
+    assert.equal(queue.tryAdmit(first), true);
+    const second = entry("error", 10);
+    assert.equal(queue.tryAdmit(second), false);
+    assert.equal(queue.totalEntries, 1);
+    assert.equal(queue.view().entryAt(0)?.id, first.id);
   });
 
   it("enforces the byte-size limit without sorting", () => {
@@ -107,6 +117,21 @@ describe("bounded logging queue", () => {
     newestQueue.admit(entry("trace", 10), newest);
     newestQueue.admit(entry("debug", 10), newest);
     assert.equal(newestQueue.admit(entry("warn", 10), newest).accepted, false);
+  });
+
+  it("frees enough pending bytes when in-flight writes hold capacity", () => {
+    const queue = new BoundedQueue(100, 100);
+    const policy = resolveOverflowPolicy("severity-first");
+    const entries = [entry("debug", 20), entry("debug", 20), entry("debug", 20), entry("debug", 20), entry("debug", 20)];
+    for (const item of entries) assert.equal(queue.admit(item, policy).accepted, true);
+    const inFlight = queue.drain(2, 1_000);
+    assert.equal(inFlight.length, 2);
+    const incoming = entry("error", 40);
+    const result = queue.admit(incoming, policy);
+    assert.equal(result.accepted, true, "the policy must account for in-flight bytes");
+    assert.equal(result.evicted.length, 2);
+    assert.equal(queue.totalBytes, 100);
+    queue.release(inFlight);
   });
 
   it("counts in-flight entries against both budgets until release", () => {

@@ -14,7 +14,7 @@ import {
   DEFAULT_MAX_ENTRIES,
   DEFAULT_MAX_FILE_SIZE_MB,
   DEFAULT_ROTATED_FILES,
-  LEGACY_DEFAULT_PATH,
+  DEFAULT_SHARED_PATH,
   type DebugConfig,
   type LogDestination,
   type LogIdentity,
@@ -28,6 +28,7 @@ export const UNATTRIBUTED_SESSION = "_unattributed";
 
 const MAX_FRAGMENT_LENGTH = 96;
 const MAX_CORRELATION_LENGTH = 200;
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
 function integerInRange(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max
@@ -47,8 +48,13 @@ function nonEmptyString(value: unknown): string | undefined {
 
 function resolveUserPath(cwd: string, value: string): string | null {
   if (value.includes("\0")) return null;
-  const expanded = value.startsWith("~") ? value.replace(/^~/, homedir()) : value;
+  const expanded = value.replace(/^~(?=$|[\\/])/, homedir());
   return normalize(isAbsolute(expanded) ? expanded : join(cwd, expanded));
+}
+
+function identityString(value: unknown): string | undefined {
+  const text = nonEmptyString(value);
+  return text ? text.slice(0, 256) : undefined;
 }
 
 /**
@@ -58,12 +64,12 @@ function resolveUserPath(cwd: string, value: string): string | null {
  */
 export function resolveDebugConfig(config: DebugConfig | undefined, cwd: string): ResolvedDebugConfig {
   const source = config && typeof config === "object" ? config : {};
-  const legacyRaw = nonEmptyString(source.path);
+  const sharedRaw = nonEmptyString(source.path);
   const scope = source.scope === "file" ? "file" : "session";
-  const legacyPath = legacyRaw
-    ? resolveUserPath(cwd, legacyRaw)
+  const sharedPath = sharedRaw
+    ? resolveUserPath(cwd, sharedRaw)
     : scope === "file"
-      ? resolveUserPath(cwd, LEGACY_DEFAULT_PATH)
+      ? resolveUserPath(cwd, DEFAULT_SHARED_PATH)
       : null;
   const directory = resolveUserPath(cwd, nonEmptyString(source.directory) ?? DEFAULT_DIRECTORY)
     ?? resolveUserPath(cwd, DEFAULT_DIRECTORY)
@@ -81,7 +87,7 @@ export function resolveDebugConfig(config: DebugConfig | undefined, cwd: string)
 
   return {
     enabled: source.enabled === true,
-    legacyPath,
+    sharedPath,
     level: parseLogLevel(source.level),
     directory,
     queue: { maxEntries, maxBytes, overflowPolicy },
@@ -103,13 +109,13 @@ export interface AgentEnvironmentIdentity {
  */
 export function agentIdentityFromEnv(env: NodeJS.ProcessEnv = process.env): AgentEnvironmentIdentity {
   if (env.PI_SUBAGENT_CHILD !== "1") return {};
-  const agentId = nonEmptyString(env.PI_SUBAGENT_CHILD_AGENT)
-    ?? nonEmptyString(env.PI_SUBAGENT_AGENT_ID)
-    ?? nonEmptyString(env.PI_SUBAGENT_RUN_ID);
-  const parentAgentId = nonEmptyString(env.PI_SUBAGENT_PARENT_AGENT_ID)
-    ?? nonEmptyString(env.PI_SUBAGENT_PARENT_RUN_ID);
-  const rootSessionId = nonEmptyString(env.PI_SUBAGENT_ROOT_SESSION_ID)
-    ?? nonEmptyString(env.PI_SUBAGENT_PARENT_SESSION_ID);
+  const agentId = identityString(env.PI_SUBAGENT_CHILD_AGENT)
+    ?? identityString(env.PI_SUBAGENT_AGENT_ID)
+    ?? identityString(env.PI_SUBAGENT_RUN_ID);
+  const parentAgentId = identityString(env.PI_SUBAGENT_PARENT_AGENT_ID)
+    ?? identityString(env.PI_SUBAGENT_PARENT_RUN_ID);
+  const rootSessionId = identityString(env.PI_SUBAGENT_ROOT_SESSION_ID)
+    ?? identityString(env.PI_SUBAGENT_PARENT_SESSION_ID);
   return {
     ...(agentId ? { agentId } : {}),
     ...(parentAgentId ? { parentAgentId } : {}),
@@ -145,11 +151,11 @@ export function createProcessIdentity(
 
 /** Merge an explicit session hint into the process identity. */
 export function mergeIdentity(base: LogIdentity, hint?: LogIdentityHint): LogIdentity {
-  const sessionId = nonEmptyString(hint?.sessionId);
+  const sessionId = identityString(hint?.sessionId);
   if (!sessionId) return base;
-  const agentId = nonEmptyString(hint?.agentId) ?? base.agentId;
-  const parentAgentId = nonEmptyString(hint?.parentAgentId) ?? base.parentAgentId;
-  const rootSessionId = nonEmptyString(hint?.rootSessionId)
+  const agentId = identityString(hint?.agentId) ?? base.agentId;
+  const parentAgentId = identityString(hint?.parentAgentId) ?? base.parentAgentId;
+  const rootSessionId = identityString(hint?.rootSessionId)
     ?? (base.agentId && base.rootSessionId !== UNATTRIBUTED_SESSION ? base.rootSessionId : sessionId);
   return {
     rootSessionId,
@@ -166,12 +172,14 @@ export function sanitizeFragment(value: string | undefined): string | undefined 
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   if (!trimmed || trimmed === "." || trimmed === "..") return undefined;
-  const safe = trimmed
+  let safe = trimmed
     .replace(/[^A-Za-z0-9._-]+/g, "_")
     .replace(/\.{2,}/g, "_")
     .replace(/^\.+/, "_")
-    .slice(0, MAX_FRAGMENT_LENGTH);
+    .slice(0, MAX_FRAGMENT_LENGTH)
+    .replace(/[. ]+$/g, "");
   if (!safe || safe === "." || safe === "..") return undefined;
+  if (WINDOWS_RESERVED.test(safe)) safe = `_${safe}`;
   return safe;
 }
 
@@ -181,8 +189,8 @@ function isInside(root: string, candidate: string): boolean {
 }
 
 export function destinationFor(config: ResolvedDebugConfig, identity: LogIdentity): LogDestination {
-  if (config.legacyPath) {
-    return { key: `legacy:${config.legacyPath}`, path: config.legacyPath, legacy: true };
+  if (config.sharedPath) {
+    return { key: `shared:${config.sharedPath}`, path: config.sharedPath, shared: true };
   }
   const root = sanitizeFragment(identity.rootSessionId) ?? UNATTRIBUTED_SESSION;
   const agent = sanitizeFragment(identity.agentId);
@@ -192,8 +200,8 @@ export function destinationFor(config: ResolvedDebugConfig, identity: LogIdentit
     : join(root, "main", `${run}.jsonl`);
   const candidate = join(config.directory, relativePath);
   if (isInside(config.directory, candidate)) {
-    return { key: candidate, path: candidate, legacy: false };
+    return { key: candidate, path: candidate, shared: false };
   }
   const fallback = join(config.directory, UNATTRIBUTED_SESSION, "main", `${run}.jsonl`);
-  return { key: fallback, path: fallback, legacy: false };
+  return { key: fallback, path: fallback, shared: false };
 }

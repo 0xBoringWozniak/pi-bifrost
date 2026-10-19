@@ -34,7 +34,7 @@ const dropOldest: OverflowPolicy = {
     if (queue.length === 0) return REJECT;
     const evict: LogEntry[] = [];
     let freed = 0;
-    const needed = queue.bytes + incoming.bytes - queue.maxBytes;
+    const needed = queue.totalBytes + incoming.bytes - queue.maxBytes;
     for (let index = 0; index < queue.length; index += 1) {
       if (freed >= needed && evict.length > 0) break;
       const entry = queue.entryAt(index);
@@ -51,7 +51,7 @@ const severityFirst: OverflowPolicy = {
   name: "severity-first",
   select(incoming, queue) {
     if (queue.length === 0) return REJECT;
-    const needed = queue.bytes + incoming.bytes - queue.maxBytes;
+    const needed = queue.totalBytes + incoming.bytes - queue.maxBytes;
     // Fast path for sustained uniform load: evict the oldest eligible entry,
     // which is all that byte or entry-count pressure usually requires.
     const head = queue.entryAt(0);

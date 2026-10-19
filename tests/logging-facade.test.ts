@@ -100,6 +100,22 @@ describe("debug facade with session-scoped storage", () => {
     }
   });
 
+  it("drains accepted events when logging is disabled before flush", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "bifrost-facade-pending-"));
+    const path = join(cwd, "trace.jsonl");
+    try {
+      setupDebug({ enabled: true, path }, cwd);
+      debug("router", "pending-before-disable");
+      setupDebug({ enabled: false }, cwd);
+      await flushDebug(1_000);
+      const contents = await readFile(path, "utf8");
+      assert.match(contents, /pending-before-disable/);
+    } finally {
+      setupDebug({ enabled: false }, cwd);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("is idempotent for identical setup and starts a new run after a config change", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "bifrost-facade-reload-"));
     try {

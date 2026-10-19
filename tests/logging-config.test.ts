@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { describe, it } from "node:test";
 import { mergeConfig, validateConfig } from "../config.ts";
@@ -32,7 +33,7 @@ function debugErrors(debug: unknown): string[] {
 describe("logging configuration", () => {
   it("defaults to bounded session-scoped storage", () => {
     const resolved = resolveDebugConfig({ enabled: true }, cwd);
-    assert.equal(resolved.legacyPath, null);
+    assert.equal(resolved.sharedPath, null);
     assert.equal(resolved.level, "debug");
     assert.equal(resolved.directory, join(cwd, ".pi", "bifrost", "logs"));
     assert.deepEqual(resolved.queue, { maxEntries: 1_000, maxBytes: 1_048_576, overflowPolicy: "severity-first" });
@@ -41,18 +42,29 @@ describe("logging configuration", () => {
     assert.equal(resolved.sink.maxFileSizeBytes, 10 * 1024 * 1024);
   });
 
-  it("keeps an explicit legacy path authoritative", () => {
-    const resolved = resolveDebugConfig({ enabled: true, path: ".pi/bifrost-debug.jsonl", scope: "session" }, cwd);
-    assert.equal(resolved.legacyPath, join(cwd, ".pi", "bifrost-debug.jsonl"));
-    const identity = mergeIdentity(createProcessIdentity({}, 1), { sessionId: "s" });
-    const destination = destinationFor(resolved, identity);
-    assert.equal(destination.legacy, true);
-    assert.equal(destination.path, resolved.legacyPath);
+  it("expands a home-relative directory without joining the user name", () => {
+    const resolved = resolveDebugConfig({ enabled: true, directory: "~/logs" }, cwd);
+    assert.equal(resolved.directory, join(homedir(), "logs"));
   });
 
-  it("treats scope file as the legacy default file", () => {
+  it("sanitizes Windows-reserved and trailing-dot fragments", () => {
+    assert.equal(sanitizeFragment("CON"), "_CON");
+    assert.equal(sanitizeFragment("name. "), "name");
+    assert.equal((sanitizeFragment("lpt1.log") ?? "").startsWith("_"), true);
+  });
+
+  it("keeps an explicit shared path authoritative", () => {
+    const resolved = resolveDebugConfig({ enabled: true, path: ".pi/bifrost-debug.jsonl", scope: "session" }, cwd);
+    assert.equal(resolved.sharedPath, join(cwd, ".pi", "bifrost-debug.jsonl"));
+    const identity = mergeIdentity(createProcessIdentity({}, 1), { sessionId: "s" });
+    const destination = destinationFor(resolved, identity);
+    assert.equal(destination.shared, true);
+    assert.equal(destination.path, resolved.sharedPath);
+  });
+
+  it("treats scope file as the shared default file", () => {
     const resolved = resolveDebugConfig({ enabled: true, scope: "file" }, cwd);
-    assert.equal(resolved.legacyPath, join(cwd, ".pi", "bifrost-debug.jsonl"));
+    assert.equal(resolved.sharedPath, join(cwd, ".pi", "bifrost-debug.jsonl"));
   });
 
   it("clamps unsafe values instead of allowing unbounded memory", () => {

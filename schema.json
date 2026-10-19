@@ -347,7 +347,7 @@
         },
         "path": {
           "type": "string",
-          "description": "Legacy explicit log file. When set it wins over session scoping and keeps the single-file destination. Default without a path: session-scoped files under .pi/bifrost/logs/."
+          "description": "Explicit shared log file. When set it wins over session scoping and writes one file for the process. Default without a path: session-scoped files under .pi/bifrost/logs/."
         },
         "level": {
           "type": "string",
@@ -359,7 +359,7 @@
           "type": "string",
           "enum": ["session", "file"],
           "default": "session",
-          "description": "session writes one run file per session/agent; file writes the legacy default file. An explicit path always wins."
+          "description": "session writes one run file per session/agent; file writes the shared default file. An explicit path always wins."
         },
         "directory": {
           "type": "string",

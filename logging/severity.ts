@@ -38,32 +38,41 @@ export function shouldEmit(minimum: LogLevel, level: LogLevel): boolean {
   return RANK[level] >= RANK[minimum];
 }
 
-// Ownership and record identity are reserved. Correlation identifiers stay
-// writable because session-aware callers supply them as metadata (and existing
-// trace consumers depend on them).
+// Ownership and record identity are reserved. Process correlation is applied
+// separately and cannot be overwritten by metadata; per-request correlation
+// identifiers stay writable because session-aware callers supply them.
+const DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
 const RESERVED_BASE = new Set([
   "ts", "level", "module", "event", "entryType", "duration_ms", "_meta_error",
   "root_session_id", "session_id", "run_id", "agent_id", "parent_agent_id", "process_id",
+  ...DANGEROUS_KEYS,
 ]);
 
-// Top-level channels that could carry raw user or provider text. Non-string
-// values stay (for example the probe report's numeric `error` count).
+// Top-level channels that could carry raw user or provider text. Primitive
+// counters stay (for example the probe report's numeric `error` count), while
+// strings and structured values are dropped before serialization.
 const SENSITIVE_KEYS = new Set([
   "prompt", "prompts", "message", "messages", "content", "response", "responsebody",
   "request", "requestbody", "body", "apikey", "api_key", "authorization", "secret",
-  "credentials", "endpoint", "url", "errortext", "errormessage", "stack",
+  "credentials", "endpoint", "url", "error", "errortext", "errormessage", "stack",
   "criteria", "systemprompt", "token", "accesstoken", "access_token",
-  "refreshtoken", "refresh_token", "password",
+  "refreshtoken", "refresh_token", "password", "output", "input", "text",
+  "stderr", "stdout", "detail", "providererror", "provider_error", "errorcode",
+  "error_code", "stacktrace",
 ]);
 
-/** Removes reserved fields and drops top-level string values in sensitive channels. */
+/** Removes reserved fields and drops string or structured values in sensitive channels. */
 export function sanitizeMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!meta) return {};
   const clean: Record<string, unknown> = {};
   for (const key of Object.keys(meta)) {
     if (RESERVED_BASE.has(key)) continue;
     const value = meta[key];
-    if (typeof value === "string" && value.length > 0 && SENSITIVE_KEYS.has(key.toLowerCase())) continue;
+    if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+      if (typeof value === "string" ? value.length > 0
+        : value !== null && typeof value === "object") continue;
+    }
     clean[key] = value;
   }
   return clean;
@@ -84,6 +93,9 @@ export interface BuildRecordInput {
 
 export function buildRecord(input: BuildRecordInput): Record<string, unknown> {
   const clean = sanitizeMeta(input.meta);
+  // Process correlation is authoritative; metadata may supply per-request
+  // correlation (request_correlation_id) but cannot spoof a process id.
+  for (const key of Object.keys(input.correlation)) delete clean[key];
   // Base and correlation fields first so metadata key order stays stable for
   // existing consumers; ownership fields are appended and cannot be overridden.
   const record: Record<string, unknown> = {
@@ -129,6 +141,7 @@ export function serializeRecord(
     try {
       const fallback: Record<string, unknown> = {};
       for (const key of Object.keys(record)) {
+        if (DANGEROUS_KEYS.has(key)) continue;
         const value = record[key];
         if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
           fallback[key] = value;

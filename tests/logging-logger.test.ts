@@ -104,6 +104,18 @@ describe("bifrost logger", () => {
     assert.equal(output[0]!.event, "callback");
   });
 
+  it("survives a metadata getter that throws", async () => {
+    const { logger, sinks } = create();
+    const meta: Record<string, unknown> = { ok: true };
+    Object.defineProperty(meta, "boom", { enumerable: true, get: () => { throw new Error("getter"); } });
+    logger.emit("router", "getter", meta);
+    await logger.flush(1_000);
+    const row = [...sinks.values()].flatMap(rows)[0]!;
+    assert.equal(row.event, "getter");
+    assert.equal(row._meta_error, "meta_threw");
+    assert.equal(Object.hasOwn(row, "ok"), false);
+  });
+
   it("does not let metadata override reserved fields and redacts string secrets", async () => {
     const { logger, sinks } = create();
     logger.emit("router", "collision", {
@@ -116,7 +128,10 @@ describe("bifrost logger", () => {
       prompt: "secret text",
       api_key: "key",
       token: "token",
+      errorMessage: "boom",
       error: 3,
+      request: { body: "secret" },
+      response: { text: "secret" },
       ok: true,
     });
     await logger.flush(1_000);
@@ -130,9 +145,24 @@ describe("bifrost logger", () => {
     assert.equal(row.request_correlation_id, "req-1");
     assert.equal(Object.hasOwn(row, "prompt"), false);
     assert.equal(Object.hasOwn(row, "api_key"), false);
-    assert.equal(Object.hasOwn(row, "token"), false);
+    assert.equal(Object.hasOwn(row, "token"), false);    assert.equal(Object.hasOwn(row, "errorMessage"), false);
+    assert.equal(Object.hasOwn(row, "request"), false);
+    assert.equal(Object.hasOwn(row, "response"), false);
     assert.equal(row.error, 3);
   });
+
+  it("keeps process correlation authoritative and ignores prototype keys", async () => {
+    const { logger, sinks } = create({}, { correlation: { run_correlation_id: "real-run" } });
+    const meta = JSON.parse('{"__proto__":{"polluted":true},"constructor":"x","run_correlation_id":"spoofed","ok":true}');
+    logger.emit("router", "spoof", meta);
+    await logger.flush(1_000);
+    const row = [...sinks.values()].flatMap(rows)[0]!;
+    assert.equal(row.run_correlation_id, "real-run");
+    assert.equal(row.ok, true);
+    assert.equal(Object.hasOwn(row, "constructor"), false);
+    assert.equal(({} as Record<string, unknown>).polluted, undefined);
+  });
+
 
   it("serializes serialization failures with a bounded fallback record", async () => {
     const { logger, sinks } = create();
@@ -151,6 +181,24 @@ describe("bifrost logger", () => {
     const stats = logger.stats();
     assert.equal(stats.droppedByReason.oversized, 1);
     assert.equal(stats.droppedTotal, 1);
+  });
+
+  it("skips lazy metadata when entry-count pressure cannot admit the event", async () => {
+    const { logger } = create({
+      level: "trace",
+      queue: { maxEntries: 1, maxBytes: 64 * 1024, overflowPolicy: "severity-first" },
+      drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "capacity" });
+    logger.emit("router", "warn-event", undefined, { level: "warn" });
+    let calls = 0;
+    logger.emit("router", "debug-event", () => {
+      calls += 1;
+      return { expensive: true };
+    });
+    assert.equal(calls, 0, "metadata must not run for a pre-admission rejection");
+    await logger.flush(1_000);
+    assert.equal(logger.stats().droppedByReason.queue_capacity, 1);
   });
 
   it("writes JSONL in FIFO order and batches multiple events", async () => {
@@ -272,6 +320,40 @@ describe("bifrost logger", () => {
     assert.ok(rows(activeSink).some((row) => row.event === "recovered"));
   });
 
+  it("does not hold post-session events for the next session", async () => {
+    const { logger, sinks } = create();
+    logger.bindSession({ sessionId: "sess-before" });
+    logger.emit("router", "in-session");
+    await logger.flush(1_000);
+    logger.endSession();
+    logger.emit("router", "after-session");
+    await delay(150);
+    const row = allRows(sinks).find((entry) => entry.event === "after-session");
+    assert.ok(row, "the event must flush without waiting for another session");
+    assert.match(row.destination, /_unattributed[\\/]main[\\/]/);
+  });
+
+  it("drains pending bootstrap events when the logger closes", async () => {
+    const { logger, sinks } = create();
+    logger.emit("bifrost", "startup", { phase: "boot" }, { level: "info", protected: true });
+    await logger.close(1_000);
+    const output = allRows(sinks);
+    assert.equal(output.length, 1);
+    assert.equal(output[0]!.event, "startup");
+  });
+
+  it("bounds idle sinks across many session switches", async () => {
+    const { logger } = create();
+    for (let index = 0; index < 24; index += 1) {
+      logger.bindSession({ sessionId: `session-${index}` });
+      logger.emit("router", "event");
+      await logger.flush(1_000);
+    }
+    assert.equal(logger.stats().openSinks <= 16, true, `openSinks=${logger.stats().openSinks}`);
+    assert.equal(logger.stats().openSinks >= 1, true);
+    await logger.close(500);
+  });
+
   it("returns from flush at the deadline when a sink stalls", async () => {
     const { logger, sinks } = create();
     logger.emit("router", "stalled");
@@ -297,6 +379,7 @@ describe("bifrost logger", () => {
       queue: { maxEntries: 1, maxBytes: 64 * 1024, overflowPolicy: "severity-first" },
       drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
     });
+    logger.bindSession({ sessionId: "sess-drop" });
     logger.emit("router", "first");
     logger.emit("router", "second");
     logger.emit("router", "third");
@@ -307,6 +390,39 @@ describe("bifrost logger", () => {
     assert.deepEqual(summary!.counts, { debug: 2 });
     assert.equal(summary!.dropped_total, 2);
     assert.ok(output.some((row) => row.event === "third"));
+  });
+
+  it("reports the final drop summary while closing", async () => {
+    const { logger, sinks } = create({
+      queue: { maxEntries: 1, maxBytes: 64 * 1024, overflowPolicy: "severity-first" },
+      drain: { intervalMs: 60_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "sess-close" });
+    logger.emit("router", "first");
+    logger.emit("router", "second");
+    await logger.close(1_000);
+    const output = allRows(sinks);
+    assert.ok(output.some((row) => row.event === "second"));
+    const summary = output.find((row) => row.module === "logger" && row.event === "events_dropped");
+    assert.ok(summary, `expected a close-time drop summary, got ${JSON.stringify(output)}`);
+    assert.equal(summary!.dropped_total, 1);
+  });
+
+  it("counts a sink construction failure instead of throwing", async () => {
+    const config = resolveDebugConfig(
+      { enabled: true, directory: join(tmpdir(), "bifrost-logger-factory") },
+      join(tmpdir(), "bifrost-logger-project"),
+    );
+    const logger = new BifrostLogger({
+      config,
+      identity: createProcessIdentity({}, 4242),
+      sinkFactory: () => { throw new Error("factory failed"); },
+    });
+    logger.emit("router", "factory");
+    await logger.flush(1_000);
+    assert.equal(logger.stats().writeFailures, 1);
+    assert.equal(logger.stats().droppedTotal, 1);
+    await logger.close(1_000);
   });
 
   it("degrades instead of retrying a persistently failing sink forever", async () => {

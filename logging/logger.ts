@@ -48,6 +48,7 @@ const SYNC_FLUSH_MAX_FILES = 8;
 const MAX_FLUSH_TIMEOUT_MS = 5_000;
 const FAILURE_BACKOFF_THRESHOLD = 5;
 const DIAGNOSTIC_INTERVAL_MS = 30_000;
+const MAX_IDLE_SINKS = 16;
 
 interface BootstrapRecord {
   readonly level: LogLevel;
@@ -122,10 +123,12 @@ export class BifrostLogger {
   private bootstrap: Array<{ record: BootstrapRecord; bytes: number }> = [];
   private bootstrapBytes = 0;
   private bootstrapTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Once a session has ended, process events are no longer startup events. */
+  private bootstrapSealed = false;
   private pumpTimer: ReturnType<typeof setTimeout> | null = null;
   private pumping = false;
   private accepting = true;
-  private closing = false;
+  private closePromise: Promise<void> | null = null;
   private stopped = false;
   private entrySequence = 0;
   private consecutiveFailures = 0;
@@ -193,7 +196,9 @@ export class BifrostLogger {
   }
 
   endSession(): void {
+    this.finalizeBootstrap();
     this.sessionIdentity = null;
+    this.bootstrapSealed = true;
   }
 
   emit(
@@ -207,10 +212,17 @@ export class BifrostLogger {
     if (!this.accepting || !this.config.enabled) return;
     const level = options?.level ?? "debug";
     if (!shouldEmit(this.config.level, level)) return;
+    const protectedEvent = options?.protected === true;
+    const retention = retentionFor(level, protectedEvent);
+    const bootstrap = this.needsBootstrap(options?.identity);
+    if (!bootstrap && this.wouldRejectBeforePreparation(retention)) {
+      this.recordDrop(level, "queue_capacity");
+      return;
+    }
     const outcome = evaluateMeta(metaSource);
     const record: BootstrapRecord = {
       level,
-      retention: retentionFor(level, options?.protected === true),
+      retention,
       module,
       event,
       entryType,
@@ -219,7 +231,7 @@ export class BifrostLogger {
       ...(durationMs !== undefined ? { durationMs: Math.round(durationMs * 1_000) / 1_000 } : {}),
       ...(outcome.error ? { metaError: outcome.error } : {}),
     };
-    if (this.needsBootstrap(options?.identity)) {
+    if (bootstrap) {
       this.addBootstrap(record, options?.identity);
       return;
     }
@@ -244,6 +256,7 @@ export class BifrostLogger {
       largestQueuedBytes: this.queue.largestObservedBytes,
       lastFlushAt: this.statsValue.lastFlushAt,
       lastWriteFailureAt: this.statsValue.lastWriteFailureAt,
+      openSinks: this.sinks.size,
     };
   }
 
@@ -275,19 +288,28 @@ export class BifrostLogger {
   }
 
   /** Stop accepting work, drain what is already accepted, then close sinks. */
-  async close(timeoutMs = 250): Promise<void> {
-    if (this.closing) return this.flush(timeoutMs);
-    this.closing = true;
-    this.accepting = false;
+  close(timeoutMs = 250): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = this.closeInternal(timeoutMs);
+    return this.closePromise;
+  }
+
+  private async closeInternal(timeoutMs: number): Promise<void> {
+    // Adopt bootstrap events before blocking new ones; otherwise closing a
+    // logger that never saw a session would silently discard startup history.
     this.finalizeBootstrap();
+    this.accepting = false;
     this.schedulePump(0);
     await this.flush(timeoutMs);
     this.stopped = true;
     this.clearTimers();
     const sinks = [...this.sinks.values()];
     this.sinks.clear();
+    const closings = sinks.map((sink) => Promise.resolve()
+      .then(() => sink.close())
+      .catch(() => undefined));
     await Promise.race([
-      Promise.allSettled(sinks.map((sink) => sink.close())),
+      Promise.allSettled(closings),
       new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, Math.min(timeoutMs, 1_000));
         timer.unref?.();
@@ -335,7 +357,8 @@ export class BifrostLogger {
     // session. Reuse the identity object so destination lookup stays cached.
     if (hint.sessionId === current.sessionId
       && (hint.rootSessionId === undefined || hint.rootSessionId === current.rootSessionId)
-      && (hint.agentId === undefined || hint.agentId === current.agentId)) {
+      && (hint.agentId === undefined || hint.agentId === current.agentId)
+      && (hint.parentAgentId === undefined || hint.parentAgentId === current.parentAgentId)) {
       return current;
     }
     return mergeIdentity(this.baseIdentity, hint);
@@ -349,15 +372,26 @@ export class BifrostLogger {
     return destination;
   }
 
+  /**
+   * Cheap pre-admission check that avoids evaluating lazy metadata when the
+   * queue is entry-count full and no eligible pending victim exists. Byte
+   * pressure still requires the record to be prepared.
+   */
+  private wouldRejectBeforePreparation(retention: number): boolean {
+    return this.queue.totalEntries >= this.config.queue.maxEntries
+      && this.queue.minRetention > retention;
+  }
+
   private needsBootstrap(hint?: LogIdentityHint): boolean {
-    if (this.config.legacyPath) return false;
+    if (this.config.sharedPath) return false;
     if (hint?.sessionId) return false;
     if (this.sessionIdentity) return false;
+    if (this.bootstrapSealed) return false;
     return this.baseIdentity.rootSessionId === UNATTRIBUTED_SESSION;
   }
 
   private prepare(record: BootstrapRecord, identity: LogIdentity): LogEntry | null {
-    const built = buildRecord({
+    const input = {
       now: record.now,
       module: record.module,
       event: record.event,
@@ -368,7 +402,19 @@ export class BifrostLogger {
       meta: record.meta,
       ...(record.durationMs !== undefined ? { durationMs: record.durationMs } : {}),
       ...(record.metaError !== undefined ? { metaError: record.metaError } : {}),
-    });
+    } as const;
+    let built: Record<string, unknown>;
+    try {
+      built = buildRecord(input);
+    } catch {
+      // A hostile getter or proxy must not escape into the routing hot path.
+      try {
+        built = buildRecord({ ...input, meta: undefined, metaError: "meta_threw" });
+      } catch {
+        this.recordDrop(record.level, "oversized");
+        return null;
+      }
+    }
     const serialized = serializeRecord(built, MAX_ENTRY_BYTES);
     if (!serialized) {
       this.recordDrop(record.level, "oversized");
@@ -455,8 +501,12 @@ export class BifrostLogger {
     const target = identity ?? this.currentIdentity();
     for (const record of records) {
       const entry = this.prepare(record.record, target);
-      if (entry) this.enqueue(entry);
+      if (!entry) continue;
+      // Startup records are older than any accepted event; if the queue is
+      // full, drop the startup record rather than evicting live work.
+      if (!this.queue.tryAdmit(entry)) this.recordDrop(entry.level, "queue_capacity");
     }
+    if (this.queue.pendingEntryCount > 0) this.schedulePump(0);
   }
 
   private finalizeBootstrapSync(): void {
@@ -468,8 +518,9 @@ export class BifrostLogger {
     for (const record of records) {
       const entry = this.prepare(record.record, target);
       if (!entry) continue;
-      const result = this.queue.admit(entry, this.overflow);
-      if (!result.accepted) this.recordDrop(entry.level, "queue_capacity");
+      // Exit path: preserve already-accepted events instead of evicting them
+      // for older startup records.
+      if (!this.queue.tryAdmit(entry)) this.recordDrop(entry.level, "queue_capacity");
     }
   }
 
@@ -527,20 +578,41 @@ export class BifrostLogger {
         for (const entry of group.entries) this.recordDrop(entry.level, "sink_degraded");
         continue;
       }
-      const sink = this.sinkFor(group.destination);
       let write: Promise<void>;
       try {
-        write = sink.write(group.entries);
+        write = this.sinkFor(group.destination).write(group.entries);
       } catch (error) {
-        this.onWriteFailure(group.entries, bytes, error, group.destination);
+        try {
+          this.onWriteFailure(group.entries, bytes, error, group.destination);
+        } catch {
+          // Failure accounting must never escape the pump.
+        }
         continue;
       }
       write
-        .then(() => this.onWriteSuccess(group.entries, bytes))
-        .catch((error: unknown) => this.onWriteFailure(group.entries, bytes, error, group.destination))
+        .then(
+          () => {
+            try {
+              this.onWriteSuccess(group.entries, bytes);
+            } catch {
+              // A bookkeeping failure must not be reported as a write failure.
+            }
+          },
+          (error: unknown) => {
+            try {
+              this.onWriteFailure(group.entries, bytes, error, group.destination);
+            } catch {
+              // Failure accounting must never escape the async boundary.
+            }
+          },
+        )
         .finally(() => {
           this.activeWrites.delete(write);
-          this.maybeSettle();
+          try {
+            this.maybeSettle();
+          } catch {
+            // Settling is best-effort; flush deadlines still release waiters.
+          }
         });
       this.activeWrites.add(write);
     }
@@ -591,7 +663,7 @@ export class BifrostLogger {
       ? (error as { code: string }).code
       : "write_failed";
     try {
-      process.stderr.write(`[bifrost] debug logging degraded (${code}) for ${destination.legacy ? "legacy path" : "session log"}\n`);
+      process.stderr.write(`[bifrost] debug logging degraded (${code}) for ${destination.shared ? "shared file" : "session log"}\n`);
     } catch {
       // Never let diagnostics fail the caller.
     }
@@ -608,15 +680,19 @@ export class BifrostLogger {
       if (value > 0) counts[level] = value;
     }
     const reasons: Partial<Record<DropReason, number>> = {};
+    let dominantReason: DropReason = "queue_capacity";
+    let dominantCount = 0;
     for (const reason of ["queue_capacity", "oversized", "write_failure", "sink_degraded", "closed"] as const) {
       const value = this.pendingDropByReason[reason];
       if (value > 0) reasons[reason] = value;
+      if (value > dominantCount) {
+        dominantCount = value;
+        dominantReason = reason;
+      }
     }
     const total = this.pendingDropTotal;
-    this.pendingDropTotal = 0;
-    this.pendingDropByLevel = emptyByLevel();
-    this.pendingDropByReason = emptyByReason();
     this.emittingSummary = true;
+    let admitted = false;
     try {
       // Bypass the bootstrap stage: the summary describes events admitted
       // before identity resolution, so it belongs to the current run now.
@@ -631,13 +707,19 @@ export class BifrostLogger {
           counts,
           reasons,
           dropped_total: total,
-          reason: Object.keys(reasons)[0] ?? "queue_capacity",
+          reason: dominantReason,
         },
       }, this.currentIdentity());
-      if (entry) this.enqueue(entry);
+      // A diagnostic summary must never evict a real event; retry later if the
+      // queue is currently full.
+      admitted = entry !== null && this.queue.tryAdmit(entry);
     } finally {
       this.emittingSummary = false;
     }
+    if (!admitted) return;
+    this.pendingDropTotal = 0;
+    this.pendingDropByLevel = emptyByLevel();
+    this.pendingDropByReason = emptyByReason();
     if (this.queue.pendingEntryCount > 0) this.schedulePump(0);
   }
 
@@ -645,7 +727,24 @@ export class BifrostLogger {
     if (this.queue.totalEntries > 0 || this.activeWrites.size > 0 || this.pumping) return;
     this.maybeEmitDropSummary();
     if (this.queue.totalEntries > 0 || this.activeWrites.size > 0) return;
+    this.pruneIdleSinks();
     this.resolveWaiters();
+  }
+
+  /** Session switching creates a sink per run destination; keep that set bounded. */
+  private pruneIdleSinks(): void {
+    if (this.sinks.size <= MAX_IDLE_SINKS) return;
+    const currentKey = this.destinationForIdentity(this.currentIdentity()).key;
+    for (const [key, sink] of [...this.sinks]) {
+      if (this.sinks.size <= MAX_IDLE_SINKS) break;
+      if (key === currentKey) continue;
+      this.sinks.delete(key);
+      try {
+        void Promise.resolve(sink.close()).catch(() => undefined);
+      } catch {
+        // A failing idle sink must not destabilize the logger.
+      }
+    }
   }
 
   private resolveWaiters(): void {

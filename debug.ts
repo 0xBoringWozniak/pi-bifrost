@@ -2,7 +2,7 @@
 // Configuration-first, best-effort diagnostics. The routing hot path never
 // performs filesystem I/O and never waits for logging capacity.
 //
-// Legacy configuration keeps its meaning:
+// An explicit path writes one shared file:
 //   { "debug": { "enabled": true, "path": ".pi/bifrost-debug.jsonl" } }
 // Without an explicit path, logs are session-scoped:
 //   .pi/bifrost/logs/<root-session>/main/<run>.jsonl
@@ -40,6 +40,18 @@ export interface DebugBindOptions {
 let active: BifrostLogger | null = null;
 let activeKey: string | null = null;
 let exitHookInstalled = false;
+const retiring = new Set<Promise<unknown>>();
+const retiringLoggers = new Set<BifrostLogger>();
+
+function retire(logger: BifrostLogger): void {
+  retiringLoggers.add(logger);
+  const tracked = logger.close(250).catch(() => undefined);
+  retiring.add(tracked);
+  void tracked.finally(() => {
+    retiring.delete(tracked);
+    retiringLoggers.delete(logger);
+  });
+}
 
 const noopStop = (_meta?: DebugMetaSource, _options?: DebugEmitOptions): void => {};
 
@@ -51,6 +63,7 @@ function installExitHook(): void {
   process.on("exit", () => {
     try {
       active?.flushSyncBounded();
+      for (const logger of retiringLoggers) logger.flushSyncBounded();
     } catch {
       // Logging never aborts process exit.
     }
@@ -77,7 +90,7 @@ export function setupDebug(cfg: DebugConfig, cwd: string): void {
 
   if (resolved.enabled) {
     try {
-      mkdirSync(resolved.legacyPath ? dirname(resolved.legacyPath) : resolved.directory, {
+      mkdirSync(resolved.sharedPath ? dirname(resolved.sharedPath) : resolved.directory, {
         recursive: true,
         mode: 0o700,
       });
@@ -87,7 +100,7 @@ export function setupDebug(cfg: DebugConfig, cwd: string): void {
       } catch {
         // Ignore stderr failures.
       }
-      void previous?.close(250);
+      if (previous) retire(previous);
       return;
     }
 
@@ -109,7 +122,7 @@ export function setupDebug(cfg: DebugConfig, cwd: string): void {
     installExitHook();
   }
 
-  if (previous) void previous.close(250);
+  if (previous) retire(previous);
 }
 
 /** Associate the current process with a Pi session. Safe when logging is off. */
@@ -122,7 +135,11 @@ export function bindDebugSession(session: DebugSessionLike | undefined, options?
     return;
   }
   if (typeof id !== "string" || id.length === 0) return;
-  active.bindSession({ sessionId: id, ...options });
+  try {
+    active.bindSession({ sessionId: id, ...options });
+  } catch {
+    // Diagnostics must never affect the host session lifecycle.
+  }
 }
 
 /** Return subsequent contextless events to the process fallback. */
@@ -142,7 +159,11 @@ export function debug(
   meta?: DebugMetaSource,
   options?: DebugEmitOptions,
 ): void {
-  active?.emit(module, event, meta, options);
+  try {
+    active?.emit(module, event, meta, options);
+  } catch {
+    // Diagnostics must never affect routing or the caller.
+  }
 }
 
 /**
@@ -162,26 +183,50 @@ export function debugMeasure(
     if (!logger?.accepts(level)) return;
     const identity = stopOptions?.identity ?? options?.identity;
     const protectedEvent = stopOptions?.protected ?? options?.protected;
-    logger.emit(
-      module,
-      event,
-      meta,
-      {
-        level,
-        ...(identity ? { identity } : {}),
-        ...(protectedEvent ? { protected: true } : {}),
-      },
-      "measure",
-      performance.now() - startedAt,
-    );
+    try {
+      logger.emit(
+        module,
+        event,
+        meta,
+        {
+          level,
+          ...(identity ? { identity } : {}),
+          ...(protectedEvent ? { protected: true } : {}),
+        },
+        "measure",
+        performance.now() - startedAt,
+      );
+    } catch {
+      // Diagnostics must never affect the measured operation.
+    }
   };
 }
 
 /** Best-effort bounded drain for awaited host shutdown hooks. */
 export async function flushDebug(timeoutMs = 250): Promise<void> {
   const logger = active;
-  if (!logger) return;
-  await logger.flush(timeoutMs);
+  const pending: Promise<unknown>[] = [...retiring];
+  if (logger) {
+    try {
+      pending.push(logger.flush(timeoutMs));
+    } catch {
+      // A synchronous logger failure must not block host shutdown.
+    }
+  }
+  if (pending.length === 0) return;
+  const budget = Math.min(Math.max(Number.isFinite(timeoutMs) ? timeoutMs : 0, 0), 5_000);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, budget);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /** Internal health snapshot. Returns null when logging is disabled. */

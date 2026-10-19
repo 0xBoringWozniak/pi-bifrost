@@ -13,6 +13,11 @@ export interface FileSinkOptions {
   readonly onFailure?: (error: unknown) => void;
 }
 
+function isMissingPath(error: unknown): boolean {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 export class AsyncFileSink implements LogSink {
   private chain: Promise<void> = Promise.resolve();
   private directoryReady = false;
@@ -47,11 +52,17 @@ export class AsyncFileSink implements LogSink {
     try {
       await this.writeOnce(payload);
     } catch (firstError) {
+      // Retry only a missing directory/file race. Retrying after a partial
+      // write (ENOSPC, EIO) could duplicate lines, so fail the batch instead.
+      if (!isMissingPath(firstError)) {
+        this.options.onFailure?.(firstError);
+        throw firstError;
+      }
       this.directoryReady = false;
       try {
         await this.writeOnce(payload);
       } catch (secondError) {
-        this.options.onFailure?.(secondError ?? firstError);
+        this.options.onFailure?.(secondError);
         throw secondError;
       }
     }
@@ -88,6 +99,8 @@ export class AsyncFileSink implements LogSink {
     const old = `${path}.old`;
     const keep = this.options.rotatedFiles;
     if (keep <= 1) {
+      // Windows refuses to replace an existing target, so remove it first.
+      await rm(old, { force: true }).catch(() => undefined);
       await rename(path, old);
       return;
     }
@@ -96,6 +109,7 @@ export class AsyncFileSink implements LogSink {
       await rename(`${old}.${index}`, `${old}.${index + 1}`).catch(() => undefined);
     }
     await rename(old, `${old}.1`).catch(() => undefined);
+    await rm(old, { force: true }).catch(() => undefined);
     await rename(path, old);
   }
 }

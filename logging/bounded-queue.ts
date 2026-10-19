@@ -8,8 +8,10 @@ import type { OverflowPolicy } from "./overflow-policy.ts";
 
 export interface QueueView {
   readonly length: number;
-  /** Pending bytes only; in-flight entries cannot be evicted. */
-  readonly bytes: number;
+  /** Total admitted entries/bytes, including in-flight writes. */
+  readonly totalEntries: number;
+  readonly totalBytes: number;
+  readonly maxEntries: number;
   readonly maxBytes: number;
   /** Lowest retention currently pending, or Infinity when empty. */
   readonly minRetention: number;
@@ -78,7 +80,9 @@ export class BoundedQueue {
   view(): QueueView {
     return {
       length: this.pendingEntryCount,
-      bytes: this.pendingBytesValue,
+      totalEntries: this.totalEntries,
+      totalBytes: this.totalBytes,
+      maxEntries: this.maxEntries,
       maxBytes: this.maxBytes,
       minRetention: this.minRetentionValue,
       entryAt: (index: number) => this.pendingAt(index),
@@ -108,6 +112,13 @@ export class BoundedQueue {
     }
     this.push(entry);
     return { accepted: true, evicted: [] };
+  }
+
+  /** Admit only when the queue already has room; never evicts a real event. */
+  tryAdmit(entry: LogEntry): boolean {
+    if (this.maxEntries < 1 || entry.bytes > this.maxBytes || !this.fits(entry.bytes, 1)) return false;
+    this.push(entry);
+    return true;
   }
 
   /** Move up to the batch limits from the head into the in-flight budget. */

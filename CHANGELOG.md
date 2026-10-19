@@ -5,7 +5,7 @@ All notable changes to pi-bifrost are documented here.
 ## [Unreleased]
 
 ### Changed
-- Debug logging is now a bounded, severity-aware subsystem. Events are filtered before metadata is prepared, admitted through a byte- and entry-limited queue with `severity-first` overflow, batched asynchronously, and written per session/run file. Existing `debug()` and `debugMeasure()` calls and explicit `debug.path` configurations keep working; without a path, logs move to `.pi/bifrost/logs/<root-session>/...` so concurrent processes and subagents never share a writer.
+- Debug logging is now a bounded, severity-aware subsystem. Events are filtered before metadata is prepared, admitted through a byte- and entry-limited queue with configurable `severity-first`, `drop-oldest`, or `drop-newest` overflow, batched asynchronously, and written per session/run file. New optional `debug.level`, `scope`, `directory`, `queue`, `drain`, and `sink` settings tune retention, batching, and rotation. Without an explicit `debug.path`, logs move to `.pi/bifrost/logs/<root-session>/...` so concurrent processes and subagents never share a writer; an explicit path keeps one shared file.
 
 ### Added
 - Experimental `pi-bifrost/router` API over caller-supplied snapshots, shipped as JavaScript with TypeScript declarations. Resolution is advisory; it does not reserve or dispatch a model.

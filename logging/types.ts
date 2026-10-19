@@ -19,7 +19,7 @@ export const DEFAULT_MAX_BATCH_ENTRIES = 256;
 export const DEFAULT_MAX_FILE_SIZE_MB = 10;
 export const DEFAULT_ROTATED_FILES = 3;
 export const DEFAULT_DIRECTORY = ".pi/bifrost/logs";
-export const LEGACY_DEFAULT_PATH = ".pi/bifrost-debug.jsonl";
+export const DEFAULT_SHARED_PATH = ".pi/bifrost-debug.jsonl";
 export const FAILURE_BACKOFF_MS = 30_000;
 
 export interface DebugQueueConfig {
@@ -46,10 +46,10 @@ export interface DebugSinkConfig {
 
 export interface DebugConfig {
   enabled?: boolean;
-  /** Legacy explicit file destination. When set, it wins over session scoping. */
+  /** Explicit shared-file destination. When set, it wins over session scoping. */
   path?: string;
   level?: LogLevel;
-  /** `session` is the default. `file` uses the legacy default file path. */
+  /** `session` is the default. `file` uses the shared default file path. */
   scope?: "session" | "file";
   directory?: string;
   queue?: DebugQueueConfig;
@@ -59,8 +59,8 @@ export interface DebugConfig {
 
 export interface ResolvedDebugConfig {
   readonly enabled: boolean;
-  /** Absolute legacy file destination, or null for session-scoped storage. */
-  readonly legacyPath: string | null;
+  /** Absolute shared-file destination, or null for session-scoped storage. */
+  readonly sharedPath: string | null;
   readonly level: LogLevel;
   /** Absolute session-scoped logging root. */
   readonly directory: string;
@@ -103,8 +103,8 @@ export interface LogDestination {
   readonly key: string;
   /** Absolute file path. */
   readonly path: string;
-  /** Legacy single-file destination shared by explicit `debug.path` configs. */
-  readonly legacy: boolean;
+  /** Shared single-file destination used by explicit `debug.path` configs. */
+  readonly shared: boolean;
 }
 
 export interface LogEntry {
@@ -119,7 +119,7 @@ export interface LogEntry {
 }
 
 export interface LogSink {
-  /** Serialize writes internally. Resolve when the batch is durable or failed. */
+  /** Serialize writes internally. Resolve when the batch is appended or failed. */
   write(batch: readonly LogEntry[]): Promise<void>;
   /** Wait for all writes accepted by this sink. */
   flush(): Promise<void>;
@@ -145,6 +145,7 @@ export interface LoggerStats {
   readonly largestQueuedBytes: number;
   readonly lastFlushAt: number | null;
   readonly lastWriteFailureAt: number | null;
+  readonly openSinks: number;
 }
 
 export interface DebugEmitOptions {
