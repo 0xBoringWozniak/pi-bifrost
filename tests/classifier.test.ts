@@ -27,7 +27,7 @@ async function captureClassifierLogs(run: () => Promise<unknown>): Promise<{ res
   console.error = (...values: unknown[]) => { stderr.push(values.map(String).join(" ")); };
   try {
     const result = await run();
-    await flushDebug();
+    await flushDebug(5_000);
     return { result, debugText: readFileSync(path, "utf8"), stderrText: stderr.join("\n") };
   } finally {
     console.error = originalError;
