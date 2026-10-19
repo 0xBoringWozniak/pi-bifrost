@@ -15,6 +15,8 @@ interface WritableFileHandle {
     length: number,
     position: number | null,
   ): Promise<{ bytesWritten: number; buffer: Buffer }>;
+  stat(): Promise<{ size: number }>;
+  truncate(length: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -84,6 +86,8 @@ export class AsyncFileSink implements LogSink {
   private readonly destination: LogDestination;
   private readonly options: FileSinkOptions;
   private readonly openFile: (path: string, flags: number, mode: number) => Promise<WritableFileHandle>;
+  /** Pre-append size to restore after an incomplete write, if cleanup failed. */
+  private repairTo: number | null = null;
 
   constructor(destination: LogDestination, options: FileSinkOptions) {
     this.destination = destination;
@@ -160,6 +164,26 @@ export class AsyncFileSink implements LogSink {
     }
   }
 
+  /**
+   * Restore the file to its pre-failure size before appending again. Immediate
+   * cleanup is attempted after a partial write; this deferred path covers the
+   * case where the disk is still failing at that moment.
+   */
+  private async prepareAppend(handle: WritableFileHandle): Promise<number> {
+    const current = (await handle.stat()).size;
+    const target = this.repairTo;
+    if (target === null) return current;
+    if (current < target) {
+      // The file was replaced or externally truncated, so the incomplete
+      // prefix is already gone. Truncating to the old size would extend it.
+      this.repairTo = null;
+      return current;
+    }
+    await handle.truncate(target);
+    this.repairTo = null;
+    return target;
+  }
+
   private async append(payload: string): Promise<void> {
     if (!this.destination.root) {
       // Explicit shared path: preserve historical append semantics.
@@ -171,9 +195,24 @@ export class AsyncFileSink implements LogSink {
     const handle = await this.openFile(this.destination.path, flags, 0o600);
     let primaryFailure: unknown;
     let complete = false;
+    let startSize: number | undefined;
     try {
-      await writeComplete(handle, payload);
-      complete = true;
+      startSize = await this.prepareAppend(handle);
+      try {
+        await writeComplete(handle, payload);
+        complete = true;
+      } catch (error) {
+        primaryFailure = error;
+        if (error instanceof UncertainWriteError) {
+          try {
+            // Remove the incomplete JSONL prefix before any later append.
+            await handle.truncate(startSize);
+          } catch {
+            // Keep the pre-write size so the next append can repair it.
+            this.repairTo = startSize;
+          }
+        }
+      }
     } catch (error) {
       primaryFailure = error;
     }

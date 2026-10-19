@@ -13,7 +13,47 @@ interface FakeHandle {
     length?: number | string | null,
     position?: number | null,
   ): Promise<{ bytesWritten: number; buffer: Buffer }>;
+  stat(): Promise<{ size: number }>;
+  truncate(length: number): Promise<void>;
   close(): Promise<void>;
+}
+
+interface BufferedFileState {
+  content: Buffer;
+  calls: number;
+  failOnCall?: number;
+  truncateFails?: boolean;
+}
+
+function bufferedHandle(state: BufferedFileState, chunkSize: number): FakeHandle {
+  return {
+    async write(data, offset, length) {
+      state.calls += 1;
+      if (state.failOnCall === state.calls) {
+        const error = new Error("simulated partial-write failure");
+        (error as { code?: string }).code = "EIO";
+        throw error;
+      }
+      const buffer = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+      const start = typeof offset === "number" ? offset : 0;
+      const size = typeof length === "number" ? Math.min(length, buffer.length - start) : buffer.length - start;
+      const count = Math.min(chunkSize, size);
+      state.content = Buffer.concat([state.content, buffer.subarray(start, start + count)]);
+      return { bytesWritten: count, buffer };
+    },
+    async stat() {
+      return { size: state.content.length };
+    },
+    async truncate(length) {
+      if (state.truncateFails) {
+        const error = new Error("simulated truncate failure");
+        (error as { code?: string }).code = "EIO";
+        throw error;
+      }
+      state.content = state.content.subarray(0, length);
+    },
+    async close() {},
+  };
 }
 
 function entry(line: string, id: number, destination: LogDestination): LogEntry {
@@ -47,6 +87,10 @@ function chunkedHandle(
     async close() {
       closes += 1;
     },
+    async stat() {
+      return { size: 0 };
+    },
+    async truncate() {},
   };
   return { handle, chunks, closes: () => closes };
 }
@@ -101,6 +145,10 @@ describe("async file sink writes", () => {
           }
           throw failure;
         },
+        async stat() {
+          return { size: 0 };
+        },
+        async truncate() {},
         async close() {},
       };
       const sink = new AsyncFileSink(destination, {
@@ -145,6 +193,10 @@ describe("async file sink writes", () => {
           }
           throw missing;
         },
+        async stat() {
+          return { size: 0 };
+        },
+        async truncate() {},
         async close() {},
       };
       const sink = new AsyncFileSink(destination, {
@@ -192,6 +244,10 @@ describe("async file sink writes", () => {
                 writes += 1;
                 throw missing;
               },
+              async stat() {
+                return { size: 0 };
+              },
+              async truncate() {},
               async close() {},
             };
           }
@@ -204,6 +260,114 @@ describe("async file sink writes", () => {
       assert.equal(opens, 2);
       assert.equal(writes, 1);
       assert.equal(Buffer.concat(second.chunks).toString("utf8"), lines.join(""));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes an incomplete record before a later append", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bifrost-file-sink-repair-"));
+    try {
+      const destination: LogDestination = {
+        key: "repair",
+        path: join(root, "session", "run.jsonl"),
+        shared: false,
+        root,
+      };
+      const state: BufferedFileState = { content: Buffer.alloc(0), calls: 0, failOnCall: 2 };
+      const sink = new AsyncFileSink(destination, {
+        maxFileSizeBytes: 1_048_576,
+        rotatedFiles: 0,
+        openFile: async () => bufferedHandle(state, 8),
+      });
+
+      await assert.rejects(
+        sink.write([entry('{"event":"partial-record"}\n', 1, destination)]),
+        /simulated partial-write failure/,
+      );
+
+      state.failOnCall = undefined;
+      const next = '{"event":"next-record"}\n';
+      await sink.write([entry(next, 2, destination)]);
+
+      assert.equal(state.content.toString("utf8"), next, "an incomplete record must not merge into the next append");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs a partial record on the next append when immediate truncation fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bifrost-file-sink-repair-deferred-"));
+    try {
+      const destination: LogDestination = {
+        key: "repair-deferred",
+        path: join(root, "session", "run.jsonl"),
+        shared: false,
+        root,
+      };
+      const state: BufferedFileState = {
+        content: Buffer.alloc(0),
+        calls: 0,
+        failOnCall: 2,
+        truncateFails: true,
+      };
+      const sink = new AsyncFileSink(destination, {
+        maxFileSizeBytes: 1_048_576,
+        rotatedFiles: 0,
+        openFile: async () => bufferedHandle(state, 8),
+      });
+
+      await assert.rejects(
+        sink.write([entry('{"event":"partial-record"}\n', 1, destination)]),
+        /simulated partial-write failure/,
+      );
+
+      state.failOnCall = undefined;
+      state.truncateFails = false;
+      const next = '{"event":"next-record"}\n';
+      await sink.write([entry(next, 2, destination)]);
+
+      assert.equal(state.content.toString("utf8"), next, "deferred repair must remove the incomplete prefix");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves valid records before an incomplete append", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bifrost-file-sink-repair-prefix-"));
+    try {
+      const destination: LogDestination = {
+        key: "repair-prefix",
+        path: join(root, "session", "run.jsonl"),
+        shared: false,
+        root,
+      };
+      const prefix = '{"event":"existing-record"}\n';
+      const state: BufferedFileState = {
+        content: Buffer.from(prefix, "utf8"),
+        calls: 0,
+        failOnCall: 2,
+      };
+      const sink = new AsyncFileSink(destination, {
+        maxFileSizeBytes: 1_048_576,
+        rotatedFiles: 0,
+        openFile: async () => bufferedHandle(state, 8),
+      });
+
+      await assert.rejects(
+        sink.write([entry('{"event":"partial-record"}\n', 1, destination)]),
+        /simulated partial-write failure/,
+      );
+
+      state.failOnCall = undefined;
+      const next = '{"event":"next-record"}\n';
+      await sink.write([entry(next, 2, destination)]);
+
+      assert.equal(
+        state.content.toString("utf8"),
+        prefix + next,
+        "repair must restore the pre-write size, not discard earlier records",
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
