@@ -34,6 +34,17 @@ function bounded(lines: readonly string[]): string[] {
   return lines.length <= MAX_REPORT_LINES ? [...lines] : [...lines.slice(0, MAX_REPORT_LINES), `... ${lines.length - MAX_REPORT_LINES} more line(s)`];
 }
 
+/**
+ * Bound the report body but never drop `tail`. The agent copies the tail
+ * (the apply digests) off this report, so truncation may only shorten the
+ * optional detail above it.
+ */
+function boundedWithTail(lines: readonly string[], tail: readonly string[]): string[] {
+  const room = MAX_REPORT_LINES - tail.length;
+  if (lines.length <= room) return [...lines, ...tail];
+  return [...lines.slice(0, Math.max(room, 0)), `... ${lines.length - Math.max(room, 0)} more line(s)`, ...tail];
+}
+
 function renderInspect(result: ConfigAgentInspectResult): string {
   const lines = [
     "--- bifrost configuration ---",
@@ -65,7 +76,18 @@ function renderInspect(result: ConfigAgentInspectResult): string {
 }
 
 function changeLine(change: ConfigAgentChange): string {
-  return `${change.kind} ${change.field}`;
+  const base = `${change.kind} ${change.field}`;
+  if (change.kind === "add") return `${base}: ${compactValue(change.after)}`;
+  if (change.kind === "remove") return `${base} (was ${compactValue(change.before)})`;
+  return `${base}: ${compactValue(change.before)} -> ${compactValue(change.after)}`;
+}
+
+const MAX_VALUE_CHARS = 100;
+
+function compactValue(value: unknown): string {
+  if (value === undefined) return "";
+  const text = JSON.stringify(value) ?? "";
+  return text.length <= MAX_VALUE_CHARS ? text : `${text.slice(0, MAX_VALUE_CHARS - 3)}...`;
 }
 
 /**
@@ -116,9 +138,11 @@ function renderCheck(result: ConfigAgentCheckResult): string {
   }
   for (const note of result.notes) lines.push(`note: ${note}`);
   lines.push(`write eligible: ${result.writeEligible}`);
-  if (result.writeEligible) lines.push(...digestLines(result.proposalDigest, result.guards));
-  lines.push("------------------------------");
-  return bounded(lines).join("\n");
+  const tail = [
+    ...(result.writeEligible ? digestLines(result.proposalDigest, result.guards) : []),
+    "------------------------------",
+  ];
+  return boundedWithTail(lines, tail).join("\n");
 }
 
 function renderPreview(result: ConfigAgentPreviewResult): string {
@@ -150,9 +174,8 @@ function renderPreview(result: ConfigAgentPreviewResult): string {
     }
   }
   for (const note of result.notes) lines.push(`note: ${note}`);
-  lines.push(...digestLines(result.proposalDigest, result.guards));
-  lines.push("-------------------------------------------");
-  return bounded(lines).join("\n");
+  const tail = [...digestLines(result.proposalDigest, result.guards), "-------------------------------------------"];
+  return boundedWithTail(lines, tail).join("\n");
 }
 
 function renderApply(result: ConfigAgentApplyResult): string {

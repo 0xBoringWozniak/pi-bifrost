@@ -29,10 +29,12 @@ import {
   configLayerPaths,
   loadConfigForReload,
   loadConfigWithSourceOverride,
+  loadRules,
   validateConfig,
   validateTierPolicyConfig,
   type BifrostConfig,
 } from "./config.ts";
+import { reconcileEconomicSnapshot } from "./economic-config.ts";
 import { findCandidates } from "./routing.ts";
 import { createRouter, type RouterModel, type RouterRegistrySnapshot, type RouterSnapshot } from "./router.ts";
 import { writeTextFile } from "./storage.ts";
@@ -108,6 +110,10 @@ export interface ConfigAgentGuards {
 export interface ConfigAgentChange {
   readonly kind: "add" | "replace" | "remove";
   readonly field: string;
+  /** The value the change replaces; absent when there is none. */
+  readonly before?: unknown;
+  /** The value the change introduces; absent when the change removes it. */
+  readonly after?: unknown;
 }
 
 export interface ConfigAgentReferenceIssue {
@@ -677,11 +683,13 @@ function planCandidate(
 function diffFields(before: Record<string, unknown>, after: Record<string, unknown>): ConfigAgentChange[] {
   const changes: ConfigAgentChange[] = [];
   for (const key of Object.keys(before).sort()) {
-    if (!Object.hasOwn(after, key)) changes.push({ kind: "remove", field: key });
-    else if (canonicalJson(before[key]) !== canonicalJson(after[key])) changes.push({ kind: "replace", field: key });
+    if (!Object.hasOwn(after, key)) changes.push({ kind: "remove", field: key, before: before[key] });
+    else if (canonicalJson(before[key]) !== canonicalJson(after[key])) {
+      changes.push({ kind: "replace", field: key, before: before[key], after: after[key] });
+    }
   }
   for (const key of Object.keys(after).sort()) {
-    if (!Object.hasOwn(before, key)) changes.push({ kind: "add", field: key });
+    if (!Object.hasOwn(before, key)) changes.push({ kind: "add", field: key, after: after[key] });
   }
   return changes;
 }
@@ -831,7 +839,7 @@ export interface ConfigAgentPreviewInput extends ConfigAgentCheckInput {
 }
 
 export async function previewConfigCandidate(input: ConfigAgentPreviewInput): Promise<ConfigAgentPreviewResult> {
-  const { request, catalog, now } = input;
+  const { request, catalog, cwd, now } = input;
   const checked = checkConfigCandidate(input);
   const base = {
     operation: "preview" as const,
@@ -854,13 +862,20 @@ export async function previewConfigCandidate(input: ConfigAgentPreviewInput): Pr
       notes: ["Preview needs a candidate that passes validation; run check and fix the reported errors.", ...checked.notes],
     };
   }
-  const routerConfig = projectRouterConfig(checked.effectiveAfter as unknown as BifrostConfig);
+  const afterConfig = checked.effectiveAfter as unknown as BifrostConfig;
+  // Preview must route like the active router: rules resolve from the
+  // bifrost-routes.json override first, and the candidate's economic policy
+  // and declared facts join the snapshot through the same offline helper.
+  const routerConfig = { ...projectRouterConfig(afterConfig), rules: loadRules(cwd, afterConfig) };
+  const economics = reconcileEconomicSnapshot(undefined, undefined, afterConfig.economics);
+  const economic = economics.policy ? { policy: economics.policy, snapshot: economics.snapshot } : undefined;
   let router;
   try {
     router = createRouter({
       config: routerConfig,
       registry: routerRegistry(catalog),
       now,
+      ...(economic ? { economic } : {}),
     });
 } catch (error) {
     return {
@@ -949,6 +964,13 @@ export interface ConfigAgentApplyInput extends ConfigAgentCheckInput {
   readonly confirm: (title: string, message: string) => Promise<boolean> | boolean;
   readonly write?: (path: string, text: string) => void;
   readonly reload: () => boolean;
+  /** Re-derives the model inventory when apply revalidates after approval. */
+  readonly liveCatalog?: () => ConfigAgentCatalog;
+}
+
+function compactValue(value: unknown): string {
+  const text = canonicalJson(value);
+  return text.length <= 120 ? text : `${text.slice(0, 117)}...`;
 }
 
 function approvalMessage(checked: ConfigAgentCheckResult): string {
@@ -959,17 +981,25 @@ function approvalMessage(checked: ConfigAgentCheckResult): string {
       ? "Changes: none"
       : `Changes: ${checked.changes.map((change) => `${change.kind} ${change.field}`).join(", ")}`,
   ];
+  // Values stay on the dialog so the user sees what they approve; check's
+  // report carries the full detail for anything this dialog does not fit.
+  for (const change of checked.changes) {
+    if (change.kind === "add") lines.push(`  ${change.field}: ${compactValue(change.after)}`);
+    else if (change.kind === "remove") lines.push(`  ${change.field}: ${compactValue(change.before)} (removed)`);
+    else lines.push(`  ${change.field}: ${compactValue(change.before)} -> ${compactValue(change.after)}`);
+  }
   const tiers = checked.routingAfter?.tiers ?? [];
   if (tiers.length > 0) {
     lines.push("Tiers after the change:");
     for (const tier of tiers) lines.push(`  ${tier.tier} (${tier.strategy}): ${tier.pool.join(", ") || "empty"}`);
   }
   lines.push("No other config source is modified.");
+  lines.push("Full before/after detail: run check with this candidate.");
   return lines.join("\n").slice(0, MAX_APPROVAL_MESSAGE_CHARS);
 }
 
 export async function applyConfigCandidate(input: ConfigAgentApplyInput): Promise<ConfigAgentApplyResult> {
-  const { request, catalog, cwd, extensionDir, confirm, reload } = input;
+  const { request, catalog, cwd, extensionDir, confirm, reload, liveCatalog } = input;
   const write = input.write ?? writeTextFile;
   const base = {
     operation: "apply" as const,
@@ -1061,24 +1091,42 @@ export async function applyConfigCandidate(input: ConfigAgentApplyInput): Promis
   }
 
   // ── Revalidate after confirmation ────────────────────────────────
-  // The user confirmed the proposal before it was shown. Immediately before
-  // writing, re-check that nothing has changed so the confirmed proposal
-  // still matches the current state. This prevents the confirmation race.
-  // Note: the original liveSource/liveEffective checks above (before confirmation) are still valid,
-  // but we re-check here to catch changes that occurred between confirmation and write.
-  if (sourceDigestText(liveSource.digest) !== sourceDigestText(request.sourceDigest)) {
+  // The pre-approval checks above describe the state the user agreed to;
+  // the authoritative gate re-reads every guarded input now. A file edit,
+  // an unrelated layer change, or a catalog refresh while the dialog was
+  // open must not be overwritten by the approved proposal.
+  const confirmedSource = readSelectedSource(cwd, extensionDir, checked.source);
+  if (confirmedSource.readError) {
     return {
       ...withCheck,
       status: "stale",
-      reason: "the selected source changed after this proposal was generated",
+      reason: `the selected source ${confirmedSource.readError}`,
       notes: ["Nothing was written. Run check again against the current source."],
     };
   }
-  if (catalogDigest(catalog) !== request.catalogDigest) {
+  if (sourceDigestText(confirmedSource.digest) !== sourceDigestText(request.sourceDigest)) {
     return {
       ...withCheck,
       status: "stale",
-      reason: "the model inventory changed after this proposal was generated",
+      reason: "the selected source changed while the change was awaiting approval",
+      notes: ["Nothing was written. Run check again against the current source."],
+    };
+  }
+  const confirmedEffective = effectiveConfig(cwd, extensionDir);
+  if (effectiveDigest(confirmedEffective.config) !== request.effectiveDigest) {
+    return {
+      ...withCheck,
+      status: "stale",
+      reason: "another configuration source changed while the change was awaiting approval",
+      notes: ["Nothing was written. Run check again against the current sources."],
+    };
+  }
+  const confirmedCatalog = liveCatalog ? liveCatalog() : catalog;
+  if (catalogDigest(confirmedCatalog) !== request.catalogDigest) {
+    return {
+      ...withCheck,
+      status: "stale",
+      reason: "the model inventory changed while the change was awaiting approval",
       notes: ["Nothing was written. Run check and preview again against the current catalog."],
     };
   }
@@ -1333,6 +1381,7 @@ export function createBifrostConfigTool(deps: ConfigAgentToolDeps): ToolDefiniti
             ...input,
             confirm: (title, message) => ctx.ui.confirm(title, message),
             reload: () => deps.reload(ctx),
+            liveCatalog: () => catalogFromContext(ctx),
             ...(deps.write ? { write: deps.write } : {}),
           });
           break;

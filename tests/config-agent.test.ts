@@ -29,6 +29,8 @@ interface HarnessOptions {
   readonly confirm?: boolean;
   readonly reload?: boolean;
   readonly write?: (path: string, text: string) => void;
+  /** Runs inside the confirm callback while the approval dialog is open. */
+  readonly confirmHook?: () => void;
 }
 
 function freshHarness(options: HarnessOptions = {}) {
@@ -76,6 +78,7 @@ function freshHarness(options: HarnessOptions = {}) {
     ui: {
       confirm: (title: string, message: string) => {
         confirmations.push({ title, message });
+        options.confirmHook?.();
         return confirmResult;
       },
       notify: () => {},
@@ -952,5 +955,175 @@ describe("tool surface", () => {
     assert.deepEqual(catalog.known.map((model) => model.key), ["beta/code", "beta/retired"]);
     assert.deepEqual(catalog.knownKeys, ["beta/code", "beta/nocost", "beta/retired"]);
     assert.deepEqual(catalog.metadataIncomplete, ["beta/nocost"]);
+  });
+});
+
+describe("confirmation-window races and preview fidelity", () => {
+  const candidate = {
+    schemaVersion: 2 as const,
+    default: "fast",
+    models: { fast: ["beta/code"], deep: ["alpha/strong"] },
+  };
+
+  it("rejects the write when the selected source changes while approval is open", async () => {
+    let hook: (() => void) | undefined = undefined;
+    const harness = freshHarness({ confirmHook: () => hook?.() });
+    try {
+      const { details } = await checkedCandidate(harness, { candidate });
+      // A concurrent edit (another agent, another session) lands while the
+      // approval dialog is open; approval must not overwrite it.
+      hook = () => harness.writeFile(".pi/bifrost.json", { default: "edited", models: { edited: ["gamma/review"] } });
+      const applied = detailsOf<ConfigAgentApplyResult>(await harness.run(applyParams(details, { candidate })));
+      assert.equal(applied.status, "stale");
+      assert.match(applied.reason ?? "", /selected source changed/);
+      assert.match(harness.readFile(".pi/bifrost.json") ?? "", /edited/, "the newer edit must survive");
+      assert.equal(harness.reloadCalls(), 0);
+      assert.equal(harness.confirmations().length, 1);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("rejects the write when another layer changes while approval is open", async () => {
+    let hook: (() => void) | undefined = undefined;
+    const harness = freshHarness({ confirmHook: () => hook?.() });
+    try {
+      const { details } = await checkedCandidate(harness, { candidate });
+      // The merged configuration is part of the reviewed proposal: an edit in
+      // an unrelated layer while the dialog is open must stop the write.
+      hook = () => harness.writeFile("bifrost.json", { default: "moved", models: { moved: ["alpha/strong"] } });
+      const applied = detailsOf<ConfigAgentApplyResult>(await harness.run(applyParams(details, { candidate })));
+      assert.equal(applied.status, "stale");
+      assert.match(applied.reason ?? "", /another configuration source changed/);
+      assert.equal(harness.readFile(".pi/bifrost.json"), undefined);
+      assert.equal(harness.reloadCalls(), 0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("rejects the write when the model inventory changes while approval is open", async () => {
+    let hook: (() => void) | undefined = undefined;
+    const harness = freshHarness({ confirmHook: () => hook?.() });
+    try {
+      const { details } = await checkedCandidate(harness, { candidate });
+      hook = () => harness.setAvailable([makeModel("beta", "code", 0.5, 1.5, 128_000)]);
+      const applied = detailsOf<ConfigAgentApplyResult>(await harness.run(applyParams(details, { candidate })));
+      assert.equal(applied.status, "stale");
+      assert.match(applied.reason ?? "", /model inventory changed/);
+      assert.equal(harness.readFile(".pi/bifrost.json"), undefined);
+      assert.equal(harness.reloadCalls(), 0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("applies the candidate's billing preference in preview like active routing", async () => {
+    const harness = freshHarness();
+    try {
+      // Pool ordered metered-first with a subscription preference: active
+      // routing prefers the subscription scope, so preview must show the same.
+      const details = detailsOf<ConfigAgentPreviewResult>(await harness.run({
+        operation: "preview",
+        candidate: {
+          schemaVersion: 2,
+          default: "work",
+          models: { work: ["beta/code", "alpha/strong"] },
+          classifier: { enabled: false },
+          categoryStrategies: { work: "first" },
+          economics: {
+            mode: "policy",
+            scopes: {
+              strong: { kind: "model", model: "alpha/strong" },
+              cheap: { kind: "model", model: "beta/code" },
+            },
+            sources: [
+              { id: "strong-declared", scopeRef: "strong", authority: "declared" },
+              { id: "cheap-declared", scopeRef: "cheap", authority: "declared" },
+            ],
+            sourceOrder: { strong: ["strong-declared"], cheap: ["cheap-declared"] },
+            admission: [],
+            preference: { billingClass: "subscription" },
+            observations: [
+              { sourceId: "strong-declared", scopeRef: "strong", billing: "subscription", observedAt: 1, expiresAt: 4_102_444_800_000, revision: 1, windows: [] },
+              { sourceId: "cheap-declared", scopeRef: "cheap", billing: "metered", observedAt: 1, expiresAt: 4_102_444_800_000, revision: 1, windows: [] },
+            ],
+          },
+        },
+      }));
+      const work = details.tiers.find((tier) => tier.tier === "work");
+      assert.equal(work?.selected, "alpha/strong", "preview must honor the subscription preference like active routing");
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("applies the bifrost-routes.json rule override in preview like active routing", async () => {
+    const harness = freshHarness();
+    try {
+      harness.writeFile("bifrost-routes.json", [{ pattern: "special", model: "quick" }]);
+      const details = detailsOf<ConfigAgentPreviewResult>(await harness.run({
+        operation: "preview",
+        prompts: ["special"],
+        candidate: {
+          schemaVersion: 2,
+          default: "deep",
+          models: { deep: ["alpha/strong"], quick: ["beta/code"] },
+          classifier: { enabled: false },
+        },
+      }));
+      const decided = details.cases.find((entry) => entry.prompt === "special");
+      assert.equal(decided?.selectedTier, "quick", "the route file must decide the tier in preview like active routing");
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("shows the changed values in the approval dialog and the check report", async () => {
+    const harness = freshHarness();
+    try {
+      harness.writeFile(".pi/bifrost.json", {
+        schemaVersion: 2,
+        default: "work",
+        models: { work: ["beta/code"], review: ["gamma/review"] },
+        tierPolicies: { work: { fallbackTiers: ["review"] } },
+      });
+      const candidate = {
+        schemaVersion: 2,
+        default: "work",
+        models: { work: ["beta/code"], review: ["gamma/review"] },
+        tierPolicies: { work: { fallbackTiers: [] } },
+      };
+      const { details, result } = await checkedCandidate(harness, { candidate });
+      // The report is the way to inspect anything beyond the dialog limit.
+      const reportBeforeApply = contentOf(result);
+      const applied = detailsOf<ConfigAgentApplyResult>(await harness.run(applyParams(details, { candidate })));
+      assert.equal(applied.status, "ok");
+      const dialog = harness.confirmations()[0]?.message ?? "";
+      assert.match(dialog, /replace tierPolicies/, "the change kind and field stay");
+      assert.match(dialog, /fallbackTiers/, "the changed value path is visible");
+      assert.match(dialog, /"review"/, "the value the user approved away is visible");
+      assert.match(dialog, /->/, "before and after are separated");
+      assert.match(reportBeforeApply, /fallbackTiers/, "the report shows the changed values");
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("keeps the apply digests when a long report is truncated", async () => {
+    const harness = freshHarness();
+    try {
+      const manyUnknown = Array.from({ length: 140 }, (_, index) => `zeta/no-model-${index}`);
+      const candidate = { schemaVersion: 2, default: "work", models: { work: manyUnknown } };
+      const checkText = contentOf(await harness.run({ operation: "check", candidate }));
+      assert.match(checkText, /more line\(s\)/, "the body is truncated");
+      assert.match(checkText, /proposalDigest: [0-9a-f]{12}/, "the proposal digest survives truncation");
+      assert.match(checkText, /catalogDigest: [0-9a-f]{12}/, "the catalog digest survives truncation");
+      const previewText = contentOf(await harness.run({ operation: "preview", candidate }));
+      assert.match(previewText, /proposalDigest: [0-9a-f]{12}/);
+      assert.match(previewText, /catalogDigest: [0-9a-f]{12}/);
+    } finally {
+      harness.cleanup();
+    }
   });
 });
