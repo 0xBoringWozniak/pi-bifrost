@@ -276,10 +276,17 @@ Detailed TypeSafe trace requires both flags:
 }
 ```
 
-Trace file:
+Trace files (default):
 
 ```text
-.pi/bifrost-debug.jsonl
+.pi/bifrost/logs/<root-session-id>/main/<run-id>.jsonl
+.pi/bifrost/logs/<root-session-id>/subagents/<agent-id>/<run-id>.jsonl
+```
+
+An explicit `debug.path` keeps the legacy single-file destination:
+
+```json
+{ "debug": { "enabled": true, "path": ".pi/bifrost-debug.jsonl" } }
 ```
 
 TypeSafe events include:

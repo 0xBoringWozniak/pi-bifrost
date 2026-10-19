@@ -37,18 +37,23 @@ describe("packed experimental router consumer", () => {
         "pack", "--json", "--cache", cache, "--pack-destination", temporary,
       ], { cwd: process.cwd(), encoding: "utf8", timeout: 60_000 }))[0];
       const rootSources = readdirSync(process.cwd()).filter((path) => path.endsWith(".ts"));
+      const loggingSources = readdirSync(join(process.cwd(), "logging"))
+        .filter((path) => path.endsWith(".ts"))
+        .map((path) => `logging/${path}`);
       const routerGraph = [
         "cache", "classification-pipeline", "classifier-backends", "classifier-metrics", "classifier", "config", "debug",
         "affinity", "economic-preferences", "economic-signals", "failure-observations", "inline-override", "reliability", "reliability-v1-fence", "router", "routing", "session-fallback", "storage", "virtual-model",
       ].flatMap((name) => [`dist/router/${name}.js`, `dist/router/${name}.d.ts`]);
       const archivePaths = packed.files.map((file) => file.path);
       for (const required of [
-        ...rootSources, ...routerGraph, "bifrost.json", "schema.json", "package.json",
+        ...rootSources, ...loggingSources, ...routerGraph, "bifrost.json", "schema.json", "package.json",
         "README.md", "CHANGELOG.md", "docs/router-api.md",
       ]) {
         assert.ok(archivePaths.includes(required), `release archive missing ${required}`);
       }
-      assert.ok(archivePaths.every((path) => path.endsWith(".ts") && !path.includes("/")
+      assert.ok(archivePaths.every((path) => (path.endsWith(".ts") && !path.includes("/"))
+        || (path.startsWith("logging/") && path.endsWith(".ts"))
+        || (path.startsWith("dist/router/logging/"))
         || ["bifrost.json", "schema.json", "README.md", "CHANGELOG.md", "package.json", "docs/router-api.md"].includes(path)
         || routerGraph.includes(path)
         || path.startsWith("examples/")), "release contains files outside source, router API, and examples allowlists");

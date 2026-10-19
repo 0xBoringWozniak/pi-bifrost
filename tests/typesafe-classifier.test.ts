@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setupDebug } from "../debug.ts";
+import { flushDebug, setupDebug } from "../debug.ts";
 import {
   TYPESAFE_MODEL,
   TYPESAFE_SYSTEMONE_URL,
@@ -291,7 +291,7 @@ describe("TypeSafe classifier", () => {
         fetchImpl: async () => { throw new Error("transport-error-sentinel"); },
       });
       await classifier({ prompt: "prompt-sentinel", tiers: ["general"], criteria: { general: "criteria-sentinel" } });
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await flushDebug(1_000);
       const trace = readFileSync(path, "utf8");
       assert.doesNotMatch(trace, /prompt-sentinel|criteria-sentinel|api-key-sentinel|transport-error-sentinel/);
       assert.match(trace, /"event":"transport_error"/);

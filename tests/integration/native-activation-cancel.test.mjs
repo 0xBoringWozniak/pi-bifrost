@@ -230,6 +230,11 @@ it("cancels real AgentSession activation behind a proven deny-all fence", async 
       for (const file of readdirSync(root)) {
         if (file.endsWith(".ts") || file === "bifrost.json") copyFileSync(join(root, file), join(mutantDir, file));
       }
+      // index.ts imports ./logging, so the mutant needs those sources too.
+      mkdirSync(join(mutantDir, "logging"), { recursive: true });
+      for (const file of readdirSync(join(root, "logging"))) {
+        if (file.endsWith(".ts")) copyFileSync(join(root, "logging", file), join(mutantDir, "logging", file));
+      }
       writeFileSync(join(mutantDir, "index.ts"), source);
       symlinkSync(join(root, "node_modules"), join(mutantDir, "node_modules"));
       return join(mutantDir, "index.ts");

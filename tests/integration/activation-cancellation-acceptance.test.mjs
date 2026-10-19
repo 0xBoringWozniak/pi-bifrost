@@ -282,6 +282,10 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
     for (const file of readdirSync(ROOT)) {
       if (file.endsWith(".ts")) copyFileSync(join(ROOT, file), join(copyDir, file));
     }
+    mkdirSync(join(copyDir, "logging"), { recursive: true });
+    for (const file of readdirSync(join(ROOT, "logging"))) {
+      if (file.endsWith(".ts")) copyFileSync(join(ROOT, "logging", file), join(copyDir, "logging", file));
+    }
     writeFileSync(join(copyDir, "index.ts"), mutantSource);
     symlinkSync(join(ROOT, "node_modules"), join(copyDir, "node_modules"));
     const mutantExtension = (await import(pathToFileURL(join(copyDir, "index.ts")).href + `?fault=${Date.now()}`)).default;

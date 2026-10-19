@@ -4,6 +4,9 @@ All notable changes to pi-bifrost are documented here.
 
 ## [Unreleased]
 
+### Changed
+- Debug logging is now a bounded, severity-aware subsystem. Events are filtered before metadata is prepared, admitted through a byte- and entry-limited queue with `severity-first` overflow, batched asynchronously, and written per session/run file. Existing `debug()` and `debugMeasure()` calls and explicit `debug.path` configurations keep working; without a path, logs move to `.pi/bifrost/logs/<root-session>/...` so concurrent processes and subagents never share a writer.
+
 ### Added
 - Experimental `pi-bifrost/router` API over caller-supplied snapshots, shipped as JavaScript with TypeScript declarations. Resolution is advisory; it does not reserve or dispatch a model.
 - Optional schema-version-2 economic reserves. Static declared/estimated provider or model facts can be observed first, then explicitly applied as a pre-strategy candidate filter. No live billing adapter, account scope, or spend-cap guarantee is included.

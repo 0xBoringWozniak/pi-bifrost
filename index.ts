@@ -77,7 +77,8 @@ import {
 import { ReliabilityV2Store } from "./reliability-v2-store.ts";
 import { loadRuntimeState, runtimeStatePath, saveRuntimeState, isPassiveModelSelection, createSelfSelectTracker } from "./runtime-state.ts";
 import { createCommandRouter, getBifrostCommandCompletions, runBifrostCommand, log, uiBusy, uiDone, syncBifrostModeStatus, clearBifrostWidgets, type BifrostState } from "./commands.ts";
-import { setupDebug, debug, debugMeasure, isDebugEnabled, flushDebug } from "./debug.ts";
+import { setupDebug, debug, debugMeasure, isDebugEnabled, flushDebug, bindDebugSession, endDebugSession } from "./debug.ts";
+import type { DebugEmitOptions } from "./debug.ts";
 import { parseInlineOverride } from "./inline-override.ts";
 import { BIFROST_AUTO_ID, BIFROST_AUTO_PROVIDER, isBifrostAuto, isVirtualModel } from "./virtual-model.ts";
 import { createDispatchOwnership, RuntimeReliabilityTracker } from "./runtime-reliability.ts";
@@ -170,7 +171,7 @@ function reportClassifierAttempt(
       debugLifecycle("classifier", "budget_expired", ctx.sessionManager, turn, {
         request_correlation_id: requestCorrelationId ?? null,
         fallback: result.kind === "unclassified" ? "none" : result.kind === "fallback" ? "default" : result.source === "regex" ? "regex" : "none",
-      });
+      }, { level: "warn" });
       if (states.get("pipeline")?.stateKey === "deadline") return;
       states.set("pipeline", { binding: "pipeline", stateKey: "deadline" });
       const routeMessage = result.kind === "unclassified"
@@ -194,7 +195,7 @@ function reportClassifierAttempt(
       debugLifecycle("classifier", "budget_expired", ctx.sessionManager, turn, {
         ...meta,
         budget_scope: "total_classifier",
-      });
+      }, { level: "warn" });
     }
 
     let states = classifierNoticeStates.get(ctx.sessionManager);
@@ -232,7 +233,7 @@ function reportClassifierAttempt(
     const circuitMessage = validOpenUntil
       ? ` Its model-only circuit is open until ${new Date(openUntil!).toISOString()}.`
       : "";
-    debugLifecycle("classifier", "degraded", ctx.sessionManager, turn, meta);
+    debugLifecycle("classifier", "degraded", ctx.sessionManager, turn, meta, { level: "warn" });
     const routeMessage = attempt.fallbackKind === "none"
       ? `No tier was selected; ${classifierFallbackLabel(result)}. Select a tier/model or adjust routing rules.`
       : `Using ${classifierFallbackLabel(result)}. Routing is still active.`;
@@ -266,17 +267,31 @@ function debugCorrelation(session?: object, turn?: object): Record<string, strin
   return correlation;
 }
 
+function debugSessionIdentity(session?: object): { sessionId: string } | undefined {
+  try {
+    const id = (session as { getHeader?: () => { id?: unknown } | undefined } | undefined)?.getHeader?.()?.id;
+    return typeof id === "string" && id.length > 0 ? { sessionId: id } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function debugLifecycle(
   module: string,
   event: string,
   session: object | undefined,
   turn: object | undefined,
   meta: Record<string, unknown>,
+  options?: DebugEmitOptions,
 ): void {
   try {
     const correlation = debugCorrelation(session, turn);
     if (!correlation) return;
-    debug(module, event, { ...correlation, ...meta });
+    const identity = debugSessionIdentity(session);
+    debug(module, event, { ...correlation, ...meta }, {
+      ...options,
+      ...(identity ? { identity } : {}),
+    });
   } catch { /* optional observability must not change routing */ }
 }
 
@@ -636,7 +651,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       runtimeVersion: process.version,
       routingMode: bootConfig.reliability?.stateVersion === 2 && bootConfig.reliability.enabled !== false ? "reliability_v2" : "reliability_v1",
       enabled: bootConfig.enabled === false ? false : true,
-    });
+    }, { level: "info", protected: true });
   }
 
   const config = bootConfig;
@@ -1104,7 +1119,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       generation: state.configGeneration,
       reliabilityMode: nextConfig.reliability?.stateVersion === 2 && nextConfig.reliability.enabled !== false ? "reliability_v2" : "reliability_v1",
       routingEnabled: nextConfig.enabled === false ? false : true,
-    });
+    }, { level: "info" });
     state.affinityConfigValid = validateConfig(nextConfig).every((issue) => issue.severity !== "error" || !issue.code?.startsWith("config.affinity_"));
     state.reliabilityV2ConfigValid = validateConfig(nextConfig).every((issue) => !issue.code?.startsWith("config.reliability_"));
     state.providerCooldownStore = nextConfig.reliability?.enabled === false || !state.reliabilityV2ConfigValid
@@ -1138,7 +1153,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     debugLifecycle("bifrost", "manual_control", session, undefined, {
       action: action ?? "model_select",
       category: "routing_ownership_reset",
-    });
+    }, { level: "info" });
     v2Receipts.advanceManual(session);
     void cleanupV2Receipts(session, "cancelled");
     affinityStore?.reset(session);
@@ -1934,7 +1949,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           model: failedModelKey,
           tier: requestedTier,
           reason: "cooldown_persistence_unconfirmed",
-        });
+        }, { level: "warn" });
         return undefined;
       }
       trackerFor(ctx).release(failedModelKey);
@@ -2193,7 +2208,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           model: receipt.modelKey,
           status: "rejected",
           category: "receipt_store_error",
-        });
+        }, { level: "warn" });
         /* lifecycle cleanup is best effort and never escapes Pi's hook */
       }
       v2Receipts.remove(session, receipt);
@@ -2216,7 +2231,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         debugLifecycle("reliability", "lease_renewal_failed", ctx.sessionManager, receipt.userMessage.deref(), {
           model: receipt.modelKey,
           category: "lease_renewal_unconfirmed",
-        });
+        }, { level: "error" });
         try { log(ctx, "Bifrost reliability v2 lease renewal failed; this Auto turn will stop before another provider request.", "error"); } catch { /* best effort */ }
         return;
       }
@@ -2226,7 +2241,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       debugLifecycle("reliability", "lease_renewal_failed", ctx.sessionManager, receipt.userMessage.deref(), {
         model: receipt.modelKey,
         category: "lease_renewal_error",
-      });
+      }, { level: "error" });
       try { log(ctx, "Bifrost reliability v2 lease renewal failed; this Auto turn will stop before another provider request.", "error"); } catch { /* best effort */ }
     }
   }
@@ -2551,7 +2566,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       invalidatePipeline();
     } catch (error) {
       // Cache persistence must never fail the route.
-      debug("virtual", "cache.save_error", { category: "cache_write_failed" });
+      debug("virtual", "cache.save_error", { category: "cache_write_failed" }, { level: "warn" });
     }
   }
 
@@ -2714,7 +2729,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           reason: requestReason,
           category: rejectionCategory,
           reliabilityMode: v2Active ? "reliability_v2" : "reliability_v1",
-        });
+        }, { level: "warn" });
         throw error;
       }
       let routeFailure: { tier: string; pool: string | string[] | undefined; reason?: RoutedModelResolution["fallbackReason"]; skipped?: readonly SkippedCandidate[]; reserveExcluded?: ReserveExclusionSummary; explicitBoundary?: boolean; message?: string } | undefined;
@@ -2804,7 +2819,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
                 terminalRouteCategory = "request_cancelled";
                 throw error;
               }
-              debug("virtual", "registry.refresh.error", { category: "registry_refresh_failure" });
+              debug("virtual", "registry.refresh.error", { category: "registry_refresh_failure" }, { level: "warn" });
             }
           }
           if (!state.enabled || state.pinned) {
@@ -2897,7 +2912,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
             } catch (error) {
               updateRegistryInventoryEvidence(state, ctx);
               if (signal?.aborted) throw error;
-              debug("virtual", "registry.refresh.error", { category: "registry_refresh_failure" });
+              debug("virtual", "registry.refresh.error", { category: "registry_refresh_failure" }, { level: "warn" });
             }
           }
           if (state.config.debug?.enabled) {
@@ -2935,21 +2950,21 @@ export default function bifrostExtension(pi: ExtensionAPI) {
                 reason: "candidate_unavailable",
               });
             }
-            debug("virtual", "fail", { tier: classification.tier, reason: resolved.fallbackReason, pool: routeFailure.pool, skipped: resolved.skipped });
+            debug("virtual", "fail", { tier: classification.tier, reason: resolved.fallbackReason, pool: routeFailure.pool, skipped: resolved.skipped }, { level: "warn" });
             debugLifecycle("virtual", "no_route", ctx.sessionManager, correlationTurn, {
               request_correlation_id: requestCorrelationId ?? null,
               reason: requestReason,
               tier: classification.tier,
               category: resolved.fallbackReason ?? "no_eligible_model",
               reliabilityMode: v2Active ? "reliability_v2" : "reliability_v1",
-            });
+            }, { level: "warn" });
             return undefined;
           }
           activeRouteTier = resolved.selectedTier ?? classification.tier;
           activeRouteRequestedTier = classification.tier;
           activeRouteExplicitTier = activeRecoveryToken?.explicitTier ?? (activeRouteOrigin === "explicit_tier");
           if (!state.enabled || state.pinned) throw new Error("Bifrost: virtual auto was disabled or pinned during routing; select a physical model");
-          debug("virtual", "select", { tier: classification.tier, model: modelKey(model), source: classification.kind === "classified" ? classification.source : "fallback", ...classifierIdentity, skipped: resolved.skipped, routingDurationMs });
+          debug("virtual", "select", { tier: classification.tier, model: modelKey(model), source: classification.kind === "classified" ? classification.source : "fallback", ...classifierIdentity, skipped: resolved.skipped, routingDurationMs }, { level: "info" });
           debugLifecycle("virtual", "selected", ctx.sessionManager, correlationTurn, {
             request_correlation_id: requestCorrelationId ?? null,
             reason: requestReason,
@@ -2958,7 +2973,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
             origin: activeRouteOrigin,
             source: classification.kind === "classified" ? classification.source : "fallback",
             reliabilityMode: v2Active ? "reliability_v2" : "reliability_v1",
-          });
+          }, { level: "info" });
           if (request.reason === "user" && autoBoundary) {
             const { message: _userMessage, ...routeBoundary } = autoBoundary;
             recordAutoRouteProof(ctx.sessionManager, {
@@ -2989,7 +3004,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
             reason: requestReason,
             intent,
             reliabilityMode: v2Active ? "reliability_v2" : "reliability_v1",
-          });
+          }, { level: "info" });
           if (v2Active) {
             debug("virtual", "dispatch", { model: key, thinkingLevel, reliabilityStateVersion: 2 });
             const retry = allowanceRetryAttemptBySession.get(ctx.sessionManager);
@@ -3065,7 +3080,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
               model: key,
               tier: receipt.tier,
               reason: requestReason,
-            });
+            }, { level: "info" });
             const legacyQuotaMarker = state.config.reliability?.cooldownOnAllowanceExhausted !== false
               && state.config.reliability?.allowanceCooldownScope !== "model"
               ? importedLegacyV2AllowanceBlock(key) : undefined;
@@ -3084,7 +3099,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
                 tier: receipt.tier,
                 status: admission.status,
                 category: "admission_rejected",
-              });
+              }, { level: "warn" });
               const reason = admission.status === "blocked" ? "a circuit is open or another trial owns it" : "reliability state rejected admission";
               throw new Error(`Bifrost reliability v2 blocked ${key}: ${reason}. No provider request was sent.`);
             }
@@ -3095,7 +3110,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
               model: key,
               tier: receipt.tier,
               status: "admitted",
-            });
+            }, { level: "info" });
             if (!autoBoundaryStillActive(ctx, boundary) || state.reliabilityV2Store !== store) {
               terminalRouteCategory = "boundary_changed_during_admission";
               await settleV2Receipt(ctx, receipt, "cancelled");
@@ -3164,7 +3179,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         },
         onDegrade: (model) => {
           const detail = routeFailure ? poolProblem(routeFailure.tier, routeFailure.pool, routeFailure.skipped) : "no configured model resolved";
-          debug("virtual", "degrade", { model: modelKey(model), tier: routeFailure?.tier });
+          debug("virtual", "degrade", { model: modelKey(model), tier: routeFailure?.tier }, { level: "warn" });
           log(ctx, `Bifrost: keeping ${modelKey(model)} (last dispatched) — ${detail}`, "warning");
         },
         routeError: (detail) => {
@@ -3182,7 +3197,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           reason: requestReason,
           category: routeFailure?.explicitBoundary ? "policy_no_route" : routeFailure ? "model_unavailable" : terminalRouteCategory ?? "route_exception",
           reliabilityMode: v2Active ? "reliability_v2" : "reliability_v1",
-        });
+        }, { level: "warn" });
         throw error;
       }
     },
@@ -3199,6 +3214,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    bindDebugSession(ctx.sessionManager);
     advanceAutoBootstrapLifecycle(ctx.sessionManager, false, ctx);
     cancelAutoBootstrap(ctx.sessionManager, ctx);
     const branch = ctx.sessionManager.getBranch();
@@ -3207,7 +3223,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     const lifecycle = autoBootstrapLifecycleBySession.get(ctx.sessionManager) ?? 0;
     await cleanupProviderTrials(ctx.sessionManager);
     clearAllowanceRetry(ctx.sessionManager, "session_start");
-    debugLifecycle("bifrost", "session_start", ctx.sessionManager, undefined, { reliabilityMode: reliabilityV2Enabled() ? "reliability_v2" : "reliability_v1" });
+    debugLifecycle("bifrost", "session_start", ctx.sessionManager, undefined, { reliabilityMode: reliabilityV2Enabled() ? "reliability_v2" : "reliability_v1" }, { level: "info", protected: true });
     classifierNoticeStates.delete(ctx.sessionManager);
     overrideFor(ctx).clear();
     affinityStore?.reset(ctx.sessionManager);
@@ -3243,12 +3259,13 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     cancelAutoBootstrap(ctx.sessionManager);
     await cleanupProviderTrials(ctx.sessionManager);
     clearAllowanceRetry(ctx.sessionManager, "session_shutdown");
-    debugLifecycle("bifrost", "session_shutdown", ctx.sessionManager, undefined, { category: "session_cleanup" });
+    debugLifecycle("bifrost", "session_shutdown", ctx.sessionManager, undefined, { category: "session_cleanup" }, { level: "info", protected: true });
     classifierNoticeStates.delete(ctx.sessionManager);
     affinityStore?.reset(ctx.sessionManager);
     pendingAffinityBySession.delete(ctx.sessionManager);
     if (reliabilityV2Enabled()) await cleanupV2Receipts(ctx.sessionManager);
     await flushDebug();
+    endDebugSession();
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -3756,7 +3773,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           invalidatePipeline();
         } catch {
           updateRegistryInventoryEvidence(state, ctx);
-          debug("input", "registry.refresh.error", { category: "registry_refresh_failure" });
+          debug("input", "registry.refresh.error", { category: "registry_refresh_failure" }, { level: "warn" });
           console.error("[bifrost] model registry refresh failed");
         } finally {
           endRefresh({ outcome: refreshOutcome });
@@ -3818,7 +3835,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         routeBoundary = false;
         strictBoundary = providerCooldownsEnabled();
         log(ctx, "Bifrost: no tier matched — using default model", "warning");
-        debug("input", "unclassified");
+        debug("input", "unclassified", undefined, { level: "warn" });
         syncBifrostModeStatus(ctx, state);
         endInput();
         if (ctx.model && !isVirtualModel(ctx.model) && providerCooldownsEnabled()) {
@@ -3857,7 +3874,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       if (state.config.debug?.enabled) {
         debug("input", "route_decision", {
           decision: buildRouteDecisionSummary(classification, attempt),
-        });
+        }, { level: "info" });
       }
       const model = resolved.selected;
       const selectedTier = resolved.selectedTier ?? tier;
@@ -3876,7 +3893,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
           ? { allowed: true, claimed: false }
           : state.reliabilityStore.tryClaimTrial(selectedKey);
         if (!trial.allowed) {
-          debug("input", "trial_unavailable", { model: modelKey(model) });
+          debug("input", "trial_unavailable", { model: modelKey(model) }, { level: "warn" });
           log(ctx, `Bifrost: ${modelKey(model)} already has a half-open trial in progress`, "warning");
           syncBifrostModeStatus(ctx, state);
           endInput();
@@ -3908,7 +3925,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
 
       if (!model) {
         state.forceRegistryRefresh = true;
-        debug("input", "no_model", { tier, fallbackReason: resolved.fallbackReason, skipped: resolved.skipped, cacheHit: source === "cache" });
+        debug("input", "no_model", { tier, fallbackReason: resolved.fallbackReason, skipped: resolved.skipped, cacheHit: source === "cache" }, { level: "warn" });
         if (providerCooldownsEnabled() && ctx.model) {
           try {
             const paused = state.providerCooldownStore!.read(ctx.model.provider,
@@ -3975,7 +3992,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         const reason = resolved.fallbackReason ? `, ${resolved.fallbackReason}` : "";
         log(ctx, `Bifrost: ${selectedTier} → ${modelKey(model)} (already active, ${source}${reason})`);
         debug("input", "model_unchanged", { model: modelKey(model), selectedTier, fallbackReason: resolved.fallbackReason, skipped: resolved.skipped, cacheHit: source === "cache", ...classifierIdentity, thinkingLevel: ctx.thinkingLevel });
-        debug("input", "model_selected", { model: modelKey(model), tier: selectedTier, strategy, source, fallbackReason: resolved.fallbackReason, skipped: resolved.skipped, cacheHit: source === "cache", ...classifierIdentity, thinkingLevel: ctx.thinkingLevel });
+        debug("input", "model_selected", { model: modelKey(model), tier: selectedTier, strategy, source, fallbackReason: resolved.fallbackReason, skipped: resolved.skipped, cacheHit: source === "cache", ...classifierIdentity, thinkingLevel: ctx.thinkingLevel }, { level: "info" });
         begunStrictModel = modelKey(model);
         trackerFor(ctx).begin(begunStrictModel);
         endInput({ model: modelKey(model), tier: selectedTier, strategy, source, thinkingLevel: ctx.thinkingLevel });
@@ -3999,7 +4016,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
         ok = await pi.setModel(model);
       } catch (err) {
         setModelError = err;
-        debug("input", "setModel.throw", { model: modelKey(model), category: "set_model_failure" });
+        debug("input", "setModel.throw", { model: modelKey(model), category: "set_model_failure" }, { level: "warn" });
       } finally {
         // Key lives only inside the awaited setModel window (see selectPhysicalFromVirtual).
         selfSelect.release(ctx.sessionManager);
@@ -4039,7 +4056,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
       begunStrictModel = undefined;
       try { syncBifrostModeStatus(ctx, state); } catch { /* optional status must not suppress an activated turn */ }
       try { log(ctx, doneMsg); } catch { /* optional notification must not suppress an activated turn */ }
-      try { debug("input", "model_selected", { model: modelKey(model), tier: selectedTier, strategy, source, fallbackReason: resolved.fallbackReason, skipped: resolved.skipped, cacheHit: source === "cache", ...classifierIdentity, routingDurationMs, thinkingLevel: ctx.thinkingLevel }); } catch { /* optional trace output */ }
+      try { debug("input", "model_selected", { model: modelKey(model), tier: selectedTier, strategy, source, fallbackReason: resolved.fallbackReason, skipped: resolved.skipped, cacheHit: source === "cache", ...classifierIdentity, routingDurationMs, thinkingLevel: ctx.thinkingLevel }, { level: "info" }); } catch { /* optional trace output */ }
       try { endInput({ model: modelKey(model), tier: selectedTier, strategy, source, thinkingLevel: ctx.thinkingLevel }); } catch { /* optional timing output */ }
       return defaultAction;
     } finally {
