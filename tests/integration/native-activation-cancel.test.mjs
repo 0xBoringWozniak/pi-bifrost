@@ -45,6 +45,7 @@ function runNode(args, options = {}) {
   const timeoutMs = options.timeoutMs ?? DEADLINE_MS;
   return new Promise((resolve, reject) => {
     const childProcess = spawn(execPath, args, { ...options, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const spawnedAt = Date.now();
     const groupId = childProcess.pid;
     let stdout = "";
     let stderr = "";
@@ -91,7 +92,7 @@ function runNode(args, options = {}) {
         childProcess.stderr?.destroy();
       }
       childProcess.unref();
-      resolve({ status: exitCode, signal: exitSignal, stdout, stderr, deadlineExceeded, groupId, groupGone, closeObserved });
+      resolve({ status: exitCode, signal: exitSignal, stdout, stderr, deadlineExceeded, groupId, spawnPid: childProcess.pid, spawnedAt, groupGone, closeObserved });
     }
 
     timer = setTimeout(() => {
@@ -118,6 +119,7 @@ it("cancels real AgentSession activation behind a proven deny-all fence", async 
   // retains the scratch and names it for inspection.
   let cleanupVerified = true;
   let runCounter = 0;
+  let lastScenario = "setup";
   let isolatedEnv;
   async function runOwned(args, options) {
     try {
@@ -131,6 +133,7 @@ it("cancels real AgentSession activation behind a proven deny-all fence", async 
   }
   async function runScenario(scenario, env = {}) {
     runCounter += 1;
+    lastScenario = scenario;
     const runScratch = join(scratch, `run-${runCounter}-${scenario}`);
     mkdirSync(runScratch, { recursive: true });
     writeFileSync(violations, "");
@@ -140,6 +143,13 @@ it("cancels real AgentSession activation behind a proven deny-all fence", async 
       timeoutMs: DEADLINE_MS,
     });
     return { ...result, runScratch };
+  }
+
+  function assertOwnedReceipt(result, label) {
+    if (process.platform === "win32") return;
+    assert.equal(result.groupGone, true, `${label} owned process group must be gone`);
+    assert.equal(result.closeObserved, true, `${label} owned child close must be observed`);
+    assert.equal(result.groupId, result.spawnPid, `${label} spawn-time receipt must identify the detached process-group leader`);
   }
 
   try {
@@ -155,6 +165,7 @@ it("cancels real AgentSession activation behind a proven deny-all fence", async 
 
     // Positive guard probe first: the deny-all fence must block fetch, socket, and
     // UDP before any scenario is credited with zero violations.
+    lastScenario = "guard-probe";
     writeFileSync(violations, "");
     const probe = await runOwned(["-e", `
       const net = require("node:net");
@@ -178,51 +189,102 @@ it("cancels real AgentSession activation behind a proven deny-all fence", async 
       })().catch(error => { console.error(error); process.exitCode = 1; });
     `], { cwd: root, env: isolatedEnv });
     assert.equal(probe.deadlineExceeded, false, `guard probe must finish inside its bounded deadline\n${probe.stdout}\n${probe.stderr}`);
-    if (process.platform !== "win32") assert.equal(probe.groupGone, true, "guard probe process group must be gone before scratch deletion");
+    assertOwnedReceipt(probe, "guard probe");
     assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
     const attempts = readFileSync(violations, "utf8");
     assert.match(attempts, /blocked fetch to https?:\/\/[^:\s]+:\d/);
     assert.match(attempts, /blocked socket connection to [^\s]+:\d/);
     assert.match(attempts, /blocked UDP datagram to/);
 
-    // GREEN: real AgentSession + real extension. The aborted steer and the newer
-    // manual selection must produce zero forbidden provider callbacks.
-    for (const scenario of ["cancel-late-classifier", "manual-override"]) {
+    // GREEN: real AgentSession + real extension. Cancellation scenarios must
+    // produce zero forbidden provider callbacks; failed-activation scenarios
+    // must preserve the seed model and keep the turn unsent after the real host
+    // setModel returns false or throws.
+    const hostMarkers = {
+      "activation-false": /HOST_SETMODEL=returned:false/,
+      "activation-throw": /HOST_SETMODEL=threw:No API key for faux-target\/physical/,
+    };
+    for (const scenario of ["cancel-late-classifier", "manual-override", "activation-false", "activation-throw"]) {
       const green = await runScenario(scenario);
       assert.equal(green.deadlineExceeded, false, `${scenario} must complete inside its bounded deadline\n${green.stdout}\n${green.stderr}`);
-      if (process.platform !== "win32") assert.equal(green.groupGone, true, `${scenario} owned process group must be gone before scratch deletion`);
+      assertOwnedReceipt(green, scenario);
       assert.equal(green.status, 0, `${scenario}\n${green.stdout}\n${green.stderr}`);
+      if (hostMarkers[scenario]) {
+        assert.match(green.stdout, hostMarkers[scenario], `${scenario} must prove the real host setModel outcome`);
+      }
       assert.equal(readFileSync(violations, "utf8"), "", `${scenario} made a blocked outbound attempt`);
     }
 
-    // Sensitivity proof: remove the late-abort guard in a private scratch copy of
-    // index.ts. The same child scenario must fail its forbidden-dispatch assertion,
-    // and the failure must be the named assertion, not a startup/syntax failure.
+    // Sensitivity proofs use private scratch copies of index.ts so production
+    // source is never modified. Each fault removes the exact handling for one
+    // real host outcome and must fail the named child assertion.
     const original = readFileSync(join(root, "index.ts"), "utf8");
     assert.equal(sha256(original), PRODUCTION_SHA256, "production index.ts must match the reviewed baseline hash");
     assert.ok(original.includes(LATE_ABORT_GUARD), "the late-abort guard must exist in production source");
-    const mutantSource = original.replace(LATE_ABORT_GUARD, "      console.error('MUTANT_GUARD_REMOVED_REACHED');");
-    assert.notEqual(mutantSource, original, "fault injection must change the production source");
-    const mutantDir = join(scratch, "mutant");
-    mkdirSync(mutantDir, { recursive: true });
-    for (const file of readdirSync(root)) {
-      if (file.endsWith(".ts")) copyFileSync(join(root, file), join(mutantDir, file));
+
+    let mutantCounter = 0;
+    function prepareMutant(label, source) {
+      mutantCounter += 1;
+      const mutantDir = join(scratch, `mutant-${mutantCounter}-${label}`);
+      mkdirSync(mutantDir, { recursive: true });
+      for (const file of readdirSync(root)) {
+        if (file.endsWith(".ts") || file === "bifrost.json") copyFileSync(join(root, file), join(mutantDir, file));
+      }
+      writeFileSync(join(mutantDir, "index.ts"), source);
+      symlinkSync(join(root, "node_modules"), join(mutantDir, "node_modules"));
+      return join(mutantDir, "index.ts");
     }
-    writeFileSync(join(mutantDir, "index.ts"), mutantSource);
-    symlinkSync(join(root, "node_modules"), join(mutantDir, "node_modules"));
 
-    const red = await runScenario("cancel-late-classifier", { BIFROST_NATIVE_ACTIVATION_EXTENSION: join(mutantDir, "index.ts") });
-    assert.equal(red.deadlineExceeded, false, `mutant run must finish inside its bounded deadline\n${red.stdout}\n${red.stderr}`);
-    assert.notEqual(red.status, 0, `the guard-removed mutant must fail the native forbidden-dispatch assertion\n${red.stdout}\n${red.stderr}`);
-    assert.match(`${red.stdout}\n${red.stderr}`, /forbidden late dispatch observable/,
-      "the mutant failure must be the intended forbidden-dispatch assertion");
-    assert.equal(readFileSync(violations, "utf8"), "", "mutant run made a blocked outbound attempt");
+    // (1) Late-abort guard: the routed target must not become selected.
+    const lateAbortMutantSource = original.replace(LATE_ABORT_GUARD, "      console.error('MUTANT_GUARD_REMOVED_REACHED');");
+    assert.notEqual(lateAbortMutantSource, original, "late-abort fault injection must change the production source");
+    const lateAbortRed = await runScenario("cancel-late-classifier", { BIFROST_NATIVE_ACTIVATION_EXTENSION: prepareMutant("late-abort", lateAbortMutantSource) });
+    assert.equal(lateAbortRed.deadlineExceeded, false, `late-abort mutant run must finish inside its bounded deadline\n${lateAbortRed.stdout}\n${lateAbortRed.stderr}`);
+    assertOwnedReceipt(lateAbortRed, "late-abort mutant");
+    assert.notEqual(lateAbortRed.status, 0, `the guard-removed mutant must fail the native forbidden-dispatch assertion\n${lateAbortRed.stdout}\n${lateAbortRed.stderr}`);
+    assert.match(`${lateAbortRed.stdout}\n${lateAbortRed.stderr}`, /forbidden late dispatch observable/,
+      "the late-abort mutant failure must be the intended forbidden-dispatch assertion");
+    assert.equal(readFileSync(violations, "utf8"), "", "late-abort mutant run made a blocked outbound attempt");
 
-    // GREEN restored: the pristine extension again passes the same scenario.
-    const restored = await runScenario("cancel-late-classifier");
-    assert.equal(restored.deadlineExceeded, false, `restored run must finish inside its bounded deadline\n${restored.stdout}\n${restored.stderr}`);
-    assert.equal(restored.status, 0, `restored run\n${restored.stdout}\n${restored.stderr}`);
-    assert.equal(readFileSync(violations, "utf8"), "", "restored run made a blocked outbound attempt");
+    // (2) False handling: ignoring the real host false would send the turn on
+    // the stale seed model instead of keeping it unsent.
+    const FALSE_FAILURE_GUARD = "      if (!ok) {";
+    assert.ok(original.includes(FALSE_FAILURE_GUARD), "the failed-activation branch must exist in production source");
+    const falseMutantSource = original.replace(FALSE_FAILURE_GUARD, "      if (false) {");
+    assert.notEqual(falseMutantSource, original, "false-activation fault injection must change the production source");
+    const falseRed = await runScenario("activation-false", { BIFROST_NATIVE_ACTIVATION_EXTENSION: prepareMutant("activation-false", falseMutantSource) });
+    assert.equal(falseRed.deadlineExceeded, false, `false-activation mutant run must finish inside its bounded deadline\n${falseRed.stdout}\n${falseRed.stderr}`);
+    assertOwnedReceipt(falseRed, "false-activation mutant");
+    assert.notEqual(falseRed.status, 0, `the false-ignoring mutant must fail the native stale-model assertion\n${falseRed.stdout}\n${falseRed.stderr}`);
+    assert.match(`${falseRed.stdout}\n${falseRed.stderr}`, /the failed activation must not send the turn on the stale model/,
+      "the false-activation mutant failure must be the intended stale-model assertion");
+    assert.equal(readFileSync(violations, "utf8"), "", "false-activation mutant run made a blocked outbound attempt");
+
+    // (3) Throw handling: swallowing the real host throw and treating it as
+    // success would send the turn on the stale seed model.
+    const THROW_SWALLOW_ANCHOR = "        setModelError = err;";
+    assert.ok(original.includes(THROW_SWALLOW_ANCHOR), "the setModel catch branch must exist in production source");
+    const throwMutantSource = original.replace(THROW_SWALLOW_ANCHOR, "        setModelError = err;\n        ok = true;");
+    assert.notEqual(throwMutantSource, original, "throw-activation fault injection must change the production source");
+    const throwRed = await runScenario("activation-throw", { BIFROST_NATIVE_ACTIVATION_EXTENSION: prepareMutant("activation-throw", throwMutantSource) });
+    assert.equal(throwRed.deadlineExceeded, false, `throw-activation mutant run must finish inside its bounded deadline\n${throwRed.stdout}\n${throwRed.stderr}`);
+    assertOwnedReceipt(throwRed, "throw-activation mutant");
+    assert.notEqual(throwRed.status, 0, `the throw-swallowing mutant must fail the native stale-model assertion\n${throwRed.stdout}\n${throwRed.stderr}`);
+    assert.match(`${throwRed.stdout}\n${throwRed.stderr}`, /the failed activation must not send the turn on the stale model/,
+      "the throw-activation mutant failure must be the intended stale-model assertion");
+    assert.equal(readFileSync(violations, "utf8"), "", "throw-activation mutant run made a blocked outbound attempt");
+
+    // GREEN restored: the pristine extension passes every faulted scenario again.
+    for (const scenario of ["cancel-late-classifier", "activation-false", "activation-throw"]) {
+      const restored = await runScenario(scenario);
+      assert.equal(restored.deadlineExceeded, false, `restored ${scenario} run must finish inside its bounded deadline\n${restored.stdout}\n${restored.stderr}`);
+      assertOwnedReceipt(restored, `restored ${scenario}`);
+      assert.equal(restored.status, 0, `restored ${scenario} run\n${restored.stdout}\n${restored.stderr}`);
+      if (hostMarkers[scenario]) assert.match(restored.stdout, hostMarkers[scenario], `restored ${scenario} must still prove the real host setModel outcome`);
+      assert.equal(readFileSync(violations, "utf8"), "", `restored ${scenario} run made a blocked outbound attempt`);
+    }
+    assert.equal(sha256(readFileSync(join(root, "index.ts"), "utf8")), PRODUCTION_SHA256,
+      "production index.ts must remain unchanged after all mutant runs");
   } finally {
     for (const [name, value] of Object.entries(previousCredentials)) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
@@ -230,7 +292,7 @@ it("cancels real AgentSession activation behind a proven deny-all fence", async 
     if (cleanupVerified) {
       rmSync(scratch, { recursive: true, force: true });
     } else {
-      process.stderr.write(`[native-activation] retaining scratch without verified owned-group death: ${scratch}\n`);
+      process.stderr.write(`[native-activation] retaining scratch without verified owned-group death after ${lastScenario}: ${scratch}\n`);
     }
   }
 });

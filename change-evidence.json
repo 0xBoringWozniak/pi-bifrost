@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
-  "base": "4915bc9a06b0d2bbb2b4baf551b6b57e7c0d2f1e",
+  "base": "8c654050191b7257df18c38ceb0cb186717cd447",
   "contracts": [
     {
-      "id": "compound-alternate-recovery",
-      "requirement": "R03",
+      "id": "native-activation-cancellation",
+      "requirement": "R06",
       "files": [
-        "tests/fixtures/replay-fault-control.mjs",
-        "tests/integration/reliability-v2-auto.test.mjs"
+        "tests/fixtures/native-activation-cancel-child.mjs",
+        "tests/integration/native-activation-cancel.test.mjs"
       ],
-      "boundary": "v1 and v2 Auto allowance recovery may use one configured alternate only; private compound-lineage faults prove that bound.",
-      "assertions": "Each fault proof copies source, records GREEN, makes its named single-alternate assertion RED, restores source, and records restored GREEN. Queued unsafe-tool pair remains outstanding.",
+      "boundary": "real Pi AgentSession activation cancellation and failed physical activation behind a deny-all outbound fence",
+      "assertions": "Cancellation, false activation, and throwing activation leave no forbidden dispatch; each private source mutation turns its named assertion RED before restored GREEN.",
       "boundaryTest": {
-        "file": "tests/integration/reliability-v2-auto.test.mjs",
-        "name": "proves allowanceRetryBoundaryStillSafe faults the v1 Auto allowance-retry assertion"
+        "file": "tests/integration/native-activation-cancel.test.mjs",
+        "name": "cancels real AgentSession activation behind a proven deny-all fence"
       },
       "invariant": {
-        "file": "tests/integration/reliability-v2-auto.test.mjs",
-        "name": "proves the v2 Auto alternate limit with a compound lineage fault"
+        "file": "tests/integration/native-activation-cancel.test.mjs",
+        "name": "cancels real AgentSession activation behind a proven deny-all fence"
       },
       "fault": {
-        "file": "tests/integration/reliability-v2-auto.test.mjs",
-        "name": "proves the v2 Auto alternate limit with a compound lineage fault"
+        "file": "tests/integration/native-activation-cancel.test.mjs",
+        "name": "cancels real AgentSession activation behind a proven deny-all fence"
       }
     }
   ]
