@@ -8,7 +8,6 @@
       "files": [
         "docs/merge-controller.md",
         "scripts/merge-controller.mjs",
-        "scripts/merge-eligibility.mjs",
         "tests/merge-controller.test.mjs"
       ],
       "boundary": "local fail-closed controller verifies an independent receipt, exact candidate/proposed-merge evidence, GitHub checks, review state, and post-merge push evidence before recording outcome.",
@@ -24,6 +23,28 @@
       "fault": {
         "file": "tests/merge-controller.test.mjs",
         "name": "guard removal control: bypassing receipt validation reddens the named assertion, restore is green"
+      }
+    },
+    {
+      "id": "merge-eligibility-revalidation",
+      "requirement": "R16",
+      "files": [
+        "scripts/merge-eligibility.mjs",
+        "tests/merge-eligibility.test.mjs"
+      ],
+      "boundary": "eligibility CLI re-fetches PR head/base and re-reads proposed-merge sha/parents/tree before returning an eligible result, bounds run, job, and review-thread evidence to one explicit first-100 page or fixed page/count/time bounds, and prints only fixed bounded terminal diagnostics.",
+      "assertions": "Eligibility fails closed with fixed blockers when head or base moves, the proposed tree or parents change, inventories truncate, or pagination exceeds its bounds; untrusted PR body and GitHub response text never reaches stdout or stderr.",
+      "boundaryTest": {
+        "file": "tests/merge-eligibility.test.mjs",
+        "name": "CLI re-fetches head, base, and proposed identity before returning eligible"
+      },
+      "invariant": {
+        "file": "tests/merge-eligibility.test.mjs",
+        "name": "terminal control PR-body text never reaches terminal diagnostics"
+      },
+      "fault": {
+        "file": "tests/merge-eligibility.test.mjs",
+        "name": "guard removal control: disabling final revalidation reddens the movement assertion, restore is green"
       }
     }
   ]
