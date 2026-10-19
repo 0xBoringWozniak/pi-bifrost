@@ -12,6 +12,7 @@ import {
   flushDebug,
   isDebugEnabled,
   setupDebug,
+  setupDebugForSession,
 } from "../debug.ts";
 
 async function logFiles(cwd: string): Promise<string[]> {
@@ -159,6 +160,25 @@ describe("debug facade with session-scoped storage", () => {
       await flushDebug(1_000);
       const output = await rows(await logFiles(cwd));
       assert.deepEqual(output.map((row) => row.event).sort(), ["after", "before"]);
+    } finally {
+      setupDebug({ enabled: false }, cwd);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rebinds the requesting session when a reload enables logging", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "bifrost-facade-disabled-bind-"));
+    try {
+      const session = { getHeader: () => ({ id: "sess-late" }) };
+      setupDebug({ enabled: false }, cwd);
+      setupDebugForSession({ enabled: true }, cwd, session);
+      debug("router", "enabled-late");
+      await flushDebug(1_000);
+      const files = await logFiles(cwd);
+      assert.equal(files.length, 1);
+      assert.match(files[0]!, /sess-late[\\/]main[\\/]/);
+      const output = await rows(files);
+      assert.equal(output[0]!.session_id, "sess-late");
     } finally {
       setupDebug({ enabled: false }, cwd);
       await rm(cwd, { recursive: true, force: true });

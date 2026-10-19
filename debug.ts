@@ -44,6 +44,15 @@ let exitHookInstalled = false;
 const retiring = new Set<Promise<unknown>>();
 const retiringLoggers = new Set<BifrostLogger>();
 
+function headerSessionId(session: DebugSessionLike | undefined): string | undefined {
+  try {
+    const id = session?.getHeader?.()?.id;
+    return typeof id === "string" && id.length > 0 ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function retire(logger: BifrostLogger): void {
   retiringLoggers.add(logger);
   const tracked = logger.close(250).catch(() => undefined);
@@ -129,13 +138,8 @@ export function setupDebug(cfg: DebugConfig, cwd: string): void {
 /** Associate the current process with a Pi session. Safe when logging is off. */
 export function bindDebugSession(session: DebugSessionLike | undefined, options?: DebugBindOptions): void {
   if (!active) return;
-  let id: unknown;
-  try {
-    id = session?.getHeader?.()?.id;
-  } catch {
-    return;
-  }
-  if (typeof id !== "string" || id.length === 0) return;
+  const id = headerSessionId(session);
+  if (!id) return;
   try {
     active.bindSession({ sessionId: id, ...options });
   } catch {
@@ -143,17 +147,21 @@ export function bindDebugSession(session: DebugSessionLike | undefined, options?
   }
 }
 
+/**
+ * Configure logging and restore the binding for the session that requested the
+ * reload. A reload can enable logging without another session_start event.
+ */
+export function setupDebugForSession(cfg: DebugConfig, cwd: string, session?: DebugSessionLike): void {
+  setupDebug(cfg, cwd);
+  bindDebugSession(session);
+}
+
 /** Return subsequent contextless events to the process fallback. */
 export function endDebugSession(session?: DebugSessionLike): void {
   if (!active) return;
   if (session) {
-    let id: unknown;
-    try {
-      id = session.getHeader?.()?.id;
-    } catch {
-      return;
-    }
-    if (typeof id !== "string" || id.length === 0) return;
+    const id = headerSessionId(session);
+    if (!id) return;
     // One process can host several sessions. Never clear another session's
     // binding because a different session shut down.
     if (active.currentIdentity().sessionId !== id) return;

@@ -118,8 +118,8 @@ function sanitizePrimitiveOrDrop(key: string, value: unknown): { keep: boolean; 
   return { keep: true, value };
 }
 
-function sanitizeValue(value: unknown, depth: number, state: SanitizeState): unknown {
-  if (!noteNode(state)) return TRUNCATED;
+function sanitizeValue(value: unknown, depth: number, state: SanitizeState, countNode = true): unknown {
+  if (countNode && !noteNode(state)) return TRUNCATED;
   if (value === null) return null;
   if (typeof value === "string") {
     const remaining = MAX_META_CHARS - state.chars;
@@ -146,7 +146,10 @@ function sanitizeValue(value: unknown, depth: number, state: SanitizeState): unk
     try {
       const source = value as unknown[];
       for (let index = 0; index < source.length; index += 1) {
-        if (state.nodes >= MAX_META_NODES) {
+        // Arrays may be sparse or have accessor elements. Count every visited
+        // slot so holes cannot bypass the node budget and materialize a huge
+        // output array. The slot itself represents the child node.
+        if (!noteNode(state)) {
           output.push(TRUNCATED);
           break;
         }
@@ -159,7 +162,7 @@ function sanitizeValue(value: unknown, depth: number, state: SanitizeState): unk
           output.push(TRUNCATED);
           continue;
         }
-        output.push(sanitizeValue(descriptor.value, depth + 1, state));
+        output.push(sanitizeValue(descriptor.value, depth + 1, state, false));
       }
     } finally {
       state.ancestors.delete(value as object);

@@ -98,6 +98,16 @@ describe("logging configuration", () => {
     assert.deepEqual(debugErrors("on"), ["config.debug_invalid"]);
   });
 
+  it("rejects and clamps a batch limit larger than queue capacity", () => {
+    const debug = {
+      queue: { maxBytes: 1_048_576 },
+      drain: { maxBatchBytes: 8 * 1024 * 1024 },
+    };
+    assert.deepEqual(debugErrors(debug), ["config.debug_drain_invalid"]);
+    const resolved = resolveDebugConfig({ enabled: true, ...debug }, cwd);
+    assert.equal(resolved.drain.maxBatchBytes, 1_048_576);
+  });
+
   it("warns when an explicit path overrides session scope", () => {
     const issues = validateConfig({
       ...baseConfig(),

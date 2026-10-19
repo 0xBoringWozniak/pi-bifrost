@@ -8,6 +8,7 @@ import type { CacheOptions } from "./cache.ts";
 import type { DebugConfig } from "./debug.ts";
 import { isLogLevel } from "./logging/severity.ts";
 import { isOverflowPolicyName } from "./logging/overflow-policy.ts";
+import { DEFAULT_MAX_BYTES } from "./logging/types.ts";
 import type { ReliabilityConfig } from "./reliability.ts";
 import { CLASSIFIER_BACKEND_IDS, TYPE_SAFE_ENDPOINT, TYPE_SAFE_MODEL, type ClassifierBackend, type TierCriterion } from "./classifier-backends.ts";
 import { emptyEconomicSnapshot, publishEconomicObservation, validateEconomicPolicy, type EconomicSignal, type ReservePolicy } from "./economic-signals.ts";
@@ -729,6 +730,16 @@ export function validateConfig(
           }
           if (drainRaw.maxBatchBytes !== undefined && (!Number.isInteger(drainRaw.maxBatchBytes) || (drainRaw.maxBatchBytes as number) < 1_024 || (drainRaw.maxBatchBytes as number) > 64 * 1024 * 1024)) {
             issues.push({ severity: "error", code: "config.debug_drain_invalid", path: "debug.drain.maxBatchBytes", message: "debug.drain.maxBatchBytes must be an integer from 1024 to 67108864." });
+          } else if (drainRaw.maxBatchBytes !== undefined) {
+            const queueLimit = criterionObject(queueRaw)
+              && Number.isInteger(queueRaw.maxBytes)
+              && (queueRaw.maxBytes as number) >= 1_024
+              && (queueRaw.maxBytes as number) <= 64 * 1024 * 1024
+                ? queueRaw.maxBytes as number
+                : DEFAULT_MAX_BYTES;
+            if ((drainRaw.maxBatchBytes as number) > queueLimit) {
+              issues.push({ severity: "error", code: "config.debug_drain_invalid", path: "debug.drain.maxBatchBytes", message: "debug.drain.maxBatchBytes must not exceed debug.queue.maxBytes." });
+            }
           }
         }
       }

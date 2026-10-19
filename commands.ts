@@ -9,7 +9,7 @@ import { BUNDLED_PUBLIC_INIT_DEFAULTS, DEFAULT_CLASSIFIER_CRITERIA, DEFAULT_RULE
 import type { CacheEntry } from "./cache.ts";
 import { cachePath, loadCache, saveCache, DEFAULT_MAX_ENTRIES, DEFAULT_THRESHOLD } from "./cache.ts";
 import { buildRouteDecisionSummary, type ClassificationPipeline, type ClassificationResult, type ClassificationSource, type RouteDecisionSummary } from "./classification-pipeline.ts";
-import { setupDebug, debug, debugMeasure } from "./debug.ts";
+import { setupDebugForSession, debug, debugMeasure } from "./debug.ts";
 import type { DebugEmitOptions, DebugMetaSource } from "./debug.ts";
 import { runProbe, probeOptionsFromConfig, PROBE_PROMPT_TEXT, readRecentCompleteProbeReport } from "./probe.ts";
 import { setBifrostModeStatus, setBifrostStatus } from "./ux-status.ts";
@@ -2639,7 +2639,7 @@ export function createCommandRouter(
         return;
       }
       // Re-init debug — user may have updated debug config since startup.
-      setupDebug(state.config.debug ?? { enabled: false }, process.cwd());
+      setupDebugForSession(state.config.debug ?? { enabled: false }, process.cwd(), ctx.sessionManager);
       const runtimeState = loadRuntimeState(runtimeStatePath(process.cwd()), {
         enabled: state.config.enabled ?? true,
         pinned: false,

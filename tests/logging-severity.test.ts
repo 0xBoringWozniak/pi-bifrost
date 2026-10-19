@@ -131,6 +131,14 @@ describe("metadata sanitization", () => {
     assert.equal(text.length < 8 * 1024, true);
   });
 
+  it("bounds sparse arrays without materializing every hole", () => {
+    const sparse = new Array(10_000_000);
+    const clean = sanitizeMeta({ sparse });
+    const output = clean.sparse as unknown[];
+    assert.ok(output.length <= 257, "sparse slots must count against the node budget");
+    assert.equal(output.at(-1), "[truncated]");
+  });
+
   it("does not leak sensitive values through fallback serialization", () => {
     const clean = sanitizeMeta({
       nested: { authorization: "fallback-secret" },

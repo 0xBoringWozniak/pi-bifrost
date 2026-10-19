@@ -81,7 +81,12 @@ export function resolveDebugConfig(config: DebugConfig | undefined, cwd: string)
     ? source.queue.overflowPolicy
     : "severity-first";
   const intervalMs = integerInRange(source.drain?.intervalMs, DEFAULT_FLUSH_INTERVAL_MS, 1, 60_000);
-  const maxBatchBytes = integerInRange(source.drain?.maxBatchBytes, DEFAULT_MAX_BATCH_BYTES, 1_024, maxBytes);
+  // A batch can never exceed the queue it drains. Clamp instead of silently
+  // falling back to the default when the configured batch is larger.
+  const maxBatchBytes = Math.min(
+    integerInRange(source.drain?.maxBatchBytes, DEFAULT_MAX_BATCH_BYTES, 1_024, 64 * 1024 * 1024),
+    maxBytes,
+  );
   const maxFileSizeMB = positiveFinite(source.sink?.maxFileSizeMB, DEFAULT_MAX_FILE_SIZE_MB, 1_024);
   const rotatedFiles = integerInRange(source.sink?.rotatedFiles, DEFAULT_ROTATED_FILES, 0, 10);
 
