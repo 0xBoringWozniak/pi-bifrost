@@ -7,6 +7,7 @@ import {
   bindDebugSession,
   debug,
   debugLoggerStats,
+  debugMeasure,
   endDebugSession,
   flushDebug,
   isDebugEnabled,
@@ -158,6 +159,74 @@ describe("debug facade with session-scoped storage", () => {
       await flushDebug(1_000);
       const output = await rows(await logFiles(cwd));
       assert.deepEqual(output.map((row) => row.event).sort(), ["after", "before"]);
+    } finally {
+      setupDebug({ enabled: false }, cwd);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("attributes an interleaved measurement to the session that started it", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "bifrost-facade-measure-"));
+    try {
+      setupDebug({ enabled: true }, cwd);
+      bindDebugSession({ getHeader: () => ({ id: "sess-a" }) });
+      const stopA = debugMeasure("test", "measure-a");
+      bindDebugSession({ getHeader: () => ({ id: "sess-b" }) });
+      const stopB = debugMeasure("test", "measure-b");
+      stopA({ id: "a" });
+      stopB({ id: "b" });
+      await flushDebug(1_000);
+
+      const output = await rows(await logFiles(cwd));
+      const a = output.find((row) => row.event === "measure-a");
+      const b = output.find((row) => row.event === "measure-b");
+      assert.ok(a && b);
+      assert.match(a!.file, /sess-a[\\/]main[\\/]/);
+      assert.equal(a!.session_id, "sess-a");
+      assert.match(b!.file, /sess-b[\\/]main[\\/]/);
+      assert.equal(b!.session_id, "sess-b");
+    } finally {
+      setupDebug({ enabled: false }, cwd);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("drops a measurement whose originating logger was retired by a reload", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "bifrost-facade-measure-reload-"));
+    const firstPath = join(cwd, "first.jsonl");
+    const secondPath = join(cwd, "second.jsonl");
+    try {
+      setupDebug({ enabled: true, path: firstPath }, cwd);
+      bindDebugSession({ getHeader: () => ({ id: "sess-reload-measure" }) });
+      const stop = debugMeasure("test", "reload-measure");
+      setupDebug({ enabled: true, path: secondPath }, cwd);
+      bindDebugSession({ getHeader: () => ({ id: "sess-reload-measure" }) });
+      stop();
+      await flushDebug(1_000);
+
+      await assert.rejects(readFile(secondPath, "utf8"));
+      await assert.rejects(readFile(firstPath, "utf8"));
+    } finally {
+      setupDebug({ enabled: false }, cwd);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not clear another session's binding on shutdown", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "bifrost-facade-shutdown-"));
+    try {
+      setupDebug({ enabled: true }, cwd);
+      bindDebugSession({ getHeader: () => ({ id: "sess-a" }) });
+      bindDebugSession({ getHeader: () => ({ id: "sess-b" }) });
+      endDebugSession({ getHeader: () => ({ id: "sess-a" }) });
+      debug("router", "still-b");
+      await flushDebug(1_000);
+
+      const output = await rows(await logFiles(cwd));
+      const row = output.find((entry) => entry.event === "still-b");
+      assert.ok(row);
+      assert.match(row!.file, /sess-b[\\/]main[\\/]/);
+      assert.equal(row!.session_id, "sess-b");
     } finally {
       setupDebug({ enabled: false }, cwd);
       await rm(cwd, { recursive: true, force: true });

@@ -23,6 +23,7 @@ import type {
   DebugEmitOptions,
   DebugMetaSource,
   LogIdentity,
+  LogIdentityHint,
 } from "./logging/types.ts";
 
 export type { DebugConfig, DebugEmitOptions, DebugMeta, DebugMetaSource, LogLevel, LoggerStats } from "./logging/types.ts";
@@ -143,8 +144,21 @@ export function bindDebugSession(session: DebugSessionLike | undefined, options?
 }
 
 /** Return subsequent contextless events to the process fallback. */
-export function endDebugSession(): void {
-  active?.endSession();
+export function endDebugSession(session?: DebugSessionLike): void {
+  if (!active) return;
+  if (session) {
+    let id: unknown;
+    try {
+      id = session.getHeader?.()?.id;
+    } catch {
+      return;
+    }
+    if (typeof id !== "string" || id.length === 0) return;
+    // One process can host several sessions. Never clear another session's
+    // binding because a different session shut down.
+    if (active.currentIdentity().sessionId !== id) return;
+  }
+  active.endSession();
 }
 
 /** Whether structured logging is enabled for the current setup. */
@@ -168,20 +182,26 @@ export function debug(
 
 /**
  * Start a performance measure. Durations use the monotonic clock, so
- * overlapping measurements with the same name remain independent.
+ * overlapping measurements with the same name remain independent. Ownership
+ * is captured when the measurement starts, so a later session switch or config
+ * reload cannot attribute the result to unrelated work.
  */
 export function debugMeasure(
   module: string,
   event: string,
   options?: DebugEmitOptions,
 ): (meta?: DebugMetaSource, stopOptions?: DebugEmitOptions) => void {
-  if (!active?.accepts(options?.level ?? "debug")) return noopStop;
+  const logger = active;
+  const initialLevel = options?.level ?? "debug";
+  if (!logger?.accepts(initialLevel)) return noopStop;
   const startedAt = performance.now();
+  const identity = options?.identity ?? identityHintFor(logger.currentIdentity());
   return (meta?: DebugMetaSource, stopOptions?: DebugEmitOptions) => {
-    const logger = active;
     const level = stopOptions?.level ?? options?.level ?? "debug";
-    if (!logger?.accepts(level)) return;
-    const identity = stopOptions?.identity ?? options?.identity;
+    // Use the logger that accepted the start, not whatever is active now.
+    // A retired logger rejects new work, so a measurement that outlives a
+    // reload is dropped rather than written to the replacement run.
+    if (!logger.accepts(level)) return;
     const protectedEvent = stopOptions?.protected ?? options?.protected;
     try {
       logger.emit(
@@ -190,7 +210,7 @@ export function debugMeasure(
         meta,
         {
           level,
-          ...(identity ? { identity } : {}),
+          identity,
           ...(protectedEvent ? { protected: true } : {}),
         },
         "measure",
@@ -199,6 +219,15 @@ export function debugMeasure(
     } catch {
       // Diagnostics must never affect the measured operation.
     }
+  };
+}
+
+function identityHintFor(identity: LogIdentity): LogIdentityHint {
+  return {
+    sessionId: identity.sessionId,
+    rootSessionId: identity.rootSessionId,
+    ...(identity.agentId ? { agentId: identity.agentId } : {}),
+    ...(identity.parentAgentId ? { parentAgentId: identity.parentAgentId } : {}),
   };
 }
 

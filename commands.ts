@@ -10,6 +10,7 @@ import type { CacheEntry } from "./cache.ts";
 import { cachePath, loadCache, saveCache, DEFAULT_MAX_ENTRIES, DEFAULT_THRESHOLD } from "./cache.ts";
 import { buildRouteDecisionSummary, type ClassificationPipeline, type ClassificationResult, type ClassificationSource, type RouteDecisionSummary } from "./classification-pipeline.ts";
 import { setupDebug, debug, debugMeasure } from "./debug.ts";
+import type { DebugEmitOptions, DebugMetaSource } from "./debug.ts";
 import { runProbe, probeOptionsFromConfig, PROBE_PROMPT_TEXT, readRecentCompleteProbeReport } from "./probe.ts";
 import { setBifrostModeStatus, setBifrostStatus } from "./ux-status.ts";
 import { showBifrostResult } from "./result-viewer.ts";
@@ -112,6 +113,27 @@ export interface BifrostState {
   classifierDetection?: { backend: ClassifierBackend; reason: string };
 }
 
+function debugSessionIdentity(ctx?: ExtensionContext): { sessionId: string } | undefined {
+  try {
+    const id = ctx?.sessionManager?.getHeader?.()?.id;
+    return typeof id === "string" && id.length > 0 ? { sessionId: id } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Attribute command/config diagnostics to the session that issued them. */
+function debugForContext(
+  ctx: ExtensionContext | undefined,
+  module: string,
+  event: string,
+  meta?: DebugMetaSource,
+  options?: DebugEmitOptions,
+): void {
+  const identity = debugSessionIdentity(ctx);
+  debug(module, event, meta, identity ? { ...options, identity } : options);
+}
+
 function installConfigIfTierPoliciesValid(
   state: BifrostState,
   config: BifrostConfig,
@@ -124,7 +146,7 @@ function installConfigIfTierPoliciesValid(
   const totalTimeoutIssue = classifierTotalTimeoutIssue(config);
   if (totalTimeoutIssue) errors.push(totalTimeoutIssue);
   if (errors.length > 0) {
-    debug("config", "reload_rejected", { category: "validation_failed", issueCount: errors.length });
+    debugForContext(ctx, "config", "reload_rejected", { category: "validation_failed", issueCount: errors.length });
     log(ctx, `Bifrost config reload rejected: ${errors.map((issue) => issue.message).join(" ")}`, "error");
     return false;
   }
@@ -155,7 +177,7 @@ function installReloadedConfig(
   ctx: ExtensionContext,
 ): boolean {
   if (loaded.diagnostics.length > 0) {
-    debug("config", "reload_rejected", { category: "source_invalid", issueCount: loaded.diagnostics.length });
+    debugForContext(ctx, "config", "reload_rejected", { category: "source_invalid", issueCount: loaded.diagnostics.length });
     log(ctx, `Bifrost config reload rejected: ${loaded.diagnostics.map(({ message }) => message).join(" ")}`, "error");
     return false;
   }
@@ -2609,7 +2631,8 @@ export function createCommandRouter(
       log(ctx, "Bifrost unpinned");
     }),
     exact("reload", (_, ctx) => {
-      const done = debugMeasure("command", "reload");
+      const identity = debugSessionIdentity(ctx);
+      const done = debugMeasure("command", "reload", identity ? { identity } : undefined);
       const loadedConfig = loadConfigForReload(process.cwd(), state.extensionDir);
       if (!installReloadedConfig(state, loadedConfig, ctx)) {
         done({ accepted: false });
@@ -2633,7 +2656,7 @@ export function createCommandRouter(
       syncBifrostModeStatus(ctx, state);
       clearBifrostWidgets(ctx);
       done();
-      debug("command", "reloaded", {
+      debugForContext(ctx, "command", "reloaded", {
         enabled: state.enabled,
         classifierEnabled: state.classifierEnabled,
         tiers: Object.keys(state.config.models ?? {}).join(","),
@@ -2769,7 +2792,7 @@ export function createCommandRouter(
       state.classifierEnabled = true;
       state.invalidatePipeline();
       syncBifrostModeStatus(ctx, state);
-      debug("command", "classifier_toggle", { enabled: true });
+      debugForContext(ctx, "command", "classifier_toggle", { enabled: true });
       let saved = true;
       try { saved = state.saveModeState() !== false; } catch { saved = false; }
       log(ctx, saved ? "LLM classifier enabled" : "LLM classifier enabled for this session; its preference could not be saved.", saved ? undefined : "error");
@@ -2778,7 +2801,7 @@ export function createCommandRouter(
       state.classifierEnabled = false;
       state.invalidatePipeline();
       syncBifrostModeStatus(ctx, state);
-      debug("command", "classifier_toggle", { enabled: false });
+      debugForContext(ctx, "command", "classifier_toggle", { enabled: false });
       let saved = true;
       try { saved = state.saveModeState() !== false; } catch { saved = false; }
       log(ctx, saved
@@ -2845,7 +2868,7 @@ export function createCommandRouter(
     const sub = trimmed.toLowerCase();
 
     if (!trimmed) {
-      debug("command", "dashboard");
+      debugForContext(ctx, "command", "dashboard");
       if (!ctx.hasUI) {
         log(
           ctx,
@@ -2875,13 +2898,13 @@ export function createCommandRouter(
 
     for (const route of routes) {
       if (route.match(sub)) {
-        debug("command", "dispatch", { command: sub });
+        debugForContext(ctx, "command", "dispatch", { command: sub });
         await route.handler(trimmed, ctx);
         return;
       }
     }
 
-    debug("command", "picker", { command: sub });
+    debugForContext(ctx, "command", "picker", { command: sub });
     if (!ctx.hasUI) {
       log(ctx, `Unknown /bifrost subcommand: ${trimmed}`, "warning");
       return;
@@ -2899,7 +2922,7 @@ export function createCommandRouter(
     const route = routes.find((entry) => entry.value === selected.value);
     if (!route) return;
 
-    debug("command", "dispatch", { command: route.value });
+    debugForContext(ctx, "command", "dispatch", { command: route.value });
     await route.handler(route.value, ctx);
   };
 }

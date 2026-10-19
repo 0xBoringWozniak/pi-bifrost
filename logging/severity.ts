@@ -62,18 +62,170 @@ const SENSITIVE_KEYS = new Set([
   "error_code", "stacktrace",
 ]);
 
-/** Removes reserved fields and drops string or structured values in sensitive channels. */
+// Nested metadata is untrusted. Traversal is deliberately shallow and node
+// bounded so a hostile object cannot turn logging into unbounded work.
+// Deep enough for routing diagnostics such as
+// meta.decision.attempted[].candidates[].reserve.reasons[], while still
+// bounding hostile input.
+const MAX_META_DEPTH = 8;
+const MAX_META_NODES = 256;
+const MAX_META_KEYS = 64;
+const MAX_META_CHARS = 128 * 1024;
+const TRUNCATED = "[truncated]";
+const CIRCULAR = "[circular]";
+
+interface SanitizeState {
+  nodes: number;
+  chars: number;
+  readonly ancestors: WeakSet<object>;
+}
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEYS.has(key.toLowerCase());
+}
+
+function isSkippedNestedKey(key: string): boolean {
+  return DANGEROUS_KEYS.has(key) || key.toLowerCase() === "tojson";
+}
+
+function safeDescriptor(value: object, key: string): PropertyDescriptor | undefined {
+  try {
+    return Object.getOwnPropertyDescriptor(value, key);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeOwnKeys(value: object): PropertyKey[] {
+  try {
+    return Reflect.ownKeys(value);
+  } catch {
+    return [];
+  }
+}
+
+function noteNode(state: SanitizeState): boolean {
+  state.nodes += 1;
+  return state.nodes <= MAX_META_NODES;
+}
+
+function sanitizePrimitiveOrDrop(key: string, value: unknown): { keep: boolean; value?: unknown } {
+  if (isSensitiveKey(key)) {
+    const sensitiveString = typeof value === "string" && value.length > 0;
+    const sensitiveStructure = value !== null && typeof value === "object";
+    if (sensitiveString || sensitiveStructure) return { keep: false };
+  }
+  return { keep: true, value };
+}
+
+function sanitizeValue(value: unknown, depth: number, state: SanitizeState): unknown {
+  if (!noteNode(state)) return TRUNCATED;
+  if (value === null) return null;
+  if (typeof value === "string") {
+    const remaining = MAX_META_CHARS - state.chars;
+    if (value.length <= remaining) {
+      state.chars += value.length;
+      return value;
+    }
+    state.chars = MAX_META_CHARS;
+    return `${value.slice(0, Math.max(0, remaining))}${TRUNCATED}`;
+  }
+  if (typeof value !== "object") return value;
+
+  let array = false;
+  try {
+    array = Array.isArray(value);
+  } catch {
+    return TRUNCATED;
+  }
+  if (array) {
+    if (depth >= MAX_META_DEPTH) return TRUNCATED;
+    if (state.ancestors.has(value as object)) return CIRCULAR;
+    state.ancestors.add(value as object);
+    const output: unknown[] = [];
+    try {
+      const source = value as unknown[];
+      for (let index = 0; index < source.length; index += 1) {
+        if (state.nodes >= MAX_META_NODES) {
+          output.push(TRUNCATED);
+          break;
+        }
+        const descriptor = safeDescriptor(source, String(index));
+        if (!descriptor || !descriptor.enumerable) {
+          output.push(null);
+          continue;
+        }
+        if (!("value" in descriptor)) {
+          output.push(TRUNCATED);
+          continue;
+        }
+        output.push(sanitizeValue(descriptor.value, depth + 1, state));
+      }
+    } finally {
+      state.ancestors.delete(value as object);
+    }
+    return output;
+  }
+
+  if (state.ancestors.has(value as object)) return CIRCULAR;
+  // Dates are legitimate diagnostics and have no enumerable data properties.
+  try {
+    if (value instanceof Date) {
+      const time = value.getTime();
+      return Number.isNaN(time) ? null : value.toISOString();
+    }
+  } catch {
+    return TRUNCATED;
+  }
+  if (depth >= MAX_META_DEPTH) return TRUNCATED;
+
+  state.ancestors.add(value as object);
+  const clean: Record<string, unknown> = {};
+  try {
+    let kept = 0;
+    for (const key of safeOwnKeys(value as object)) {
+      if (typeof key !== "string") continue;
+      if (kept >= MAX_META_KEYS || state.nodes >= MAX_META_NODES) break;
+      if (isSkippedNestedKey(key)) continue;
+      const descriptor = safeDescriptor(value as object, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) continue;
+      const decision = sanitizePrimitiveOrDrop(key, descriptor.value);
+      if (!decision.keep) continue;
+      clean[key] = sanitizeValue(descriptor.value, depth + 1, state);
+      kept += 1;
+    }
+  } finally {
+    state.ancestors.delete(value as object);
+  }
+  return clean;
+}
+
+/**
+ * Returns a bounded, plain-data copy of metadata. Reserved ownership fields are
+ * removed, sensitive channels are dropped at every depth, accessors and
+ * `toJSON` are never executed, and circular or oversized structures degrade to
+ * markers instead of throwing or growing without bound.
+ */
 export function sanitizeMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!meta) return {};
+  const state: SanitizeState = { nodes: 0, chars: 0, ancestors: new WeakSet() };
   const clean: Record<string, unknown> = {};
-  for (const key of Object.keys(meta)) {
-    if (RESERVED_BASE.has(key)) continue;
-    const value = meta[key];
-    if (SENSITIVE_KEYS.has(key.toLowerCase())) {
-      if (typeof value === "string" ? value.length > 0
-        : value !== null && typeof value === "object") continue;
+  let kept = 0;
+  state.ancestors.add(meta);
+  try {
+    for (const key of safeOwnKeys(meta)) {
+      if (typeof key !== "string") continue;
+      if (kept >= MAX_META_KEYS) break;
+      if (RESERVED_BASE.has(key) || key.toLowerCase() === "tojson") continue;
+      const descriptor = safeDescriptor(meta, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) continue;
+      const decision = sanitizePrimitiveOrDrop(key, descriptor.value);
+      if (!decision.keep) continue;
+      clean[key] = sanitizeValue(descriptor.value, 0, state);
+      kept += 1;
     }
-    clean[key] = value;
+  } finally {
+    state.ancestors.delete(meta);
   }
   return clean;
 }
@@ -141,8 +293,12 @@ export function serializeRecord(
     try {
       const fallback: Record<string, unknown> = {};
       for (const key of Object.keys(record)) {
-        if (DANGEROUS_KEYS.has(key)) continue;
+        if (DANGEROUS_KEYS.has(key) || key.toLowerCase() === "tojson") continue;
         const value = record[key];
+        if (isSensitiveKey(key)
+          && (typeof value === "string" || (value !== null && typeof value === "object"))) {
+          continue;
+        }
         if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
           fallback[key] = value;
         }

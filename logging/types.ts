@@ -105,6 +105,11 @@ export interface LogDestination {
   readonly path: string;
   /** Shared single-file destination used by explicit `debug.path` configs. */
   readonly shared: boolean;
+  /**
+   * Session-scoped logging root. Present only when writes must remain inside
+   * the configured root; explicit legacy shared paths leave this undefined.
+   */
+  readonly root?: string;
 }
 
 export interface LogEntry {
@@ -113,6 +118,8 @@ export interface LogEntry {
   /** Higher values survive overflow longer. Derived from level and protection. */
   readonly retention: number;
   readonly destination: LogDestination;
+  /** Source ownership captured at admission; summaries and failures use it. */
+  readonly identity: LogIdentity;
   /** Prerendered JSONL line, including the trailing newline. */
   readonly line: string;
   readonly bytes: number;

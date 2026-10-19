@@ -200,8 +200,8 @@ export function destinationFor(config: ResolvedDebugConfig, identity: LogIdentit
     : join(root, "main", `${run}.jsonl`);
   const candidate = join(config.directory, relativePath);
   if (isInside(config.directory, candidate)) {
-    return { key: candidate, path: candidate, shared: false };
+    return { key: candidate, path: candidate, shared: false, root: config.directory };
   }
   const fallback = join(config.directory, UNATTRIBUTED_SESSION, "main", `${run}.jsonl`);
-  return { key: fallback, path: fallback, shared: false };
+  return { key: fallback, path: fallback, shared: false, root: config.directory };
 }

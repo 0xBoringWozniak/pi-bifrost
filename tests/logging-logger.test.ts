@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -15,6 +15,7 @@ class FakeSink implements LogSink {
   readonly batches: LogEntry[][] = [];
   failNext = 0;
   stall = false;
+  closed = false;
 
   async write(batch: readonly LogEntry[]): Promise<void> {
     this.batches.push([...batch]);
@@ -28,7 +29,9 @@ class FakeSink implements LogSink {
 
   async flush(): Promise<void> {}
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    this.closed = true;
+  }
 }
 
 function create(
@@ -37,6 +40,7 @@ function create(
     identity?: ReturnType<typeof createProcessIdentity>;
     bootstrapTimeoutMs?: number;
     correlation?: Record<string, string>;
+    date?: () => Date;
   } = {},
 ) {
   const sinks = new Map<string, FakeSink>();
@@ -49,6 +53,7 @@ function create(
     identity: options.identity ?? createProcessIdentity({}, 4242),
     correlation: options.correlation ?? {},
     bootstrapTimeoutMs: options.bootstrapTimeoutMs ?? 5_000,
+    ...(options.date ? { date: options.date } : {}),
     sinkFactory: (destination: LogDestination) => {
       let sink = sinks.get(destination.key);
       if (!sink) {
@@ -104,16 +109,24 @@ describe("bifrost logger", () => {
     assert.equal(output[0]!.event, "callback");
   });
 
-  it("survives a metadata getter that throws", async () => {
+  it("does not execute a metadata getter", async () => {
     const { logger, sinks } = create();
+    let calls = 0;
     const meta: Record<string, unknown> = { ok: true };
-    Object.defineProperty(meta, "boom", { enumerable: true, get: () => { throw new Error("getter"); } });
+    Object.defineProperty(meta, "boom", {
+      enumerable: true,
+      get: () => {
+        calls += 1;
+        throw new Error("getter");
+      },
+    });
     logger.emit("router", "getter", meta);
     await logger.flush(1_000);
     const row = [...sinks.values()].flatMap(rows)[0]!;
     assert.equal(row.event, "getter");
-    assert.equal(row._meta_error, "meta_threw");
-    assert.equal(Object.hasOwn(row, "ok"), false);
+    assert.equal(calls, 0, "getters must not run during logging");
+    assert.equal(Object.hasOwn(row, "ok"), true);
+    assert.equal(Object.hasOwn(row, "boom"), false);
   });
 
   it("does not let metadata override reserved fields and redacts string secrets", async () => {
@@ -239,6 +252,46 @@ describe("bifrost logger", () => {
     assert.match(String(output[0]!.destination), /session-1[\\/]main[\\/]/);
   });
 
+  it("snapshots bootstrap metadata and its original timestamp", async () => {
+    const fixed = new Date("2026-01-02T03:04:05.000Z");
+    const { logger, sinks } = create({}, { date: () => fixed });
+    const metadata: Record<string, unknown> = { decision: "A" };
+    logger.emit("router", "snapshot", metadata, { level: "info" });
+    metadata.decision = "B";
+    metadata.payload = "x".repeat(70 * 1024);
+    logger.bindSession({ sessionId: "session-snapshot" });
+    await logger.flush(1_000);
+
+    const row = allRows(sinks)[0]!;
+    assert.equal(row.event, "snapshot");
+    assert.equal(row.decision, "A", "bootstrap must retain the value recorded at admission");
+    assert.equal(Object.hasOwn(row, "payload"), false);
+    assert.equal(row.ts, fixed.toISOString());
+    assert.equal(logger.stats().droppedByReason.oversized, 0);
+  });
+
+  it("enforces the bootstrap capacity at the actual retained size", async () => {
+    const { logger, sinks } = create();
+    for (let index = 0; index < 64; index += 1) {
+      logger.emit("bifrost", `boot-${index}`, {
+        index,
+        payload: "x".repeat(3_000),
+      }, { level: "info" });
+    }
+    logger.bindSession({ sessionId: "session-capacity" });
+    await logger.flush(1_000);
+
+    const entries = [...sinks.values()].flatMap((sink) => sink.entries);
+    const retainedBytes = entries.reduce((total, entry) => total + entry.bytes, 0);
+    assert.equal(entries.length < 64, true, "older bootstrap entries must be evicted");
+    assert.equal(
+      retainedBytes <= 128 * 1024 + 4 * 1024,
+      true,
+      `retained bootstrap bytes were ${retainedBytes}`,
+    );
+    assert.equal(logger.stats().droppedByReason.queue_capacity > 0, true);
+  });
+
   it("falls back to an unattributed run when identity never arrives", async () => {
     const { logger, sinks } = create({}, { bootstrapTimeoutMs: 20 });
     logger.emit("bifrost", "early", undefined, { level: "info" });
@@ -354,6 +407,29 @@ describe("bifrost logger", () => {
     await logger.close(500);
   });
 
+  it("prunes idle sinks under continuous activity without closing an active write", async () => {
+    const { logger, sinks } = create({ drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 } });
+    logger.bindSession({ sessionId: "stalled-session" });
+    logger.emit("router", "stalled");
+    await logger.flush(20);
+    const stalled = [...sinks.entries()].find(([key]) => key.includes("stalled-session"))?.[1];
+    assert.ok(stalled, "stalled sink must exist");
+    stalled.stall = true;
+    // Create the stalled write and keep it in flight.
+    logger.emit("router", "still-stalled");
+    await logger.flush(20);
+
+    for (let index = 0; index < 40; index += 1) {
+      logger.bindSession({ sessionId: `active-${index}` });
+      logger.emit("router", `event-${index}`);
+      await logger.flush(20);
+    }
+
+    assert.equal(logger.stats().openSinks <= 16, true, `openSinks=${logger.stats().openSinks}`);
+    assert.equal(stalled.closed, false, "a sink with an active write must not be closed");
+    await logger.close(20);
+  });
+
   it("returns from flush at the deadline when a sink stalls", async () => {
     const { logger, sinks } = create();
     logger.emit("router", "stalled");
@@ -440,6 +516,67 @@ describe("bifrost logger", () => {
     assert.equal(stats.droppedByReason.sink_degraded >= 1, true);
     await logger.close(50);
   });
+
+  it("keeps a failing session from degrading a healthy destination", async () => {
+    const { logger, sinks } = create({
+      drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "session-a" });
+    logger.emit("router", "a-warm");
+    await logger.flush(1_000);
+    const aSink = [...sinks.entries()].find(([key]) => key.includes("session-a"))?.[1];
+    assert.ok(aSink, "session A sink must exist");
+
+    // Drive A past the failure threshold and into its degraded window.
+    aSink.failNext = 10_000;
+    for (let index = 0; index < 6; index += 1) {
+      logger.emit("router", `a-fails-${index}`);
+      await logger.flush(200);
+    }
+    const degradedDropsBefore = logger.stats().droppedByReason.sink_degraded;
+
+    logger.bindSession({ sessionId: "session-b" });
+    logger.emit("router", "b-healthy");
+    await logger.flush(1_000);
+
+    const output = allRows(sinks);
+    const bRows = output.filter((row) => String(row.destination).includes("session-b"));
+    assert.deepEqual(bRows.map((row) => row.event), ["b-healthy"]);
+    assert.equal(
+      bRows.some((row) => row.event === "events_dropped"),
+      false,
+      "session B must not receive session A's drop summary",
+    );
+    assert.equal(
+      logger.stats().droppedByReason.sink_degraded,
+      degradedDropsBefore,
+      "session B's healthy sink must not be degraded by session A",
+    );
+    await logger.close(50);
+  });
+
+  it("attributes drop summaries to the destination that lost events", async () => {
+    const { logger, sinks } = create({
+      queue: { maxEntries: 1, maxBytes: 64 * 1024, overflowPolicy: "severity-first" },
+      drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "session-a" });
+    logger.emit("router", "a-first");
+    logger.emit("router", "a-second");
+    logger.bindSession({ sessionId: "session-b" });
+    logger.emit("router", "b-third");
+    await logger.flush(1_000);
+
+    const output = allRows(sinks);
+    const aRows = output.filter((row) => String(row.destination).includes("session-a"));
+    const bRows = output.filter((row) => String(row.destination).includes("session-b"));
+    assert.equal(bRows.some((row) => row.event === "events_dropped"), false);
+    const summary = aRows.find((row) => row.event === "events_dropped");
+    assert.ok(summary, `expected A's drop summary, got ${JSON.stringify(output)}`);
+    assert.equal(summary!.dropped_total, 2);
+    assert.equal(summary!.session_id, "session-a");
+    await logger.close(50);
+  });
 });
 
 describe("bifrost logger filesystem integration", () => {
@@ -480,6 +617,56 @@ describe("bifrost logger filesystem integration", () => {
       await logger.close(500);
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not follow a session-directory symlink outside the logging root", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "bifrost-logger-link-parent-"));
+    const outside = await mkdtemp(join(tmpdir(), "bifrost-logger-link-outside-"));
+    try {
+      const config = resolveDebugConfig({ enabled: true }, cwd);
+      const sessionRoot = join(config.directory, "escape");
+      await mkdir(sessionRoot, { recursive: true });
+      await symlink(outside, join(sessionRoot, "main"), "dir");
+
+      const logger = new BifrostLogger({ config, identity: createProcessIdentity({}, 13) });
+      logger.bindSession({ sessionId: "escape" });
+      logger.emit("router", "must-not-escape");
+      await logger.flush(1_000);
+
+      assert.equal(logger.stats().writeFailures >= 1, true);
+      assert.deepEqual(await readdir(outside), [], "nothing may be written through the symlink");
+      await logger.close(500);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not follow a pre-existing run-file symlink", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "bifrost-logger-link-file-"));
+    const outside = await mkdtemp(join(tmpdir(), "bifrost-logger-link-target-"));
+    try {
+      const config = resolveDebugConfig({ enabled: true }, cwd);
+      const runDir = join(config.directory, "linked", "main");
+      await mkdir(runDir, { recursive: true });
+      const target = join(outside, "target.jsonl");
+      await writeFile(target, "");
+      await symlink(target, join(runDir, "run-fixed.jsonl"));
+
+      const logger = new BifrostLogger({
+        config,
+        identity: { rootSessionId: "linked", sessionId: "linked", runId: "run-fixed", processId: 14 },
+      });
+      logger.emit("router", "must-not-follow");
+      await logger.flush(1_000);
+
+      assert.equal(logger.stats().writeFailures >= 1, true);
+      assert.equal(await readFile(target, "utf8"), "");
+      await logger.close(500);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 });

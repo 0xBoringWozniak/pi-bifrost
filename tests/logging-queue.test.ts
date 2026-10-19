@@ -3,9 +3,16 @@ import { describe, it } from "node:test";
 import { BoundedQueue } from "../logging/bounded-queue.ts";
 import { resolveOverflowPolicy } from "../logging/overflow-policy.ts";
 import { retentionFor } from "../logging/severity.ts";
-import type { LogEntry, LogLevel } from "../logging/types.ts";
+import type { LogEntry, LogIdentity, LogLevel } from "../logging/types.ts";
 
 let nextId = 0;
+
+const identity: LogIdentity = {
+  rootSessionId: "test",
+  sessionId: "test",
+  runId: "run",
+  processId: 1,
+};
 
 function entry(level: LogLevel, bytes: number): LogEntry {
   nextId += 1;
@@ -14,6 +21,7 @@ function entry(level: LogLevel, bytes: number): LogEntry {
     level,
     retention: retentionFor(level, false),
     destination: { key: "test", path: "/tmp/test.jsonl", shared: false },
+    identity,
     line: `${"x".repeat(Math.max(0, bytes - 1))}\n`,
     bytes,
   };

@@ -3,8 +3,9 @@
 // and append never overlap. A batch is retried at most once; repeated failure
 // is reported to the logger, which degrades instead of retrying forever.
 
-import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { constants } from "node:fs";
+import { appendFile, mkdir, open, realpath, rename, rm, stat } from "node:fs/promises";
+import { dirname, isAbsolute, relative } from "node:path";
 import type { LogDestination, LogEntry, LogSink } from "./types.ts";
 
 export interface FileSinkOptions {
@@ -17,6 +18,13 @@ function isMissingPath(error: unknown): boolean {
   const code = (error as { code?: unknown } | undefined)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
 }
+
+function isInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel.length === 0 || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+const NO_FOLLOW = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
 
 export class AsyncFileSink implements LogSink {
   private chain: Promise<void> = Promise.resolve();
@@ -73,8 +81,43 @@ export class AsyncFileSink implements LogSink {
       await mkdir(dirname(this.destination.path), { recursive: true, mode: 0o700 });
       this.directoryReady = true;
     }
+    await this.assertInsideRoot();
     await this.rotateIfNeeded();
-    await appendFile(this.destination.path, payload, { encoding: "utf-8", flag: "a", mode: 0o600 });
+    await this.append(payload);
+  }
+
+  /**
+   * Lexical destination checks cannot see a pre-existing symlink inside the
+   * logging root. Resolve the parent directory before every scoped append so a
+   * link cannot redirect session logs outside the configured root. Explicit
+   * shared paths keep their legacy behavior.
+   */
+  private async assertInsideRoot(): Promise<void> {
+    const root = this.destination.root;
+    if (!root) return;
+    const [realRoot, realParent] = await Promise.all([
+      realpath(root),
+      realpath(dirname(this.destination.path)),
+    ]);
+    if (!isInside(realRoot, realParent)) {
+      throw new Error("session log path escapes the configured logging root");
+    }
+  }
+
+  private async append(payload: string): Promise<void> {
+    if (!this.destination.root) {
+      // Explicit shared path: preserve historical append semantics.
+      await appendFile(this.destination.path, payload, { encoding: "utf-8", flag: "a", mode: 0o600 });
+      return;
+    }
+    // O_NOFOLLOW prevents a pre-existing run-file symlink from being followed.
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW;
+    const handle = await open(this.destination.path, flags, 0o600);
+    try {
+      await handle.write(payload, undefined, "utf8");
+    } finally {
+      await handle.close();
+    }
   }
 
   private async rotateIfNeeded(): Promise<void> {
