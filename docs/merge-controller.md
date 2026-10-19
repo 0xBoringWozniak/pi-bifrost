@@ -88,6 +88,13 @@ single 100-entry API page. Missing, ambiguous, oversized, or incomplete evidence
 rejects instead of falling back to historical success. No workflow change or
 new dependency is required.
 
+### Current-base rebind
+
+A completed run is not clearance when its checkout or proposed merge predates
+the current base. Preserve that run as historical evidence, then rebuild the
+candidate declaration from a clean current-base worktree and push that new
+candidate for fresh CI. Do not reinterpret an old success after the base moves.
+
 The API contracts are documented in [GitHub workflow runs](https://docs.github.com/en/rest/actions/workflow-runs)
 and [GitHub artifacts](https://docs.github.com/en/rest/actions/artifacts).
 These field contracts are not a claim of live validation of this controller.
