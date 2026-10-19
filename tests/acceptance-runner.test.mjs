@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { gateDirectory, gitTruth, installedToolVersions, matchNamedTestEvent, parseArgs, sourceFingerprint, summarizeCases } from "../scripts/acceptance/core.mjs";
 import { buildGateEvidenceCases, registerTerminationHandlers, runChild, supportingTestCase, terminateProcessGroup, verificationGateEnvironment, writeNodeTestEventsArtifact } from "../scripts/acceptance.mjs";
@@ -267,6 +267,48 @@ describe("acceptance runner boundary", () => {
     assert.equal(matchNamedTestEvent(events, { file: "tests/routing.test.ts", name: "defaults to first" }, "/repo").passed, true);
   });
 
+  for (const ambiguous of [false, true]) {
+    it(`blocks ${ambiguous ? "ambiguous" : "missing"} required results at the acceptance report boundary`, () => {
+      const target = { id: "support:required-report", requirement: "R16", file: "tests/required-report.test.mjs", name: "required witness", boundary: "required acceptance report" };
+      const event = { type: "test:complete", file: join(process.cwd(), target.file), name: target.name, passed: true };
+      const result = supportingTestCase({ target, testEvents: ambiguous ? [event, event] : [], artifactDir: tmpdir(), root: process.cwd(), eventPath: "events.jsonl" });
+      assert.equal(result.status, "blocked", `${ambiguous ? "ambiguous" : "missing"} required result must block the report case`);
+      assert.equal(result.id, target.id);
+      assert.equal(result.required, true);
+      assert.equal(result.detail, `The pinned test runner did not emit the exact required test result: ${target.file} — ${target.name}`);
+    });
+  }
+
+  for (const fault of [
+    { label: "missing-result", anchor: '!result ? "blocked"', replacement: '!result ? "passed"' },
+    { label: "missing-artifact", anchor: '!hasCaseArtifact ? "blocked"', replacement: '!hasCaseArtifact ? "passed"' },
+  ]) {
+    it(`fault control: the ${fault.label} guard is required by the acceptance report`, async () => {
+      const directory = mkdtempSync(join(tmpdir(), "bifrost-report-guard-"));
+      const sourceUrl = new URL("../scripts/acceptance.mjs", import.meta.url);
+      const source = readFileSync(sourceUrl, "utf8");
+      const copy = source.replace(/from "(\.\/[^"]+)"/gu, (_, specifier) => `from ${JSON.stringify(new URL(specifier, sourceUrl).href)}`);
+      assert.equal(copy.split(fault.anchor).length, 2, "report guard fault anchor must be unique");
+      const file = join(directory, "acceptance.mjs");
+      const target = { id: "support:required-report", requirement: "R16", file: "tests/required-report.test.mjs", name: "required witness", boundary: "required acceptance report", ...(fault.label === "missing-artifact" ? { caseArtifact: "absent.json" } : {}) };
+      const testEvents = fault.label === "missing-artifact" ? [{ type: "test:complete", file: join(process.cwd(), target.file), name: target.name, passed: true }] : [];
+      const requireBlocked = (consumer) => assert.equal(consumer({ target, testEvents, artifactDir: directory, root: process.cwd(), eventPath: "events.jsonl" }).status, "blocked", `a ${fault.label} report case must stay blocked`);
+      try {
+        writeFileSync(file, copy);
+        requireBlocked((await import(pathToFileURL(file).href)).supportingTestCase);
+        writeFileSync(file, copy.replace(fault.anchor, fault.replacement));
+        const mutant = await import(pathToFileURL(file).href + "?fault");
+        assert.throws(() => requireBlocked(mutant.supportingTestCase), { code: "ERR_ASSERTION", message: new RegExp(`a ${fault.label} report case must stay blocked`) });
+        writeFileSync(file, copy);
+        requireBlocked((await import(pathToFileURL(file).href + "?restored")).supportingTestCase);
+        assert.equal(createHash("sha256").update(readFileSync(file)).digest("hex"), createHash("sha256").update(copy).digest("hex"), "report source copy must be restored byte-for-byte");
+        assert.equal(readFileSync(sourceUrl, "utf8"), source, "submitted report source must remain untouched");
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("rejects ambiguous duplicate exact test events instead of accepting the first pass", () => {
     const events = [
       { file: "/repo/tests/routing.test.ts", name: "defaults to first", passed: true },
@@ -291,6 +333,11 @@ describe("acceptance runner boundary", () => {
     const todo = events.find((event) => event.name === "required todo case");
     assert.deepEqual({ passed: skipped.passed, skipped: skipped.skipped, todo: skipped.todo }, { passed: false, skipped: true, todo: false });
     assert.deepEqual({ passed: todo.passed, skipped: todo.skipped, todo: todo.todo }, { passed: false, skipped: false, todo: true });
+    for (const event of [skipped, todo]) {
+      assert.equal(typeof event.file, "string", "the real reporter must identify its skipped/TODO witness");
+      const result = supportingTestCase({ target: { id: "support:nonpassing", requirement: "R16", file: event.file, name: event.name, boundary: "real reporter result" }, testEvents: events, artifactDir: directory, root: directory, eventPath: "events.jsonl" });
+      assert.equal(result.status, "failed", "real skip/TODO events must fail the required report case");
+    }
   });
 
   it("keeps bounded actionable failure diagnostics while redacting secrets in real Node events", () => {

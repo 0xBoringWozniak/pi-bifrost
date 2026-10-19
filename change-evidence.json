@@ -1,27 +1,51 @@
 {
   "schemaVersion": 1,
-  "base": "14d280da99354e278ff62d8b7a1fee106fab7ddf",
+  "base": "c162311bc7fcfb79bc26fa33f7b9c516e5c020a2",
   "contracts": [
     {
-      "id": "classifier-subprocess-tool-isolation",
-      "requirement": "R12",
+      "id": "required-journey-bindings",
+      "requirement": "R16",
       "files": [
-        "classifier.ts",
-        "tests/classifier.test.ts"
+        "scripts/acceptance.mjs",
+        "tests/acceptance-runner.test.mjs"
       ],
-      "boundary": "actual classifier subprocess argument construction with injected child; independent pinned Pi tool-execution probe",
-      "assertions": "Explicit subprocess and auto fallback disable Pi tools, preserve classification; removing the flag fails the exact tool-disable assertion.",
+      "boundary": "required acceptance report consumer and exact delivered test-event bindings; no claim of exhaustive feature coverage",
+      "assertions": "Each required file/title has one passing event; missing/ambiguous results and absent artifacts cannot pass the actual report case. Delivered G09 boundaries remain explicit.",
       "boundaryTest": {
-        "file": "tests/classifier.test.ts",
-        "name": "disables all Pi tools for subprocess classifier subprocesses"
+        "file": "tests/acceptance-runner.test.mjs",
+        "name": "blocks missing required results at the acceptance report boundary"
       },
       "invariant": {
-        "file": "tests/classifier.test.ts",
-        "name": "disables all Pi tools for auto classifier subprocesses"
+        "file": "tests/acceptance-runner.test.mjs",
+        "name": "blocks ambiguous required results at the acceptance report boundary"
       },
       "fault": {
-        "file": "tests/classifier.test.ts",
-        "name": "the subprocess tool assertion detects a removed no-tools flag"
+        "file": "tests/acceptance-runner.test.mjs",
+        "name": "fault control: the missing-result guard is required by the acceptance report"
+      }
+    },
+    {
+      "id": "receipt-model-campaign",
+      "requirement": "R08",
+      "files": [
+        "tests/reliability-v2-state-machine.test.ts",
+        ".github/workflows/verification.yml",
+        "tests/verification-workflow.test.mjs",
+        "docs/verification-campaign.md"
+      ],
+      "boundary": "single-scope/no-observation receipt model, separate seed-observing exploratory sample, and existing bounded workflow command",
+      "assertions": "The exploratory sample uses and reports the actual campaign seed; pinned replay tests remain unchanged; the reliability campaign includes the receipt state machine. Existing production-model fault controls remain required.",
+      "boundaryTest": {
+        "file": "tests/reliability-v2-state-machine.test.ts",
+        "name": "matches the independent model with the campaign default seed"
+      },
+      "invariant": {
+        "file": "tests/verification-workflow.test.mjs",
+        "name": "reliability campaign includes the receipt state machine"
+      },
+      "fault": {
+        "file": "tests/reliability-v2-state-machine.test.ts",
+        "name": "rejects the revisionSkipsTwo control"
       }
     }
   ]

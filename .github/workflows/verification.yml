@@ -266,6 +266,7 @@ jobs:
           --timeout-ms 600000 --out "$RUNNER_TEMP/bifrost-campaign" --
           node --test --experimental-strip-types
           tests/reliability-state-machine.test.ts
+          tests/reliability-v2-state-machine.test.ts
           tests/reliability-filter-properties.test.ts
           tests/cache-properties.test.ts
       - name: Bounded integration repeats
