@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "base": "c162311bc7fcfb79bc26fa33f7b9c516e5c020a2",
+  "base": "4915bc9a06b0d2bbb2b4baf551b6b57e7c0d2f1e",
   "contracts": [
     {
       "id": "required-journey-bindings",
@@ -22,6 +22,28 @@
       "fault": {
         "file": "tests/acceptance-runner.test.mjs",
         "name": "fault control: the missing-result guard is required by the acceptance report"
+      }
+    },
+    {
+      "id": "compound-alternate-recovery",
+      "requirement": "R03",
+      "files": [
+        "tests/fixtures/replay-fault-control.mjs",
+        "tests/integration/reliability-v2-auto.test.mjs"
+      ],
+      "boundary": "v1 and v2 Auto allowance recovery may use one configured alternate only; private compound-lineage faults prove that bound.",
+      "assertions": "Each fault proof copies source, records GREEN, makes its named single-alternate assertion RED, restores source, and records restored GREEN. Queued unsafe-tool pair remains outstanding.",
+      "boundaryTest": {
+        "file": "tests/integration/reliability-v2-auto.test.mjs",
+        "name": "proves allowanceRetryBoundaryStillSafe faults the v1 Auto allowance-retry assertion"
+      },
+      "invariant": {
+        "file": "tests/integration/reliability-v2-auto.test.mjs",
+        "name": "proves the v2 Auto alternate limit with a compound lineage fault"
+      },
+      "fault": {
+        "file": "tests/integration/reliability-v2-auto.test.mjs",
+        "name": "proves the v2 Auto alternate limit with a compound lineage fault"
       }
     },
     {
