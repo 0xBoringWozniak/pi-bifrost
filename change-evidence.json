@@ -1,32 +1,27 @@
 {
   "schemaVersion": 1,
-  "base": "888a07413a2b26be3c5f66d0117d7199a7b536ee",
+  "base": "14d280da99354e278ff62d8b7a1fee106fab7ddf",
   "contracts": [
     {
-      "id": "per-change-execution",
-      "requirement": "R16",
+      "id": "classifier-subprocess-tool-isolation",
+      "requirement": "R12",
       "files": [
-        "scripts/acceptance/change-evidence.mjs",
-        "scripts/acceptance/core.mjs",
-        "scripts/acceptance.mjs",
-        "tests/change-evidence.test.mjs",
-        "tests/acceptance-runner.test.mjs",
-        "docs/testing-coverage.md",
-        ".github/workflows/verification.yml"
+        "classifier.ts",
+        "tests/classifier.test.ts"
       ],
-      "boundary": "deterministic acceptance validator with real local Git fixture; not Pi generation",
-      "assertions": "Every changed file is mapped; named completed events are unique and passed; absent or stale metadata fails closed.",
+      "boundary": "actual classifier subprocess argument construction with injected child; independent pinned Pi tool-execution probe",
+      "assertions": "Explicit subprocess and auto fallback disable Pi tools, preserve classification; removing the flag fails the exact tool-disable assertion.",
       "boundaryTest": {
-        "file": "tests/change-evidence.test.mjs",
-        "name": "checks real git diff and fails closed for missing PR metadata or declaration"
+        "file": "tests/classifier.test.ts",
+        "name": "disables all Pi tools for subprocess classifier subprocesses"
       },
       "invariant": {
-        "file": "tests/change-evidence.test.mjs",
-        "name": "rejects missing ambiguous failed skipped TODO and nonterminal evidence"
+        "file": "tests/classifier.test.ts",
+        "name": "disables all Pi tools for auto classifier subprocesses"
       },
       "fault": {
-        "file": "tests/change-evidence.test.mjs",
-        "name": "the missing-case assertion detects a disabled execution guard"
+        "file": "tests/classifier.test.ts",
+        "name": "the subprocess tool assertion detects a removed no-tools flag"
       }
     }
   ]
