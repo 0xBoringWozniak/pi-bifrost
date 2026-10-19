@@ -176,7 +176,8 @@ function scaffold({ world = makeWorld(), receipt = defaultReceipt(), receiptText
 let receiptNumber = 0;
 
 function runController(fixture, extraArgs = [], cwd = REPO_ROOT, script = SCRIPT) {
-  const env = { ...process.env, PATH: fixture.bin + ":" + process.env.PATH, FAKE_GH_WORLD: fixture.worldPath, FAKE_GH_LOG: fixture.logPath };
+  const { GITHUB_REPOSITORY: _githubRepository, ...inheritedEnv } = process.env;
+  const env = { ...inheritedEnv, PATH: fixture.bin + ":" + process.env.PATH, FAKE_GH_WORLD: fixture.worldPath, FAKE_GH_LOG: fixture.logPath };
   const args = [script, "1", "--outcome", fixture.outcomePath, "--receipt", fixture.receiptPath, "--expected-reviewer", "reviewer-agent", "--expected-implementer", "implementer-agent", ...extraArgs];
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env, cwd });
   const calls = existsSync(fixture.logPath) ? readFileSync(fixture.logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
