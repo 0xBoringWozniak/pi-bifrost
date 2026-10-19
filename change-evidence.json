@@ -1,27 +1,22 @@
 {
   "schemaVersion": 1,
-  "base": "8c654050191b7257df18c38ceb0cb186717cd447",
+  "base": "cdf9d4beb78f5341e7f79c277b249e1fa8c82488",
   "contracts": [
     {
-      "id": "native-activation-cancellation",
-      "requirement": "R06",
-      "files": [
-        "tests/fixtures/native-activation-cancel-child.mjs",
-        "tests/integration/native-activation-cancel.test.mjs"
-      ],
-      "boundary": "real Pi AgentSession activation cancellation and failed physical activation behind a deny-all outbound fence",
-      "assertions": "Cancellation, false activation, and throwing activation leave no forbidden dispatch; each private source mutation turns its named assertion RED before restored GREEN.",
+      "id": "agents-evidence-discipline-docs",
+      "requirement": "R16",
+      "files": ["AGENTS.md"],
+      "boundary": "tracked agent guidance for evidence discipline",
+      "assertions": "Guidance requires source-bound claims, executable documented commands, and evidence review on the exact candidate; no runtime behavior changes.",
       "boundaryTest": {
-        "file": "tests/integration/native-activation-cancel.test.mjs",
-        "name": "cancels real AgentSession activation behind a proven deny-all fence"
+        "file": "tests/change-evidence.test.mjs",
+        "name": "accepts executed contract evidence and explicit dimension exceptions"
       },
       "invariant": {
-        "file": "tests/integration/native-activation-cancel.test.mjs",
-        "name": "cancels real AgentSession activation behind a proven deny-all fence"
+        "exception": "Documentation-only change; no runtime state or behavior invariant is changed."
       },
       "fault": {
-        "file": "tests/integration/native-activation-cancel.test.mjs",
-        "name": "cancels real AgentSession activation behind a proven deny-all fence"
+        "exception": "Documentation-only change; there is no changed runtime assertion to fault-inject."
       }
     }
   ]
