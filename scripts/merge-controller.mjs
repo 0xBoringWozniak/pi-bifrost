@@ -40,6 +40,8 @@ const RECEIPT_FIELDS = [
   "changedFiles",
   "unresolvedBlockingFindings",
 ];
+const MERGE_COMMAND_FAILURE = { code: "merge-command-failed", message: "GitHub merge command failed" };
+const POSTMERGE_EVIDENCE_UNAVAILABLE = { code: "postmerge-evidence-unavailable", message: "Post-merge verification evidence unavailable" };
 
 class ControllerError extends Error {
   constructor(code, message) {
@@ -143,6 +145,9 @@ export function validateReceiptShape(receipt) {
   for (const field of RECEIPT_FIELDS) {
     if (!(field in receipt)) errors.push(`trusted review receipt missing required field: ${field}`);
   }
+  for (const field of Object.keys(receipt)) {
+    if (!RECEIPT_FIELDS.includes(field)) errors.push(`trusted review receipt contains unknown field: ${field}`);
+  }
   if (typeof receipt.reviewerAgent !== "string" || !receipt.reviewerAgent) errors.push("trusted review receipt reviewer agent missing");
   if (typeof receipt.implementerAgent !== "string" || !receipt.implementerAgent) errors.push("trusted review receipt implementer agent missing");
   if (receipt.reviewerAgent && receipt.implementerAgent && receipt.reviewerAgent === receipt.implementerAgent) errors.push("reviewer agent must be distinct from implementer");
@@ -155,6 +160,8 @@ export function validateReceiptShape(receipt) {
   if (!SHA256_64.test(receipt.deltaSha256 ?? "")) errors.push("trusted review receipt deltaSha256 must be a 64-hex digest");
   if (!Array.isArray(receipt.changedFiles) || receipt.changedFiles.some((file) => typeof file !== "string" || !file)) {
     errors.push("trusted review receipt changedFiles must be a list of non-empty paths");
+  } else if (new Set(receipt.changedFiles).size !== receipt.changedFiles.length) {
+    errors.push("trusted review receipt changedFiles must not contain duplicates");
   }
   return { errors };
 }
@@ -174,8 +181,8 @@ export function bindReceiptToEvidence(receipt, { headSha, baseSha, sourceTreeSha
   if (receipt?.baseSha !== baseSha) errors.push("trusted review receipt base does not match current PR base");
   if (receipt?.sourceTreeSha !== sourceTreeSha) errors.push("trusted review receipt source tree does not match current PR head tree");
   if (receipt?.deltaSha256 !== deltaSha256) errors.push("trusted review receipt delta digest does not match actual PR diff");
-  const expected = [...new Set(changedFiles ?? [])].sort();
-  const actual = Array.isArray(receipt?.changedFiles) ? [...new Set(receipt.changedFiles)].sort() : [];
+  const expected = [...(changedFiles ?? [])].sort();
+  const actual = Array.isArray(receipt?.changedFiles) ? [...receipt.changedFiles].sort() : [];
   if (expected.length !== actual.length || expected.some((file, index) => file !== actual[index])) {
     errors.push("trusted review receipt changed files do not match actual PR files");
   }
@@ -344,13 +351,13 @@ function outcomeDestination(path, root) {
 function mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree, workflowId }) {
   const mergeResult = spawnSync("gh", ["pr", "merge", String(args.pr), "--repo", repo, "--merge", "--match-head-commit", headSha], { encoding: "utf8" });
   if (mergeResult.status !== 0) {
-    return { outcome: "merge-failed", details: { status: mergeResult.status, stdout: mergeResult.stdout, stderr: mergeResult.stderr } };
+    return { outcome: "merge-failed", details: MERGE_COMMAND_FAILURE };
   }
   let after;
   try {
     after = ghJson(["pr", "view", String(args.pr), "--repo", repo, "--json", "state,mergeCommit"]);
-  } catch (error) {
-    return { outcome: "waiting-for-push-verification", details: { error: error.message } };
+  } catch {
+    return { outcome: "waiting-for-push-verification", details: POSTMERGE_EVIDENCE_UNAVAILABLE };
   }
   const mergeSha = after?.mergeCommit?.oid;
   if (after?.state !== "MERGED" || !SHA40.test(mergeSha ?? "")) {
@@ -359,8 +366,8 @@ function mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree
   let commit;
   try {
     commit = ghJson(["api", `repos/${repo}/commits/${mergeSha}`]);
-  } catch (error) {
-    return { outcome: "waiting-for-push-verification", details: { error: error.message } };
+  } catch {
+    return { outcome: "waiting-for-push-verification", details: POSTMERGE_EVIDENCE_UNAVAILABLE };
   }
   const parents = Array.isArray(commit.parents) ? commit.parents.map((parent) => parent.sha) : [];
   const tree = commit.commit?.tree?.sha ?? commit.tree?.sha;
@@ -373,8 +380,8 @@ function mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree
   let ref;
   try {
     ref = ghJson(["api", `repos/${repo}/git/ref/heads/${baseBranch}`]);
-  } catch (error) {
-    return { outcome: "waiting-for-push-verification", details: { reason: "push verification unavailable", error: error.message, mergeSha } };
+  } catch {
+    return { outcome: "waiting-for-push-verification", details: POSTMERGE_EVIDENCE_UNAVAILABLE };
   }
   const refSha = ref?.object?.sha ?? ref?.sha;
   if (refSha !== mergeSha) {
@@ -443,7 +450,7 @@ function main() {
     outcomeContext = { path: args.outcome, payload: prior };
     let result;
     try { result = checkMerged({ args, ...intent }); }
-    catch (error) { result = { outcome: "waiting-for-push-verification", details: { reason: "post-merge evidence unavailable", error: error.message } }; }
+    catch { result = { outcome: "waiting-for-push-verification", details: POSTMERGE_EVIDENCE_UNAVAILABLE }; }
     emit({ pr: args.pr, repo, mode: "check", applyIntent: intent, ...result, limitations: LIMITATIONS }, args.outcome);
     return;
   }
@@ -533,7 +540,7 @@ function main() {
   outcomeContext = { path: args.outcome, payload: { ...summary, outcome: "apply-intent" } };
   let result;
   try { result = mergeAndVerify({ args, repo, baseBranch, headSha, baseSha, proposedTree: proposed.tree, workflowId }); }
-  catch (error) { result = { outcome: "waiting-for-push-verification", details: { reason: "post-merge evidence unavailable; do not repeat apply", error: error.message } }; }
+  catch { result = { outcome: "waiting-for-push-verification", details: POSTMERGE_EVIDENCE_UNAVAILABLE }; }
   emit({ ...summary, outcome: result.outcome, postMerge: result.details }, args.outcome);
 }
 

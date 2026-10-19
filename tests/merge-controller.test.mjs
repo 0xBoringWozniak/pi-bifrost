@@ -36,10 +36,14 @@ if (world.loseOutcome && joined.includes("--json state,mergeCommit")) {
 if (args[0] === "repo" && args[1] === "view") out({ nameWithOwner: world.repo });
 if (args[0] === "pr" && args[1] === "diff") out(world.diff ?? "");
 if (args[0] === "pr" && args[1] === "merge") {
-  if (world.merge?.fail) die("merge rejected");
+  if (world.merge?.fail) {
+    if (world.merge.stdout) process.stdout.write(world.merge.stdout);
+    die(world.merge.message ?? "merge rejected");
+  }
   out("merged");
 }
 if (args[0] === "pr" && args[1] === "view") {
+  if (world.postMergeViewError && joined.includes("--json state,mergeCommit")) die(world.postMergeViewError);
   if (joined.includes("--json files")) out({ files: (world.pr.files ?? []).map((p) => ({ path: p })) });
   if (joined.includes("state,mergeCommit,headRefOid,baseRefOid")) out(world.afterMerge ?? { state: "MERGED", mergeCommit: { oid: world.pr.headRefOid }, headRefOid: world.pr.headRefOid, baseRefOid: world.pr.baseRefOid });
   if (joined.includes("state,mergeCommit")) out(world.afterMerge ?? { state: "MERGED", mergeCommit: { oid: MERGE_SHA } });
@@ -51,6 +55,8 @@ if (args[0] === "pr" && args[1] === "view") {
   out(pr);
 }
 if (args[0] === "api") {
+  if (world.postMergeCommitError && joined.endsWith("/commits/" + world.afterMerge.mergeCommit.oid)) die(world.postMergeCommitError);
+  if (world.postMergeRefError && joined.includes("/git/ref/heads/")) die(world.postMergeRefError);
   if (joined.includes("actions/workflows/verification.yml")) out({ id: world.workflowId ?? 123 });
   if (joined.includes("contents/")) out({ sha: joined.includes(world.pr.baseRefOid) ? (world.baseWorkflowSha ?? "1".repeat(40)) : (world.headWorkflowSha ?? "1".repeat(40)) });
   if (joined.includes("/runs?head_sha=")) { const runs = joined.includes("event=push") ? (world.pushRuns ?? []) : (world.ciRuns ?? []); out({ total_count: runs.length, workflow_runs: runs }); }
@@ -222,6 +228,8 @@ const rejectionCases = [
   ["wrong source tree", (fixture) => { writeFileSync(fixture.receiptPath, JSON.stringify(defaultReceipt({ sourceTreeSha: "0".repeat(40) }))); }, /source tree does not match/],
   ["unverified delta", (fixture) => { writeFileSync(fixture.receiptPath, JSON.stringify(defaultReceipt({ deltaSha256: "0".repeat(64) }))); }, /delta digest does not match/],
   ["wrong changed files", (fixture) => { writeFileSync(fixture.receiptPath, JSON.stringify(defaultReceipt({ changedFiles: ["y"] }))); }, /changed files do not match/],
+  ["unknown receipt field", (fixture) => { writeFileSync(fixture.receiptPath, JSON.stringify({ ...defaultReceipt(), untrusted: true })); }, /contains unknown field/],
+  ["duplicate receipt changed files", (fixture) => { writeFileSync(fixture.receiptPath, JSON.stringify(defaultReceipt({ changedFiles: ["x", "x"] }))); }, /must not contain duplicates/],
   ["failed CI", (fixture) => { fixture.world.ciRuns[0].conclusion = "failure"; writeFileSync(fixture.worldPath, JSON.stringify(fixture.world)); }, /release-gates/],
   ["missing CI", (fixture) => { fixture.world.ciRuns = []; writeFileSync(fixture.worldPath, JSON.stringify(fixture.world)); }, /release-gates/],
   ["unresolved thread", (fixture) => { fixture.world.threads = [{ isResolved: false }]; writeFileSync(fixture.worldPath, JSON.stringify(fixture.world)); }, /unresolved/],
@@ -315,13 +323,29 @@ test("failed post-push release gates stop as waiting", () => {
   assert.equal(result.json.outcome, "waiting-for-push-verification");
 });
 
-test("merge command failure preserves outcome", () => {
-  const world = makeWorld({ merge: { fail: true } });
+test("merge command failure emits stable outcome without gh output", () => {
+  const rawStdout = "untrusted merge stdout";
+  const rawStderr = "untrusted merge stderr";
+  const world = makeWorld({ merge: { fail: true, stdout: rawStdout, message: rawStderr } });
   const fixture = scaffold({ world });
   const result = runController(fixture, ["--apply"]);
   assert.equal(result.status, 1);
   assert.equal(result.json.outcome, "merge-failed");
+  assert.deepEqual(result.json.postMerge, { code: "merge-command-failed", message: "GitHub merge command failed" });
+  assert.doesNotMatch(result.stdout, new RegExp(`${rawStdout}|${rawStderr}`));
   assert.equal(result.mergeCalls.length, 1);
+});
+
+test("post-merge gh failures emit stable outcome without external messages", () => {
+  for (const [field, raw] of [["postMergeViewError", "untrusted view error"], ["postMergeCommitError", "untrusted commit error"], ["postMergeRefError", "untrusted ref error"]]) {
+    const fixture = scaffold({ world: makeWorld({ [field]: raw }) });
+    const result = runController(fixture, ["--apply"]);
+    assert.equal(result.status, 1, field);
+    assert.equal(result.json.outcome, "waiting-for-push-verification", field);
+    assert.deepEqual(result.json.postMerge, { code: "postmerge-evidence-unavailable", message: "Post-merge verification evidence unavailable" }, field);
+    assert.doesNotMatch(result.stdout, new RegExp(raw), field);
+    assert.equal(result.mergeCalls.length, 1, field);
+  }
 });
 
 test("check mode verifies an already merged PR without merging", () => {
