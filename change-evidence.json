@@ -1,27 +1,29 @@
 {
   "schemaVersion": 1,
-  "base": "8c654050191b7257df18c38ceb0cb186717cd447",
+  "base": "cdf9d4beb78f5341e7f79c277b249e1fa8c82488",
   "contracts": [
     {
-      "id": "native-activation-cancellation",
-      "requirement": "R06",
+      "id": "operational-merge-controller",
+      "requirement": "R16",
       "files": [
-        "tests/fixtures/native-activation-cancel-child.mjs",
-        "tests/integration/native-activation-cancel.test.mjs"
+        "docs/merge-controller.md",
+        "scripts/merge-controller.mjs",
+        "scripts/merge-eligibility.mjs",
+        "tests/merge-controller.test.mjs"
       ],
-      "boundary": "real Pi AgentSession activation cancellation and failed physical activation behind a deny-all outbound fence",
-      "assertions": "Cancellation, false activation, and throwing activation leave no forbidden dispatch; each private source mutation turns its named assertion RED before restored GREEN.",
+      "boundary": "local fail-closed controller verifies an independent receipt, exact candidate/proposed-merge evidence, GitHub checks, review state, and post-merge push evidence before recording outcome.",
+      "assertions": "Controller never invokes merge when required evidence is stale, unavailable, altered, or unresolved; dry run stays non-mutating and checks preserve frozen intent.",
       "boundaryTest": {
-        "file": "tests/integration/native-activation-cancel.test.mjs",
-        "name": "cancels real AgentSession activation behind a proven deny-all fence"
+        "file": "tests/merge-controller.test.mjs",
+        "name": "valid apply merges exactly once and verifies push gates"
       },
       "invariant": {
-        "file": "tests/integration/native-activation-cancel.test.mjs",
-        "name": "cancels real AgentSession activation behind a proven deny-all fence"
+        "file": "tests/merge-controller.test.mjs",
+        "name": "repeated apply preserves the frozen intent and never merges twice"
       },
       "fault": {
-        "file": "tests/integration/native-activation-cancel.test.mjs",
-        "name": "cancels real AgentSession activation behind a proven deny-all fence"
+        "file": "tests/merge-controller.test.mjs",
+        "name": "guard removal control: bypassing receipt validation reddens the named assertion, restore is green"
       }
     }
   ]
