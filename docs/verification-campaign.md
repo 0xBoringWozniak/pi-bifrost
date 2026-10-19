@@ -64,6 +64,9 @@ failure replays under `FC_SEED=<seed>` with NODE_OPTIONS carrying the preload.
 Please be truthful about what this varies:
 - Assertions that omit an explicit seed follow the configured global seed:
   `model-selection-properties`, `classifier-properties`, `discovery-properties`.
+- The additional `reliability-v2-state-machine` campaign sample uses the global seed,
+  asserts the seed actually used, and records it in the attempt log. Its existing
+  fixed-seed regression and shrink/replay controls remain pinned.
 - Pinned regression controls are deliberately not varied. Configured seeds do
   not override an explicit assert option:
   - `reliability-state-machine.test.ts` (`SEQUENCE_SEED`, `SWEEP_SEED`, `FAULT_SEED`)

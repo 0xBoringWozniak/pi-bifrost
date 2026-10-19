@@ -190,3 +190,11 @@ test("verification campaign docs state the default-branch schedule boundary", ()
   assert.match(doc, /pending/u, "docs must state pending activation");
   assert.match(doc, /no\s+active\s+cron/u, "docs must not claim a live nightly run");
 });
+
+test("reliability campaign includes the receipt state machine", () => {
+  const command = jobs.campaign.split("- name: Reliability replay-control campaign")[1]?.split("- name:")[0];
+  assert.ok(command, "reliability campaign command must exist");
+  assert.match(command, /node scripts\/campaign-run\.mjs/u, "reliability campaign must use the bounded runner");
+  assert.match(command, /^ {10}tests\/reliability-v2-state-machine\.test\.ts$/mu,
+    "reliability campaign must execute the receipt state machine");
+});

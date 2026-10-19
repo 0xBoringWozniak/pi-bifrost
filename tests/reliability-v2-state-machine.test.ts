@@ -1,7 +1,8 @@
 // Generated-boundary properties for the receipt-owned reliability v2 state machine.
 //
 // An independent reference model predicts the exact observable result (status
-// plus reason, and the whole persisted projection: scope generations, cooldowns,
+// plus reason, and the bounded single-scope/no-observation persisted projection:
+// scope generations, cooldowns,
 // leases, dispatch receipts and settled outcomes) after every generated
 // admit/renew/settle/abandon/time/duplicate/stale operation. Production must
 // match the model after each step; any drift fails. A real ReliabilityV2Store
@@ -625,6 +626,15 @@ describe("reliability v2 state machine", () => {
 
   it("matches the independent model across a wider generated sample", () => {
     fc.assert(fc.property(scenarioCommands(12), (commands) => runScenario(commands)), { seed: SWEEP_SEED, numRuns: 400 });
+  });
+
+  it("matches the independent model with the campaign default seed", (t) => {
+    const result = fc.check(fc.property(scenarioCommands(25), (commands) => runScenario(commands)), { numRuns: 500 });
+    assert.equal(result.failed, false, fc.defaultReportMessage(result) ?? "the exploratory model must match");
+    if (process.env.FC_SEED !== undefined && process.env.FC_SEED !== "") {
+      assert.equal(result.seed, Number(process.env.FC_SEED), "campaign seed must drive the exploratory sample");
+    }
+    t.diagnostic(`campaign exploratory seed=${result.seed}`);
   });
 
   it("releases an expired receipt lease when pruning during unrelated admission", () => {
