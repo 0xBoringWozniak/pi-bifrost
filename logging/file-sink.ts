@@ -8,10 +8,61 @@ import { appendFile, mkdir, open, realpath, rename, rm, stat } from "node:fs/pro
 import { dirname, isAbsolute, relative } from "node:path";
 import type { LogDestination, LogEntry, LogSink } from "./types.ts";
 
+interface WritableFileHandle {
+  write(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): Promise<{ bytesWritten: number; buffer: Buffer }>;
+  close(): Promise<void>;
+}
+
 export interface FileSinkOptions {
   readonly maxFileSizeBytes: number;
   readonly rotatedFiles: number;
   readonly onFailure?: (error: unknown) => void;
+  /** Test seam for controlled short writes and failures. */
+  readonly openFile?: (path: string, flags: number, mode: number) => Promise<WritableFileHandle>;
+}
+
+/**
+ * A failure after at least one byte was written must not be retried as if the
+ * whole batch were still pending; replaying it would duplicate the prefix.
+ */
+class UncertainWriteError extends Error {
+  readonly original: unknown;
+
+  constructor(original: unknown) {
+    super(original instanceof Error ? original.message : "log write failed after partial progress", { cause: original });
+    this.name = "UncertainWriteError";
+    this.original = original;
+  }
+}
+
+function unwrapWriteError(error: unknown): unknown {
+  return error instanceof UncertainWriteError ? error.original : error;
+}
+
+async function writeComplete(handle: WritableFileHandle, payload: string): Promise<void> {
+  const buffer = Buffer.from(payload, "utf8");
+  let written = 0;
+  while (written < buffer.length) {
+    const remaining = buffer.length - written;
+    let result: { bytesWritten: number; buffer: Buffer };
+    try {
+      result = await handle.write(buffer, written, remaining, null);
+    } catch (error) {
+      throw written > 0 ? new UncertainWriteError(error) : error;
+    }
+    if (!Number.isSafeInteger(result.bytesWritten)
+      || result.bytesWritten <= 0
+      || result.bytesWritten > remaining) {
+      const error = new Error("file write did not persist a valid number of bytes");
+      throw written > 0 ? new UncertainWriteError(error) : error;
+    }
+    written += result.bytesWritten;
+  }
 }
 
 function isMissingPath(error: unknown): boolean {
@@ -32,10 +83,12 @@ export class AsyncFileSink implements LogSink {
   private closed = false;
   private readonly destination: LogDestination;
   private readonly options: FileSinkOptions;
+  private readonly openFile: (path: string, flags: number, mode: number) => Promise<WritableFileHandle>;
 
   constructor(destination: LogDestination, options: FileSinkOptions) {
     this.destination = destination;
     this.options = options;
+    this.openFile = options.openFile ?? ((path, flags, mode) => open(path, flags, mode));
   }
 
   write(batch: readonly LogEntry[]): Promise<void> {
@@ -59,17 +112,20 @@ export class AsyncFileSink implements LogSink {
   private async writeWithRetry(payload: string): Promise<void> {
     try {
       await this.writeOnce(payload);
-    } catch (firstError) {
-      // Retry only a missing directory/file race. Retrying after a partial
-      // write (ENOSPC, EIO) could duplicate lines, so fail the batch instead.
-      if (!isMissingPath(firstError)) {
+    } catch (firstFailure) {
+      const firstError = unwrapWriteError(firstFailure);
+      // Retry only a missing directory/file race with no bytes written.
+      // Replaying after partial progress (ENOSPC, EIO, or a missing path after
+      // a short write) could duplicate lines, so fail the batch instead.
+      if (firstFailure instanceof UncertainWriteError || !isMissingPath(firstError)) {
         this.options.onFailure?.(firstError);
         throw firstError;
       }
       this.directoryReady = false;
       try {
         await this.writeOnce(payload);
-      } catch (secondError) {
+      } catch (retryFailure) {
+        const secondError = unwrapWriteError(retryFailure);
         this.options.onFailure?.(secondError);
         throw secondError;
       }
@@ -112,12 +168,23 @@ export class AsyncFileSink implements LogSink {
     }
     // O_NOFOLLOW prevents a pre-existing run-file symlink from being followed.
     const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW;
-    const handle = await open(this.destination.path, flags, 0o600);
+    const handle = await this.openFile(this.destination.path, flags, 0o600);
+    let primaryFailure: unknown;
+    let complete = false;
     try {
-      await handle.write(payload, undefined, "utf8");
-    } finally {
-      await handle.close();
+      await writeComplete(handle, payload);
+      complete = true;
+    } catch (error) {
+      primaryFailure = error;
     }
+    try {
+      await handle.close();
+    } catch (error) {
+      // A close failure after a complete append is not safe to retry.
+      if (!primaryFailure && complete) primaryFailure = new UncertainWriteError(error);
+      else if (!primaryFailure) primaryFailure = error;
+    }
+    if (primaryFailure) throw primaryFailure;
   }
 
   private async rotateIfNeeded(): Promise<void> {

@@ -214,6 +214,127 @@ describe("bifrost logger", () => {
     assert.equal(logger.stats().droppedByReason.queue_capacity, 1);
   });
 
+  it("drop-oldest evicts the oldest pending event even when the incoming event has lower retention", async () => {
+    const { logger, sinks } = create({
+      level: "trace",
+      queue: { maxEntries: 2, maxBytes: 64 * 1024, overflowPolicy: "drop-oldest" },
+      drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "drop-oldest-mixed" });
+    logger.emit("router", "pending-error", undefined, { level: "error" });
+    logger.emit("router", "pending-debug");
+    let calls = 0;
+    logger.emit("router", "incoming-trace", () => {
+      calls += 1;
+      return { admitted: true };
+    }, { level: "trace" });
+
+    assert.equal(calls, 1, "drop-oldest must evaluate the incoming event instead of applying severity admission");
+    assert.equal(logger.stats().evictionsTotal, 1);
+    assert.equal(logger.stats().droppedBySeverity.error, 1);
+
+    await logger.flush(1_000);
+    const output = allRows(sinks).filter((row) => row.module === "router");
+    assert.deepEqual(output.map((row) => row.event), ["pending-debug", "incoming-trace"]);
+    assert.equal(output[1]!.admitted, true);
+  });
+
+  it("severity-first rejects a lower-retention event before preparation", async () => {
+    const { logger, sinks } = create({
+      level: "trace",
+      queue: { maxEntries: 2, maxBytes: 64 * 1024, overflowPolicy: "severity-first" },
+      drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "severity-first-mixed" });
+    logger.emit("router", "pending-error", undefined, { level: "error" });
+    logger.emit("router", "pending-debug");
+    let calls = 0;
+    logger.emit("router", "rejected-trace", () => {
+      calls += 1;
+      return { admitted: true };
+    }, { level: "trace" });
+
+    assert.equal(calls, 0, "severity-first must keep the lazy-metadata fast path");
+    assert.equal(logger.stats().evictionsTotal, 0);
+    assert.equal(logger.stats().droppedByReason.queue_capacity, 1);
+
+    await logger.flush(1_000);
+    const output = allRows(sinks).filter((row) => row.module === "router");
+    assert.deepEqual(output.map((row) => row.event), ["pending-error", "pending-debug"]);
+  });
+
+  it("drop-newest rejects a full queue without evicting a mixed-severity event", async () => {
+    const { logger, sinks } = create({
+      level: "trace",
+      queue: { maxEntries: 2, maxBytes: 64 * 1024, overflowPolicy: "drop-newest" },
+      drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "drop-newest-mixed" });
+    logger.emit("router", "pending-error", undefined, { level: "error" });
+    logger.emit("router", "pending-debug");
+    logger.emit("router", "rejected-trace", undefined, { level: "trace" });
+
+    assert.equal(logger.stats().evictionsTotal, 0);
+    assert.equal(logger.stats().droppedByReason.queue_capacity, 1);
+
+    await logger.flush(1_000);
+    const output = allRows(sinks).filter((row) => row.module === "router");
+    assert.deepEqual(output.map((row) => row.event), ["pending-error", "pending-debug"]);
+  });
+
+  it("drop-oldest can free pending capacity while an earlier write is in flight", async () => {
+    const { logger, sinks } = create({
+      level: "trace",
+      queue: { maxEntries: 2, maxBytes: 64 * 1024, overflowPolicy: "drop-oldest" },
+      drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+    });
+    logger.bindSession({ sessionId: "inflight-drop-oldest" });
+    logger.emit("router", "in-flight");
+    await logger.flush(20);
+    const sink = [...sinks.values()][0]!;
+    sink.stall = true;
+    logger.emit("router", "stalled");
+    await logger.flush(20);
+    assert.equal(logger.stats().inFlightEntries, 1);
+
+    logger.emit("router", "pending-error", undefined, { level: "error" });
+    let calls = 0;
+    logger.emit("router", "incoming-trace", () => {
+      calls += 1;
+      return { admitted: true };
+    }, { level: "trace" });
+
+    assert.equal(calls, 1, "capacity held by an in-flight write must not become a severity restriction");
+    assert.equal(logger.stats().queuedEntries, 1);
+    assert.equal(logger.stats().inFlightEntries, 1);
+    assert.equal(logger.stats().evictionsTotal, 1);
+    await logger.close(20);
+  });
+
+  for (const overflowPolicy of ["severity-first", "drop-oldest", "drop-newest"] as const) {
+    it(`rejects when every capacity slot is in flight under ${overflowPolicy}`, async () => {
+      const { logger, sinks } = create({
+        level: "trace",
+        queue: { maxEntries: 1, maxBytes: 64 * 1024, overflowPolicy },
+        drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 },
+      });
+      logger.bindSession({ sessionId: `inflight-full-${overflowPolicy}` });
+      logger.emit("router", "in-flight");
+      await logger.flush(20);
+      const sink = [...sinks.values()][0]!;
+      sink.stall = true;
+      logger.emit("router", "stalled");
+      await logger.flush(20);
+      assert.equal(logger.stats().inFlightEntries, 1);
+
+      logger.emit("router", "rejected", undefined, { level: "trace" });
+      assert.equal(logger.stats().queuedEntries, 0);
+      assert.equal(logger.stats().inFlightEntries, 1, "an active write must never be evicted");
+      assert.equal(logger.stats().droppedByReason.queue_capacity, 1);
+      await logger.close(20);
+    });
+  }
+
   it("writes JSONL in FIFO order and batches multiple events", async () => {
     const { logger, sinks } = create({ drain: { intervalMs: 10_000, maxBatchBytes: 64 * 1024 } });
     for (let index = 0; index < 5; index += 1) logger.emit("router", `event-${index}`, { index });

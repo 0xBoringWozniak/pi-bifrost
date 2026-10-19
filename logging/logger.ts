@@ -319,7 +319,10 @@ export class BifrostLogger {
         resolve();
       };
       const timer = setTimeout(finish, budget);
-      timer.unref?.();
+      // A caller awaiting shutdown must keep the event loop alive until the
+      // drain either settles or reaches its deadline. If this timer were
+      // unref'ed, Node could exit while a host shutdown hook is still awaiting
+      // flushDebug(), truncating later extension handlers and logs.
       this.flushWaiters.add(finish);
       this.schedulePump(0);
     });
@@ -443,6 +446,9 @@ export class BifrostLogger {
    * pressure still requires the record to be prepared.
    */
   private wouldRejectBeforePreparation(retention: number): boolean {
+    // drop-oldest deliberately ignores severity. It must always reach the
+    // policy so an older high-severity event can make room for a newer one.
+    if (this.overflow.name === "drop-oldest") return false;
     return this.queue.totalEntries >= this.config.queue.maxEntries
       && this.queue.minRetention > retention;
   }
