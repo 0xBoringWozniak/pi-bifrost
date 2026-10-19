@@ -35,7 +35,7 @@ const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
 const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 
 /** Production index.ts hash that the fault proof must leave byte-identical. */
-const PRODUCTION_INDEX_SHA256 = "3164a3dbc41a864c68bede2f9e7365c5ed32bbbcd91fc584a3d07446014e3f12";
+const PRODUCTION_INDEX_SHA256 = "03446a53d09d037ef0d41dce66a29700c7fbbb301fcd80a592ae978dd57a4f2e";
 
 // ── synthetic canaries ──────────────────────────────────────────
 // Distinct shapes so a leak is unambiguous, and words that survive cache
@@ -1048,7 +1048,10 @@ describe("command and artifact privacy acceptance", { timeout: 600_000, concurre
     assert.equal(sha256(original), PRODUCTION_INDEX_SHA256, "production index.ts must match the recorded baseline before the proof");
     const anchor = 'debug("input", "prompt", { length: promptText.length });';
     assert.ok(original.includes(anchor), "debug prompt projection anchor must exist");
-    const mutated = original.replace(anchor, 'debug("input", "prompt", { length: promptText.length, prompt: promptText });');
+    // Inject an undeclared key the global redactor does not own (matching the
+    // pi-native fault control's convention): the named key-list assertion must
+    // be what trips, proving it has teeth rather than leaning on redaction.
+    const mutated = original.replace(anchor, 'debug("input", "prompt", { length: promptText.length, leaked_prompt: promptText });');
     assert.notEqual(mutated, original, "debug projection mutation must apply");
     assert.notEqual(sha256(mutated), PRODUCTION_INDEX_SHA256, "mutation must be a real source change");
 
