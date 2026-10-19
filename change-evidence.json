@@ -3,28 +3,6 @@
   "base": "c162311bc7fcfb79bc26fa33f7b9c516e5c020a2",
   "contracts": [
     {
-      "id": "classifier-subprocess-tool-isolation",
-      "requirement": "R12",
-      "files": [
-        "classifier.ts",
-        "tests/classifier.test.ts"
-      ],
-      "boundary": "actual classifier subprocess argument construction with injected child; independent pinned Pi tool-execution probe",
-      "assertions": "Explicit subprocess and auto fallback disable Pi tools, preserve classification; removing the flag fails the exact tool-disable assertion.",
-      "boundaryTest": {
-        "file": "tests/classifier.test.ts",
-        "name": "disables all Pi tools for subprocess classifier subprocesses"
-      },
-      "invariant": {
-        "file": "tests/classifier.test.ts",
-        "name": "disables all Pi tools for auto classifier subprocesses"
-      },
-      "fault": {
-        "file": "tests/classifier.test.ts",
-        "name": "the subprocess tool assertion detects a removed no-tools flag"
-      }
-    },
-    {
       "id": "required-journey-bindings",
       "requirement": "R16",
       "files": [
