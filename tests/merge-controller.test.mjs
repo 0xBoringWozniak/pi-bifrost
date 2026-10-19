@@ -74,6 +74,11 @@ if (args[0] === "api") {
     const n = Number(joined.match(/\\/issues\\/(\\d+)$/)[1]);
     out(world.issues?.[n] ?? { number: n, state: "CLOSED" });
   }
+  if (joined.match(/\\/pulls\\/\\d+\\/files\\?/)) {
+    const page = Number(new URLSearchParams(joined.split("?")[1]).get("page"));
+    const files = world.pr.files ?? [];
+    out(files.slice((page - 1) * 100, page * 100).map((filename) => ({ filename })));
+  }
   if (joined.match(/\\/commits\\//)) {
     const sha = joined.match(/\\/commits\\/([0-9a-f]+)$/)[1];
     out((world.commits ?? {})[sha] ?? die("unknown commit " + sha));
@@ -458,6 +463,13 @@ test("partly unavailable changed-file inventory must not authorize merge", () =>
   const result = runController(scaffold({ world }), ["--apply"]);
   assert.match(result.stdout, /changed files unavailable or malformed/);
   assert.equal(result.mergeCalls.length, 0, "partly unavailable changed-file inventory must not authorize merge");
+});
+
+test("truncated changed-file inventory must not authorize merge", () => {
+  const world = makeWorld(); world.pr.files = Array.from({ length: 101 }, (_, index) => `file-${index}`);
+  const result = runController(scaffold({ world }), ["--apply"]);
+  assert.match(result.stdout, /inventory incomplete or exceeds controller bound/);
+  assert.equal(result.mergeCalls.length, 0, "an inventory beyond the controller bound must reject before merge");
 });
 
 test("requested durable outcome failure must not be silently successful", () => {

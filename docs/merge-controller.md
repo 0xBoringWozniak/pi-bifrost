@@ -52,8 +52,10 @@ Every field is required. Missing findings are never treated as zero.
 ```
 
 The receipt must match the actual GitHub head tree, current base, raw PR diff,
-and complete changed-file inventory. Any malformed or duplicate inventory entry
-rejects; entries are never silently discarded. Reviewer and implementer must
+and complete changed-file inventory. The controller supports at most 100 changed
+files: it accepts a short first API page, or exactly 100 only when a second page
+is empty; any overflow, malformed, or duplicate entry rejects. Entries are never
+silently discarded. Reviewer and implementer must
 differ and match the trusted expected identities. Apply rechecks GitHub
 eligibility, proposed parents/tree, receipt canonical path, exact receipt bytes,
 and tested-source artifacts. It rereads the receipt again after artifact checks

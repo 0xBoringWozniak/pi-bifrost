@@ -183,7 +183,7 @@ export function bindReceiptToEvidence(receipt, { headSha, baseSha, sourceTreeSha
 }
 
 function collectEvidence(repo, number) {
-  const pr = ghJson(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,baseRefName,baseRefOid,isDraft,body,author,files"]);
+  const pr = ghJson(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,baseRefName,baseRefOid,isDraft,body,author"]);
   const workflow = ghJson(["api", `repos/${repo}/actions/workflows/verification.yml`]);
   const baseWorkflow = ghJson(["api", `repos/${repo}/contents/${WORKFLOW_PATH}?ref=${pr.baseRefOid}`]);
   const headWorkflow = ghJson(["api", `repos/${repo}/contents/${WORKFLOW_PATH}?ref=${pr.headRefOid}`]);
@@ -210,10 +210,17 @@ export function fetchPrDiffDigest(repo, number) {
 }
 
 export function fetchChangedFiles(repo, number) {
-  const pr = ghJson(["pr", "view", String(number), "--repo", repo, "--json", "files"]);
-  if (!Array.isArray(pr.files) || pr.files.some((file) => typeof file?.path !== "string" || !file.path || file.path.includes("\0"))
-    || new Set(pr.files.map((file) => file.path)).size !== pr.files.length) fail("evidence", "PR changed files unavailable or malformed");
-  return pr.files.map((file) => file.path);
+  const first = ghJson(["api", `repos/${repo}/pulls/${number}/files?per_page=100&page=1`]);
+  if (!Array.isArray(first)) fail("evidence", "PR changed files unavailable or malformed");
+  // This controller deliberately supports at most 100 changed files. A full first
+  // page requires an empty second page; otherwise no receipt can bind complete scope.
+  if (first.length === 100) {
+    const second = ghJson(["api", `repos/${repo}/pulls/${number}/files?per_page=100&page=2`]);
+    if (!Array.isArray(second) || second.length !== 0) fail("evidence", "PR changed files inventory incomplete or exceeds controller bound");
+  }
+  if (first.some((file) => typeof file?.filename !== "string" || !file.filename || file.filename.includes("\0"))
+    || new Set(first.map((file) => file.filename)).size !== first.length) fail("evidence", "PR changed files unavailable or malformed");
+  return first.map((file) => file.filename);
 }
 
 export function fetchProposedMerge(repo, number) {
