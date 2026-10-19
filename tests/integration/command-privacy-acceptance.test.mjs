@@ -35,7 +35,7 @@ const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
 const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 
 /** Production index.ts hash that the fault proof must leave byte-identical. */
-const PRODUCTION_INDEX_SHA256 = "27881b502df0403f34446dc3b9c73ec088f62ab8ae09002aae124385f8dd8133";
+const PRODUCTION_INDEX_SHA256 = "effa312462858713db0a249472f0cfd43c1aa5860d65cceffa4e9e83999e4717";
 
 // ── synthetic canaries ──────────────────────────────────────────
 // Distinct shapes so a leak is unambiguous, and words that survive cache
