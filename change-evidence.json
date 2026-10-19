@@ -3,28 +3,6 @@
   "base": "4915bc9a06b0d2bbb2b4baf551b6b57e7c0d2f1e",
   "contracts": [
     {
-      "id": "required-journey-bindings",
-      "requirement": "R16",
-      "files": [
-        "scripts/acceptance.mjs",
-        "tests/acceptance-runner.test.mjs"
-      ],
-      "boundary": "required acceptance report consumer and exact delivered test-event bindings; no claim of exhaustive feature coverage",
-      "assertions": "Each required file/title has one passing event; missing/ambiguous results and absent artifacts cannot pass the actual report case. Delivered G09 boundaries remain explicit.",
-      "boundaryTest": {
-        "file": "tests/acceptance-runner.test.mjs",
-        "name": "blocks missing required results at the acceptance report boundary"
-      },
-      "invariant": {
-        "file": "tests/acceptance-runner.test.mjs",
-        "name": "blocks ambiguous required results at the acceptance report boundary"
-      },
-      "fault": {
-        "file": "tests/acceptance-runner.test.mjs",
-        "name": "fault control: the missing-result guard is required by the acceptance report"
-      }
-    },
-    {
       "id": "compound-alternate-recovery",
       "requirement": "R03",
       "files": [
@@ -44,30 +22,6 @@
       "fault": {
         "file": "tests/integration/reliability-v2-auto.test.mjs",
         "name": "proves the v2 Auto alternate limit with a compound lineage fault"
-      }
-    },
-    {
-      "id": "receipt-model-campaign",
-      "requirement": "R08",
-      "files": [
-        "tests/reliability-v2-state-machine.test.ts",
-        ".github/workflows/verification.yml",
-        "tests/verification-workflow.test.mjs",
-        "docs/verification-campaign.md"
-      ],
-      "boundary": "single-scope/no-observation receipt model, separate seed-observing exploratory sample, and existing bounded workflow command",
-      "assertions": "The exploratory sample uses and reports the actual campaign seed; pinned replay tests remain unchanged; the reliability campaign includes the receipt state machine. Existing production-model fault controls remain required.",
-      "boundaryTest": {
-        "file": "tests/reliability-v2-state-machine.test.ts",
-        "name": "matches the independent model with the campaign default seed"
-      },
-      "invariant": {
-        "file": "tests/verification-workflow.test.mjs",
-        "name": "reliability campaign includes the receipt state machine"
-      },
-      "fault": {
-        "file": "tests/reliability-v2-state-machine.test.ts",
-        "name": "rejects the revisionSkipsTwo control"
       }
     }
   ]
