@@ -1,23 +1,16 @@
 {
   "schemaVersion": 1,
-  "base": "cdf9d4beb78f5341e7f79c277b249e1fa8c82488",
+  "base": "a7c6bdd39881b10e9646392c147d5755ead8580b",
   "contracts": [
     {
-      "id": "agents-evidence-discipline-docs",
+      "id": "router-package-license-allowlist",
       "requirement": "R16",
-      "files": ["AGENTS.md"],
-      "boundary": "tracked agent guidance for evidence discipline",
-      "assertions": "Guidance requires source-bound claims, executable documented commands, and evidence review on the exact candidate; no runtime behavior changes.",
-      "boundaryTest": {
-        "file": "tests/change-evidence.test.mjs",
-        "name": "accepts executed contract evidence and explicit dimension exceptions"
-      },
-      "invariant": {
-        "exception": "Documentation-only change; no runtime state or behavior invariant is changed."
-      },
-      "fault": {
-        "exception": "Documentation-only change; there is no changed runtime assertion to fault-inject."
-      }
+      "files": ["LICENSE", "README.md", "tests/router-package.test.mjs"],
+      "boundary": "npm-packed router consumer install and package archive allowlist",
+      "assertions": "Packed archive includes LICENSE and package docs; archive excludes files outside explicit allowlists; installed router exports and types resolve.",
+      "boundaryTest": { "file": "tests/router-package.test.mjs", "name": "installs the packed JS API and resolves without loader flags on Node 22.19+" },
+      "invariant": { "file": "tests/router-package.test.mjs", "name": "installs the packed JS API and resolves without loader flags on Node 22.19+" },
+      "fault": { "exception": "This candidate adds static license/README package entries; the package smoke is positive-only and does not perform a controlled missing-license or unexpected-file mutation. No fault-recovery behavior changes." }
     }
   ]
 }
