@@ -600,4 +600,73 @@ describe("acceptance runner boundary", () => {
       assertProjectedTestEvent(event, "restored projection");
     }
   });
+
+  it("workflow acceptance CLI records actual-predecessor change evidence with bounded gates", { timeout: 120_000 }, () => {
+    const root = process.cwd();
+    const manifest = JSON.parse(readFileSync(join(root, "change-evidence.json"), "utf8"));
+    const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    // The predecessor is the actual merge base with the delivery branch, not a
+    // value copied from the declaration. The declaration must bind to it.
+    const predecessor = git("merge-base", "origin/v2", "HEAD");
+    assert.equal(predecessor, manifest.base, "the declaration base must be the actual merge predecessor");
+    const head = git("rev-parse", "HEAD");
+    const fixture = mkdtempSync(join(tmpdir(), "bifrost-acceptance-push-caller-"));
+    temporary.push(fixture);
+    const eventPath = join(fixture, "event.json");
+    writeFileSync(eventPath, JSON.stringify({ before: predecessor, after: head, ref: "refs/heads/v2" }));
+    writeFileSync(join(fixture, "loader.mjs"), [
+      'import { register } from "node:module";',
+      'register(new URL("./hooks.mjs", import.meta.url));',
+    ].join("\n") + "\n");
+    writeFileSync(join(fixture, "hooks.mjs"), [
+      "export async function resolve(specifier, context, nextResolve) {",
+      '  if (context.parentURL?.endsWith("/scripts/acceptance.mjs")) {',
+      '    if (specifier === "./verify-release.mjs") return { url: new URL("./verify-stub.mjs", import.meta.url).href, shortCircuit: true };',
+      '    if (specifier === "./acceptance/journeys.mjs") return { url: new URL("./journeys-stub.mjs", import.meta.url).href, shortCircuit: true };',
+      "  }",
+      "  return nextResolve(specifier, context);",
+      "}",
+    ].join("\n") + "\n");
+    // Only the unrelated release gates and journeys are bounded. The real
+    // acceptance CLI, profile, event environment, manifest, focused test
+    // runner, and change-evidence validator all execute.
+    writeFileSync(join(fixture, "verify-stub.mjs"), [
+      "export async function runVerification({ execute }) {",
+      '  const outcome = await execute({ script: "test:manifest-evidence", index: 0 });',
+      '  if (outcome.status !== 0) throw new Error("focused manifest evidence test failed");',
+      "  return { gates: [] };",
+      "}",
+    ].join("\n") + "\n");
+    writeFileSync(join(fixture, "journeys-stub.mjs"), "export async function runJourneys() { return { cases: [] }; }\n");
+    const script = fileURLToPath(new URL("../scripts/acceptance.mjs", import.meta.url));
+    const env = { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath };
+    delete env.BIFROST_EVIDENCE_BASE;
+    delete env.BIFROST_CI_REPORT;
+    const result = spawnSync(process.execPath, ["--import", join(fixture, "loader.mjs"), script, "--profile", "deterministic"], {
+      cwd: root,
+      env,
+      encoding: "utf8",
+      timeout: 110_000,
+    });
+    const evidenceLine = (result.stdout ?? "").match(/^Evidence: (.+)$/m)?.[1];
+    assert.ok(evidenceLine, result.stderr + result.stdout);
+    const evidencePath = join(root, evidenceLine);
+    try {
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+      const changeEvidence = evidence.cases.find((item) => item.id === "change-evidence");
+      assert.equal(changeEvidence?.status, "passed", changeEvidence?.detail ?? "change-evidence case missing");
+      const eventsPath = join(dirname(evidencePath), "gates", "node-test-events.jsonl");
+      const events = readFileSync(eventsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      for (const name of [
+        "multi-commit push validates full event.before diff and rejects intermediate base",
+        "event-driven push and pull request bases fail closed despite competing env",
+        "a real stale ancestor base fails declaration equality with named detail",
+        "fault control: selecting HEAD parent instead of event.before turns push base RED",
+      ]) {
+        assert.ok(events.some((event) => event.name === name && event.passed === true), `missing completed caller control: ${name}`);
+      }
+    } finally {
+      rmSync(dirname(evidencePath), { recursive: true, force: true });
+    }
+  });
 });

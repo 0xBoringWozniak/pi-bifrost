@@ -46,6 +46,30 @@
         "file": "tests/merge-eligibility.test.mjs",
         "name": "guard removal control: disabling final revalidation reddens the movement assertion, restore is green"
       }
+    },
+    {
+      "id": "push-change-evidence-predecessor",
+      "requirement": "R16",
+      "files": [
+        "scripts/acceptance.mjs",
+        "scripts/acceptance/change-evidence.mjs",
+        "tests/acceptance-runner.test.mjs",
+        "tests/change-evidence.test.mjs"
+      ],
+      "boundary": "acceptance change evidence binds an event-driven push to the actual predecessor commit, keeps pull-request metadata authoritative, and fails closed without an environment-base fallback; the workflow acceptance CLI computes the case from installed dependencies on the real candidate.",
+      "assertions": "Push events use event.before and reject missing, null, zero, stale, unknown, or intermediate bases; PR events use pull_request.base.sha despite a competing environment base; declaration base equality and changed-file coverage remain exact; the real acceptance CLI records GREEN for the actual merge predecessor and runs the named rejection and HEAD-parent fault controls.",
+      "boundaryTest": {
+        "file": "tests/change-evidence.test.mjs",
+        "name": "multi-commit push validates full event.before diff and rejects intermediate base"
+      },
+      "invariant": {
+        "file": "tests/change-evidence.test.mjs",
+        "name": "event-driven push and pull request bases fail closed despite competing env"
+      },
+      "fault": {
+        "file": "tests/change-evidence.test.mjs",
+        "name": "fault control: selecting HEAD parent instead of event.before turns push base RED"
+      }
     }
   ]
 }

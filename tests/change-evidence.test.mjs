@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { changeEvidenceCase, validateChangeEvidence } from "../scripts/acceptance/change-evidence.mjs";
 
 const base = "a".repeat(40);
@@ -316,24 +316,4 @@ test("fault control: selecting HEAD parent instead of event.before turns push ba
     assert.equal(readFileSync(new URL("../scripts/acceptance/change-evidence.mjs", import.meta.url), "utf8"), source);
     assert.equal(changeEvidenceCase(options).status, "passed");
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test("acceptance CLI records change-evidence GREEN for a push predecessor", { timeout: 300000 }, () => {
-  const root = process.cwd();
-  const manifest = JSON.parse(readFileSync(join(root, "change-evidence.json"), "utf8"));
-  const eventDir = mkdtempSync(join(tmpdir(), "bifrost-acceptance-push-event-"));
-  const eventPath = join(eventDir, "event.json");
-  try {
-    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-    writeFileSync(eventPath, JSON.stringify({ before: manifest.base, after: head, ref: "refs/heads/v2" }));
-    const env = { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath };
-    delete env.BIFROST_EVIDENCE_BASE;
-    const script = fileURLToPath(new URL("../scripts/acceptance.mjs", import.meta.url));
-    const result = spawnSync(process.execPath, [script, "--profile", "deterministic"], { cwd: root, env, encoding: "utf8", timeout: 280000 });
-    const evidenceLine = (result.stdout ?? "").match(/^Evidence: (.+)$/m)?.[1];
-    assert.ok(evidenceLine, result.stderr + result.stdout);
-    const evidence = JSON.parse(readFileSync(join(root, evidenceLine), "utf8"));
-    const changeEvidence = evidence.cases.find((item) => item.id === "change-evidence");
-    assert.equal(changeEvidence?.status, "passed", changeEvidence?.detail ?? "change-evidence case missing");
-  } finally { rmSync(eventDir, { recursive: true, force: true }); }
 });
