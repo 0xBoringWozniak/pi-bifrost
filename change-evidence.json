@@ -1,16 +1,51 @@
 {
   "schemaVersion": 1,
-  "base": "a7c6bdd39881b10e9646392c147d5755ead8580b",
+  "base": "b2f089dab70bce3944d5ca0a149bbf8f1d87f7f8",
   "contracts": [
     {
-      "id": "router-package-license-allowlist",
+      "id": "operational-merge-controller",
       "requirement": "R16",
-      "files": ["LICENSE", "README.md", "tests/router-package.test.mjs"],
-      "boundary": "npm-packed router consumer install and package archive allowlist",
-      "assertions": "Packed archive includes LICENSE and package docs; archive excludes files outside explicit allowlists; installed router exports and types resolve.",
-      "boundaryTest": { "file": "tests/router-package.test.mjs", "name": "installs the packed JS API and resolves without loader flags on Node 22.19+" },
-      "invariant": { "file": "tests/router-package.test.mjs", "name": "installs the packed JS API and resolves without loader flags on Node 22.19+" },
-      "fault": { "exception": "This candidate adds static license/README package entries; the package smoke is positive-only and does not perform a controlled missing-license or unexpected-file mutation. No fault-recovery behavior changes." }
+      "files": [
+        "docs/merge-controller.md",
+        "scripts/merge-controller.mjs",
+        "tests/merge-controller.test.mjs"
+      ],
+      "boundary": "local fail-closed controller verifies an independent receipt, exact candidate/proposed-merge evidence, GitHub checks, review state, and post-merge push evidence before recording outcome; immediately before merge it re-fetches the proposed merge SHA, tree, and ordered parents and requires them to remain the originally bound identity with parents exactly [base, head].",
+      "assertions": "Controller never invokes merge when required evidence is stale, unavailable, altered, unresolved, or the final proposed merge identity moves; dry run stays non-mutating and checks preserve frozen intent.",
+      "boundaryTest": {
+        "file": "tests/merge-controller.test.mjs",
+        "name": "valid apply merges exactly once and verifies push gates"
+      },
+      "invariant": {
+        "file": "tests/merge-controller.test.mjs",
+        "name": "repeated apply preserves the frozen intent and never merges twice"
+      },
+      "fault": {
+        "file": "tests/merge-controller.test.mjs",
+        "name": "guard removal control: bypassing receipt validation reddens the named assertion, restore is green"
+      }
+    },
+    {
+      "id": "merge-eligibility-revalidation",
+      "requirement": "R16",
+      "files": [
+        "scripts/merge-eligibility.mjs",
+        "tests/merge-eligibility.test.mjs"
+      ],
+      "boundary": "eligibility CLI re-fetches PR head/base and re-reads proposed-merge sha/parents/tree before returning an eligible result, bounds run, job, and review-thread evidence to one explicit first-100 page or fixed page/count/time bounds, and prints only fixed bounded terminal diagnostics.",
+      "assertions": "Eligibility fails closed with fixed blockers when head or base moves, the proposed tree or parents change, inventories truncate, or pagination exceeds its bounds; untrusted PR body and GitHub response text never reaches stdout or stderr.",
+      "boundaryTest": {
+        "file": "tests/merge-eligibility.test.mjs",
+        "name": "CLI re-fetches head, base, and proposed identity before returning eligible"
+      },
+      "invariant": {
+        "file": "tests/merge-eligibility.test.mjs",
+        "name": "terminal control PR-body text never reaches terminal diagnostics"
+      },
+      "fault": {
+        "file": "tests/merge-eligibility.test.mjs",
+        "name": "guard removal control: disabling final revalidation reddens the movement assertion, restore is green"
+      }
     }
   ]
 }
