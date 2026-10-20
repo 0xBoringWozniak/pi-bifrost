@@ -292,7 +292,7 @@ function testedSource(repo, run, artifacts, name, revision, stepName) {
     || !/^sha256:[0-9a-f]{64}$/.test(artifact.digest ?? "")) fail("tested-source", "current-attempt tested-source artifact missing or ambiguous");
   const archive = execFileSync("gh", ["api", `repos/${repo}/actions/artifacts/${artifact.id}/zip`], { maxBuffer: 64*1024*1024 });
   if (archive.length !== artifact.size_in_bytes || "sha256:" + createHash("sha256").update(archive).digest("hex") !== artifact.digest) fail("tested-source", "tested-source artifact digest mismatch");
-  const evidence = JSON.parse(execFileSync("python3", ["-c", READ_EVIDENCE_ZIP], { input: archive, encoding: "utf8", maxBuffer: 8*1024*1024 }));
+  const evidence = JSON.parse(execFileSync("python3", ["-I", "-c", READ_EVIDENCE_ZIP], { input: archive, encoding: "utf8", maxBuffer: 8*1024*1024 }));
   const candidates = evidence.filter((item) => item?.source?.revisionAtStart === revision);
   const item = candidates[0], source = item?.source;
   if (candidates.length !== 1 || item.schemaVersion !== 1 || item.profile !== "deterministic" || item.exitCode !== 0
@@ -459,6 +459,22 @@ function main() {
     let result;
     try { result = checkMerged({ args, ...intent }); }
     catch { result = { outcome: "waiting-for-push-verification", details: POSTMERGE_EVIDENCE_UNAVAILABLE }; }
+    // The receipt is a live trust input. If it is revoked while GitHub checks
+    // run, the earlier read must not authorize a successful check outcome.
+    if (result.outcome === "merged-and-verified") {
+      const finalTrusted = readTrustedReceipt(args.receipt, root);
+      const finalReceipt = finalTrusted.receipt;
+      const finalReceiptErrors = [
+        ...validateReceiptShape(finalReceipt).errors,
+        ...bindReceiptToExpectedIdentities(finalReceipt, args),
+      ];
+      if (finalTrusted.canonical !== trusted.canonical || finalTrusted.digest !== trusted.digest
+        || finalTrusted.canonical !== intent.receiptPath || finalTrusted.digest !== intent.receiptDigest
+        || finalReceipt.headSha !== intent.headSha || finalReceipt.baseSha !== intent.baseSha
+        || finalReceiptErrors.length !== 0) {
+        fail("receipt-changed", "trusted review receipt changed during check");
+      }
+    }
     emit({ pr: args.pr, repo, mode: "check", applyIntent: intent, ...result, limitations: LIMITATIONS }, args.outcome);
     return;
   }

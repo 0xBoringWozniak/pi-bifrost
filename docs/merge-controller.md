@@ -59,7 +59,9 @@ silently discarded. Reviewer and implementer must
 differ and match the trusted expected identities. Apply rechecks GitHub
 eligibility, proposed parents/tree, receipt canonical path, exact receipt bytes,
 and tested-source artifacts. It rereads the receipt again after artifact checks
-and immediately before saving the apply intent.
+and immediately before saving the apply intent. Check rereads the canonical
+receipt after its GitHub checks and refuses `merged-and-verified` if the path,
+digest, shape, expected identities, head, or base changed.
 
 ## Tested-source binding
 
@@ -81,7 +83,9 @@ uses the existing workflow's `acceptance-evidence-<head>` and
   from the current PR metadata.
 
 Artifacts are downloaded by ID and read as bounded ZIP data with Python 3's
-standard library; their content is never executed or extracted. Each archive is
+standard library in isolated mode (`-I`), so a `zipfile.py` in the launch
+directory cannot shadow the standard module; their content is never executed or
+extracted. Each archive is
 limited to 64 MiB; selected JSON members total at most 8 MiB, 2 MiB per member,
 and 100 evidence members. Runs, jobs, and artifact inventories must fit the
 single 100-entry API page. Missing, ambiguous, oversized, or incomplete evidence

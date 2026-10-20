@@ -29,6 +29,10 @@ if (world.revokeReceipt && joined.includes("headRefOid,baseRefName")) {
   if (world.reads === 2) fs.writeFileSync(world.receiptPath, JSON.stringify(world.revokedReceipt));
   fs.writeFileSync(process.env.FAKE_GH_WORLD, JSON.stringify(world));
 }
+if (world.revokeReceiptDuringCheck && joined.includes("/git/ref/heads/")) {
+  fs.writeFileSync(world.receiptPath, JSON.stringify(world.revokedReceipt));
+  fs.writeFileSync(process.env.FAKE_GH_WORLD, JSON.stringify(world));
+}
 if (world.loseOutcome && joined.includes("--json state,mergeCommit")) {
   fs.rmSync(world.outcomePath, { force: true });
   fs.rmdirSync(require("node:path").dirname(world.outcomePath));
@@ -504,6 +508,49 @@ test("revoked trusted receipt at recheck must prevent merge", () => {
   const result = runController(fixture, ["--apply"]);
   assert.equal(JSON.parse(readFileSync(fixture.receiptPath)).unresolvedBlockingFindings, 1);
   assert.equal(result.mergeCalls.length, 0, "revoked trusted receipt at recheck must prevent merge");
+});
+
+test("revoked trusted receipt during check must not emit merged-and-verified", () => {
+  const fixture = scaffold();
+  assert.equal(runController(fixture, ["--apply"]).json.outcome, "merged-and-verified");
+  rmSync(fixture.logPath);
+  fixture.world.afterMerge.baseRefOid = MERGE_SHA;
+  fixture.world.revokeReceiptDuringCheck = true;
+  fixture.world.receiptPath = fixture.receiptPath;
+  fixture.world.revokedReceipt = defaultReceipt({ unresolvedBlockingFindings: 1 });
+  saveWorld(fixture);
+  const result = runController(fixture, ["--check"]);
+  assert.equal(JSON.parse(readFileSync(fixture.receiptPath)).unresolvedBlockingFindings, 1);
+  assert.notEqual(result.json.outcome, "merged-and-verified", "receipt revocation during check must prevent success");
+  assert.equal(result.json.code, "receipt-changed");
+  assert.equal(result.mergeCalls.length, 0);
+});
+
+test("isolated Python ZIP reader ignores shadow zipfile in launch cwd", () => {
+  const shadowDir = mkdtempSync(join(tmpdir(), "mc-shadow-zipfile-"));
+  cleanups.push(shadowDir);
+  const marker = join(shadowDir, "zipfile-shadow-executed");
+  writeFileSync(join(shadowDir, "zipfile.py"), `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("executed")\nraise SystemExit(42)\n`);
+  const fixture = scaffold();
+  const result = runController(fixture, ["--apply"], shadowDir);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.json.outcome, "merged-and-verified");
+  assert.equal(existsSync(marker), false, "a shadow zipfile.py in the launch directory must not be imported");
+  assert.equal(result.mergeCalls.length, 1);
+
+  const root = join(fixture.dir, "shadow-source");
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: root }).status, 0);
+  const copy = join(realpathSync(root), "scripts", "merge-controller.mjs");
+  writeFileSync(join(root, "scripts", "merge-eligibility.mjs"), readFileSync(new URL("../scripts/merge-eligibility.mjs", import.meta.url)));
+  const source = readFileSync(SCRIPT, "utf8");
+  const anchor = '["-I", "-c", READ_EVIDENCE_ZIP]';
+  assert.equal(source.split(anchor).length, 2, "isolated import anchor must be unique");
+  writeFileSync(copy, source.replace(anchor, '["-c", READ_EVIDENCE_ZIP]'));
+  const control = runController(scaffold(), ["--apply"], shadowDir, copy);
+  assert.equal(existsSync(marker), true, "control must prove the shadow module executes without -I");
+  assert.notEqual(control.json.outcome, "merged-and-verified");
+  assert.equal(control.mergeCalls.length, 0);
 });
 
 test("partly unavailable changed-file inventory must not authorize merge", () => {

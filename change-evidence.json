@@ -10,8 +10,8 @@
         "scripts/merge-controller.mjs",
         "tests/merge-controller.test.mjs"
       ],
-      "boundary": "local fail-closed controller verifies an independent receipt, exact candidate/proposed-merge evidence, GitHub checks, review state, and post-merge push evidence before recording outcome; immediately before merge it re-fetches the proposed merge SHA, tree, and ordered parents and requires them to remain the originally bound identity with parents exactly [base, head].",
-      "assertions": "Controller never invokes merge when required evidence is stale, unavailable, altered, unresolved, or the final proposed merge identity moves; dry run stays non-mutating and checks preserve frozen intent.",
+      "boundary": "local fail-closed controller verifies an independent receipt, exact candidate/proposed-merge evidence, GitHub checks, review state, and post-merge push evidence before recording outcome; immediately before merge it re-fetches the proposed merge SHA, tree, and ordered parents and requires them to remain the originally bound identity with parents exactly [base, head]; check rereads the canonical receipt after GitHub checks and reads artifact ZIPs with Python 3 isolated imports.",
+      "assertions": "Controller never invokes merge when required evidence is stale, unavailable, altered, unresolved, or the final proposed merge identity moves; check never records merged-and-verified if the receipt is revoked during its GitHub checks; a shadow zipfile.py in the launch directory cannot execute; dry run stays non-mutating and checks preserve frozen intent.",
       "boundaryTest": {
         "file": "tests/merge-controller.test.mjs",
         "name": "valid apply merges exactly once and verifies push gates"
