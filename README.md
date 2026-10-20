@@ -97,4 +97,4 @@ Set `reliability.retryOnAllowanceExhausted` to `false` to turn off the one Auto 
 
 ## License
 
-[MIT](https://opensource.org/license/mit)
+MIT. See [LICENSE](LICENSE).
