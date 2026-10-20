@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { changeEvidenceCase, validateChangeEvidence } from "../scripts/acceptance/change-evidence.mjs";
 
 const base = "a".repeat(40);
@@ -114,6 +114,34 @@ test("keeps previously passing declarations passing", () => {
   assert.equal(validateChangeEvidence(data), data.manifest);
 });
 
+test("push events use the predecessor base and reject stale or wrong bases", () => {
+  const root = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-push-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const eventPath = join(root, "push-event.json");
+  try {
+    git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+    writeFileSync(join(root, "routing.ts"), "old"); git("add", "."); git("commit", "-qm", "base");
+    const revision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "routing.ts"), "new");
+    const data = input(); data.manifest.base = revision;
+    writeFileSync(join(root, "change-evidence.json"), JSON.stringify(data.manifest));
+    git("add", "."); git("commit", "-qm", "candidate");
+    const payload = { before: revision, after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" };
+    writeFileSync(eventPath, JSON.stringify(payload));
+    const options = { root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } };
+    assert.equal(changeEvidenceCase(options).status, "passed");
+
+    const wrong = "b".repeat(40);
+    writeFileSync(eventPath, JSON.stringify({ ...payload, before: wrong }));
+    assert.equal(changeEvidenceCase({ ...options, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } }).status, "failed");
+
+    writeFileSync(eventPath, JSON.stringify({ after: payload.after, ref: payload.ref }));
+    assert.equal(changeEvidenceCase({ ...options, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } }).status, "failed");
+
+    assert.equal(changeEvidenceCase({ ...options, env: { GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: join(root, "missing") } }).status, "failed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the missing-case assertion detects a disabled execution guard", async () => {
   const directory = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-fault-"));
   const source = readFileSync(new URL("../scripts/acceptance/change-evidence.mjs", import.meta.url), "utf8");
@@ -130,4 +158,182 @@ test("the missing-case assertion detects a disabled execution guard", async () =
   } finally { rmSync(directory, { recursive: true, force: true }); }
   assert.equal(readFileSync(new URL("../scripts/acceptance/change-evidence.mjs", import.meta.url), "utf8"), source);
   requireRejection(validateChangeEvidence);
+});
+
+test("event-driven push and pull request bases fail closed despite competing env", () => {
+  const root = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-event-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const eventPath = join(root, "event.json");
+  try {
+    git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+    writeFileSync(join(root, "routing.ts"), "old"); git("add", "."); git("commit", "-qm", "base");
+    const revision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "routing.ts"), "new");
+    const data = input(); data.manifest.base = revision;
+    writeFileSync(join(root, "change-evidence.json"), JSON.stringify(data.manifest));
+    git("add", "."); git("commit", "-qm", "candidate");
+    const competingEnv = { BIFROST_EVIDENCE_BASE: revision };
+
+    writeFileSync(eventPath, JSON.stringify({ after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+    assert.equal(changeEvidenceCase({ root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath, ...competingEnv } }).status, "failed");
+
+    writeFileSync(eventPath, JSON.stringify({ before: null, after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+    assert.equal(changeEvidenceCase({ root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath, ...competingEnv } }).status, "failed");
+
+    writeFileSync(eventPath, JSON.stringify({ before: "0".repeat(40), after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+    assert.equal(changeEvidenceCase({ root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath, ...competingEnv } }).status, "failed");
+
+    writeFileSync(eventPath, JSON.stringify({ pull_request: { base: { sha: null } } }));
+    assert.equal(changeEvidenceCase({ root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventPath, ...competingEnv } }).status, "failed");
+
+    writeFileSync(eventPath, JSON.stringify({ pull_request: {} }));
+    assert.equal(changeEvidenceCase({ root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventPath, ...competingEnv } }).status, "failed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a real stale ancestor base fails declaration equality with named detail", () => {
+  const root = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-stale-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const eventPath = join(root, "event.json");
+  try {
+    git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+    writeFileSync(join(root, "routing.ts"), "v0"); git("add", "."); git("commit", "-qm", "base");
+    const baseRevision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "notes.txt"), "note"); git("add", "."); git("commit", "-qm", "intermediate");
+    const intermediateRevision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "routing.ts"), "v1"); git("add", "."); git("commit", "-qm", "candidate");
+
+    const data = input(); data.manifest.base = baseRevision;
+    writeFileSync(join(root, "change-evidence.json"), JSON.stringify(data.manifest));
+    git("add", "change-evidence.json"); git("commit", "--amend", "-qm", "candidate");
+
+    writeFileSync(eventPath, JSON.stringify({ before: intermediateRevision, after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+    const result = changeEvidenceCase({ root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } });
+    assert.equal(result.status, "failed");
+    assert.match(result.detail, /missing, unsupported or stale declaration/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("multi-commit push validates full event.before diff and rejects intermediate base", () => {
+  const root = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-multi-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const eventPath = join(root, "event.json");
+  try {
+    git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+    writeFileSync(join(root, "routing.ts"), "v0"); git("add", "."); git("commit", "-qm", "base");
+    const baseRevision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "notes.txt"), "note"); git("add", "."); git("commit", "-qm", "intermediate");
+    const intermediateRevision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "routing.ts"), "v1"); git("add", "."); git("commit", "-qm", "candidate");
+
+    const manifest = {
+      schemaVersion: 1,
+      base: baseRevision,
+      contracts: [
+        { id: "routing", requirement: "R01", files: ["routing.ts", "notes.txt"],
+          boundary: "real Pi with fake HTTP", assertions: "requested model is invoked; decoys are not",
+          boundaryTest: { ...{ file: "tests/route.test.ts", name: "observes dispatch" } },
+          invariant: { ...{ file: "tests/route.test.ts", name: "observes dispatch" } },
+          fault: { ...{ file: "tests/route.test.ts", name: "observes dispatch" } } },
+      ],
+    };
+    writeFileSync(join(root, "change-evidence.json"), JSON.stringify(manifest));
+    git("add", "change-evidence.json"); git("commit", "--amend", "-qm", "candidate");
+
+    const testEvents = [{ type: "test:complete", file: "tests/route.test.ts", name: "observes dispatch", passed: true }];
+
+    writeFileSync(eventPath, JSON.stringify({ before: baseRevision, after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+    const passResult = changeEvidenceCase({ root, testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } });
+    assert.equal(passResult.status, "passed");
+
+    writeFileSync(eventPath, JSON.stringify({ before: intermediateRevision, after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+    const failResult = changeEvidenceCase({ root, testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } });
+    assert.equal(failResult.status, "failed");
+    assert.match(failResult.detail, /missing, unsupported or stale declaration/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("workflow-derived push invocation succeeds without BIFROST_EVIDENCE_BASE", () => {
+  const root = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-workflow-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const eventPath = join(root, "event.json");
+  try {
+    git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+    writeFileSync(join(root, "routing.ts"), "old"); git("add", "."); git("commit", "-qm", "base");
+    const revision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "routing.ts"), "new");
+    const data = input(); data.manifest.base = revision;
+    writeFileSync(join(root, "change-evidence.json"), JSON.stringify(data.manifest));
+    git("add", "."); git("commit", "-qm", "candidate");
+    writeFileSync(eventPath, JSON.stringify({ before: revision, after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+    const result = changeEvidenceCase({ root, testEvents: data.testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } });
+    assert.equal(result.status, "passed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("fault control: selecting HEAD parent instead of event.before turns push base RED", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-fault-push-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const eventPath = join(root, "event.json");
+  try {
+    git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+    writeFileSync(join(root, "routing.ts"), "v0"); git("add", "."); git("commit", "-qm", "base");
+    const baseRevision = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "notes.txt"), "note"); git("add", "."); git("commit", "-qm", "intermediate");
+    writeFileSync(join(root, "routing.ts"), "v1"); git("add", "."); git("commit", "-qm", "candidate");
+
+    const manifest = {
+      schemaVersion: 1,
+      base: baseRevision,
+      contracts: [
+        { id: "routing", requirement: "R01", files: ["routing.ts", "notes.txt"],
+          boundary: "real Pi with fake HTTP", assertions: "requested model is invoked; decoys are not",
+          boundaryTest: { file: "tests/route.test.ts", name: "observes dispatch" },
+          invariant: { file: "tests/route.test.ts", name: "observes dispatch" },
+          fault: { file: "tests/route.test.ts", name: "observes dispatch" } },
+      ],
+    };
+    writeFileSync(join(root, "change-evidence.json"), JSON.stringify(manifest));
+    git("add", "change-evidence.json"); git("commit", "--amend", "-qm", "candidate");
+
+    const testEvents = [{ type: "test:complete", file: "tests/route.test.ts", name: "observes dispatch", passed: true }];
+    writeFileSync(eventPath, JSON.stringify({ before: baseRevision, after: git("rev-parse", "HEAD"), ref: "refs/heads/v2" }));
+
+    const options = { root, testEvents, env: { GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath } };
+    assert.equal(changeEvidenceCase(options).status, "passed");
+
+    const source = readFileSync(new URL("../scripts/acceptance/change-evidence.mjs", import.meta.url), "utf8");
+    const anchor = "event?.before";
+    assert.equal(source.split(anchor).length, 2, "fault anchor must be unique");
+    const directory = mkdtempSync(join(tmpdir(), "bifrost-change-evidence-fault-push-"));
+    try {
+      const copy = source.replace('"./core.mjs"', JSON.stringify(new URL("../scripts/acceptance/core.mjs", import.meta.url).href)).replace(anchor, 'git(root, ["rev-parse", "HEAD^"])');
+      const file = join(directory, "fault-push.mjs"); writeFileSync(file, copy);
+      const mutant = await import(pathToFileURL(file).href);
+      const mutantResult = mutant.changeEvidenceCase(options);
+      assert.equal(mutantResult.status, "failed");
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+    assert.equal(readFileSync(new URL("../scripts/acceptance/change-evidence.mjs", import.meta.url), "utf8"), source);
+    assert.equal(changeEvidenceCase(options).status, "passed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("acceptance CLI records change-evidence GREEN for a push predecessor", { timeout: 300000 }, () => {
+  const root = process.cwd();
+  const manifest = JSON.parse(readFileSync(join(root, "change-evidence.json"), "utf8"));
+  const eventDir = mkdtempSync(join(tmpdir(), "bifrost-acceptance-push-event-"));
+  const eventPath = join(eventDir, "event.json");
+  try {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    writeFileSync(eventPath, JSON.stringify({ before: manifest.base, after: head, ref: "refs/heads/v2" }));
+    const env = { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath };
+    delete env.BIFROST_EVIDENCE_BASE;
+    const script = fileURLToPath(new URL("../scripts/acceptance.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, "--profile", "deterministic"], { cwd: root, env, encoding: "utf8", timeout: 280000 });
+    const evidenceLine = (result.stdout ?? "").match(/^Evidence: (.+)$/m)?.[1];
+    assert.ok(evidenceLine, result.stderr + result.stdout);
+    const evidence = JSON.parse(readFileSync(join(root, evidenceLine), "utf8"));
+    const changeEvidence = evidence.cases.find((item) => item.id === "change-evidence");
+    assert.equal(changeEvidence?.status, "passed", changeEvidence?.detail ?? "change-evidence case missing");
+  } finally { rmSync(eventDir, { recursive: true, force: true }); }
 });
