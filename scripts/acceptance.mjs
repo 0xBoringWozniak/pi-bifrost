@@ -29,6 +29,7 @@ const NODE_TEST_GATES = new Map([
       "valid apply merges exactly once and verifies push gates",
       "repeated apply preserves the frozen intent and never merges twice",
       "guard removal control: bypassing receipt validation reddens the named assertion, restore is green",
+      "third PR read receipt revocation rejects before intent or merge",
       "CLI re-fetches head, base, and proposed identity before returning eligible",
       "terminal control PR-body text never reaches terminal diagnostics",
       "guard removal control: disabling final revalidation reddens the movement assertion, restore is green",

@@ -26,7 +26,7 @@ function die(code) { process.stderr.write(code + "\\n"); process.exit(1); }
 const joined = args.join(" ");
 if (world.revokeReceipt && joined.includes("headRefOid,baseRefName")) {
   world.reads = (world.reads ?? 0) + 1;
-  if (world.reads === 2) fs.writeFileSync(world.receiptPath, JSON.stringify(world.revokedReceipt));
+  if (world.reads === (world.revokeReceiptRead ?? 2)) fs.writeFileSync(world.receiptPath, JSON.stringify(world.revokedReceipt));
   fs.writeFileSync(process.env.FAKE_GH_WORLD, JSON.stringify(world));
 }
 if (world.revokeReceiptDuringCheck && joined.includes("/git/ref/heads/")) {
@@ -508,6 +508,55 @@ test("revoked trusted receipt at recheck must prevent merge", () => {
   const result = runController(fixture, ["--apply"]);
   assert.equal(JSON.parse(readFileSync(fixture.receiptPath)).unresolvedBlockingFindings, 1);
   assert.equal(result.mergeCalls.length, 0, "revoked trusted receipt at recheck must prevent merge");
+});
+
+test("third PR read receipt revocation rejects before intent or merge", (t) => {
+  const revokedFixture = () => {
+    const fixture = scaffold();
+    fixture.world.revokeReceipt = true;
+    fixture.world.revokeReceiptRead = 3;
+    fixture.world.receiptPath = fixture.receiptPath;
+    fixture.world.revokedReceipt = defaultReceipt({ unresolvedBlockingFindings: 1 });
+    saveWorld(fixture);
+    return fixture;
+  };
+  const fixture = revokedFixture();
+  const result = runController(fixture, ["--apply"]);
+  assert.equal(JSON.parse(readFileSync(fixture.worldPath)).reads, 3);
+  assert.equal(JSON.parse(readFileSync(fixture.receiptPath)).unresolvedBlockingFindings, 1);
+  assert.equal(result.mergeCalls.length, 0, "third-read revocation must prevent merge");
+  assert.notEqual(result.status, 0);
+  assert.equal(result.json.outcome, "rejected");
+  assert.equal(result.json.code, "receipt-changed");
+  assert.equal(JSON.parse(readFileSync(fixture.outcomePath)).applyIntent, undefined, "revocation must precede persisted apply intent");
+
+  const source = readFileSync(SCRIPT, "utf8");
+  const start = source.indexOf("  // GitHub reads above may outlive a receipt revocation;");
+  const end = source.indexOf("  const workflowId = evidence.workflow.id;", start);
+  assert.ok(start > 0 && end > start);
+  const guard = source.slice(start, end);
+  const mutant = source.replace(guard, "").replace("  const finalPrecheck = collectEvidence(repo, args.pr);", guard + "  const finalPrecheck = collectEvidence(repo, args.pr);");
+  assert.notEqual(mutant, source);
+  const root = join(fixture.dir, "source");
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: root }).status, 0);
+  const copy = join(realpathSync(root), "scripts", "merge-controller.mjs");
+  writeFileSync(join(root, "scripts", "merge-eligibility.mjs"), readFileSync(new URL("../scripts/merge-eligibility.mjs", import.meta.url)));
+  writeFileSync(copy, mutant);
+  assert.equal(readFileSync(copy, "utf8"), mutant);
+  const bypass = runController(revokedFixture(), ["--apply"], REPO_ROOT, copy);
+  assert.equal(bypass.status, 0, bypass.stdout + bypass.stderr);
+  assert.equal(bypass.json.outcome, "merged-and-verified");
+  assert.equal(bypass.mergeCalls.length, 1);
+  assert.throws(() => assert.equal(bypass.mergeCalls.length, 0, "third-read revocation must prevent merge"), /third-read revocation must prevent merge/);
+  writeFileSync(copy, source);
+  assert.equal(readFileSync(copy, "utf8"), source);
+  const restored = runController(revokedFixture(), ["--apply"], REPO_ROOT, copy);
+  assert.equal(restored.mergeCalls.length, 0);
+  assert.notEqual(restored.status, 0);
+  assert.equal(restored.json.code, "receipt-changed");
+  assert.equal(readFileSync(SCRIPT, "utf8"), source);
+  t.diagnostic(JSON.stringify({ green: { status: result.status, outcome: result.json.outcome, mergeCalls: result.mergeCalls.length }, red: { status: bypass.status, outcome: bypass.json.outcome, mergeCalls: bypass.mergeCalls.length }, restored: { status: restored.status, outcome: restored.json.outcome, mergeCalls: restored.mergeCalls.length } }));
 });
 
 test("revoked trusted receipt during check must not emit merged-and-verified", () => {

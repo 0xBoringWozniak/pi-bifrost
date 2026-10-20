@@ -555,8 +555,6 @@ function main() {
 
   const reTested = testedSources(repo, recheck.currentRun, reHead, reProposed);
   if (JSON.stringify(reTested) !== JSON.stringify(tested)) fail("tested-source", "tested-source evidence changed at apply recheck");
-  const finalReceipt = readTrustedReceipt(args.receipt, root);
-  if (finalReceipt.canonical !== trusted.canonical || finalReceipt.digest !== trusted.digest) fail("receipt-changed", "trusted receipt changed before apply");
   // Final pre-merge base/head check: --match-head-commit pins only the head,
   // so re-read immediately before merge and refuse if the tested base moved.
   const finalPrecheck = collectEvidence(repo, args.pr);
@@ -569,6 +567,16 @@ function main() {
   if (finalPreHead !== headSha || finalPreBase !== baseSha || finalPrecheck.pr.baseRefName !== baseBranch || finalProposedMismatch) {
     emit({ ...summary, head: finalPreHead, base: finalPreBase, proposedMerge: { sha: proposed.sha, parents: proposed.parents, tree: proposed.tree }, outcome: "rejected-toctou" }, args.outcome);
     return;
+  }
+  // GitHub reads above may outlive a receipt revocation; revalidate the live
+  // trust input only after those reads, immediately before persisting intent.
+  const finalTrusted = readTrustedReceipt(args.receipt, root);
+  const finalReceipt = finalTrusted.receipt;
+  if (finalTrusted.canonical !== trusted.canonical || finalTrusted.digest !== trusted.digest
+    || validateReceiptShape(finalReceipt).errors.length !== 0
+    || bindReceiptToExpectedIdentities(finalReceipt, args).length !== 0
+    || bindReceiptToEvidence(finalReceipt, { headSha, baseSha, sourceTreeSha, deltaSha256, changedFiles }).length !== 0) {
+    fail("receipt-changed", "trusted review receipt changed before apply");
   }
   const workflowId = evidence.workflow.id;
   const applyIntent = { version: 1, repo, pr: args.pr, baseBranch, headSha, baseSha, proposedTree: proposed.tree, workflowId,
