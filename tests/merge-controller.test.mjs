@@ -212,9 +212,13 @@ function scaffold({ world = makeWorld(), receipt = defaultReceipt(), receiptText
 
 let receiptNumber = 0;
 
+function controllerEnvironment(fixture, sourceEnv = process.env) {
+  const { GITHUB_REPOSITORY: _githubRepository, ...inheritedEnv } = sourceEnv;
+  return { ...inheritedEnv, PATH: fixture.bin + ":" + sourceEnv.PATH, FAKE_GH_WORLD: fixture.worldPath, FAKE_GH_LOG: fixture.logPath };
+}
+
 function runController(fixture, extraArgs = [], cwd = REPO_ROOT, script = SCRIPT) {
-  const { GITHUB_REPOSITORY: _githubRepository, ...inheritedEnv } = process.env;
-  const env = { ...inheritedEnv, PATH: fixture.bin + ":" + process.env.PATH, FAKE_GH_WORLD: fixture.worldPath, FAKE_GH_LOG: fixture.logPath };
+  const env = controllerEnvironment(fixture);
   const args = [script, "1", "--outcome", fixture.outcomePath, "--receipt", fixture.receiptPath, "--expected-reviewer", "reviewer-agent", "--expected-implementer", "implementer-agent", ...extraArgs];
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env, cwd });
   const calls = existsSync(fixture.logPath) ? readFileSync(fixture.logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
@@ -690,7 +694,7 @@ test("concurrent applies: exactly one claims outcome and the other refuses", asy
   const fixture = scaffold();
   const runOnce = () => new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [SCRIPT, "1", "--outcome", fixture.outcomePath, "--receipt", fixture.receiptPath, "--expected-reviewer", "reviewer-agent", "--expected-implementer", "implementer-agent", "--apply"], {
-      env: { ...process.env, PATH: fixture.bin + ":" + process.env.PATH, FAKE_GH_WORLD: fixture.worldPath, FAKE_GH_LOG: fixture.logPath },
+      env: controllerEnvironment(fixture, { ...process.env, GITHUB_REPOSITORY: "ambient/unrelated" }),
       encoding: "utf8",
     });
     let stdout = "", stderr = "";
