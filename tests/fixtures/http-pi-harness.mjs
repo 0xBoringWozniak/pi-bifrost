@@ -86,34 +86,74 @@ function readViolations(path) {
 
 // ── Server-ready handshake + guarded shutdown ───────────────────
 
+// Every shared fake provider is owned by creation-time receipt. It stays in the
+// caller's process group instead of detaching into its own group: acceptance
+// gates cancel a timed-out suite by signalling that group, so a detached child
+// would survive as an orphan (PPID 1, its own PGID). The registry below adds
+// the second half of cancellation safety — a direct SIGINT/SIGTERM/SIGHUP to
+// the owner also tears down its providers before the signal is re-delivered.
+const ownedProviderServers = new Set();
+let cancellationHandlerInstalled = false;
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; }
+}
+
+function installCancellationOwnership() {
+  if (cancellationHandlerInstalled) return;
+  cancellationHandlerInstalled = true;
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.once(signal, () => {
+      // Signal only creation-recorded providers. Never a group, pattern, or
+      // process this fixture did not spawn.
+      for (const child of ownedProviderServers) {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      }
+      // Re-deliver the cancellation so the runner's own signal semantics (or
+      // the platform default) still terminate the owner.
+      process.kill(process.pid, signal);
+    });
+  }
+}
+
 /**
  * Start `scripts/fake-provider-server.mjs` and wait for its `{"port": N}` ready
- * record. Every server is a detached, creation-owned process group. Returns
- * `{ child, port, stop() }`; `stop()` is a guarded shutdown — it terminates the
- * owned group if it is still alive, then asserts the child closed AND the
- * creation-owned group (`child.pid`) is absent before resolving, so a denied or
- * failed cleanup throws instead of leaking a stray provider. It never deletes
- * scratch.
+ * record. The server is a creation-owned member of the caller's process group,
+ * so cancelling that group tears it down. Returns `{ child, port, stop() }`;
+ * `stop()` is a guarded shutdown — it terminates the owned child if still
+ * alive, then asserts the child closed AND its creation-time pid is absent
+ * before resolving, so a denied or failed cleanup throws instead of leaking a
+ * stray provider. It never deletes scratch.
  */
 export function startFakeProviderServer({ timeoutMs = PORT_DEADLINE_MS } = {}) {
-  const child = spawn("node", [FAKE_PROVIDER_SERVER], { stdio: ["ignore", "pipe", "ignore"], detached: true });
+  installCancellationOwnership();
+  // Deliberately not detached: the caller's process group is the cancellation
+  // boundary owned by the acceptance gate. Ownership is still tracked by the
+  // exact child pid recorded at spawn.
+  const child = spawn("node", [FAKE_PROVIDER_SERVER], { stdio: ["ignore", "pipe", "ignore"] });
+  ownedProviderServers.add(child);
   return new Promise((resolve, reject) => {
     let output = "";
     let settled = false;
     let closeObserved = false;
     const closed = new Promise((resolveClose) => child.once("close", () => { closeObserved = true; resolveClose(); }));
-    const stop = ({ graceMs = 2_000 } = {}) => stopOwnedGroup(child, closed, () => closeObserved, graceMs);
+    let stopPromise;
+    const stop = ({ graceMs = 2_000 } = {}) => {
+      stopPromise ??= stopOwnedChild(child, closed, () => closeObserved, graceMs);
+      return stopPromise;
+    };
     const fail = (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      // Guarded teardown on the failure path too: await the owned-group shutdown
-      // so its assertions cannot be lost, but never mask the startup error.
+      // Guarded teardown on the failure path too: await the owned shutdown so
+      // its assertions cannot be lost, but never mask the startup error.
       stop({ graceMs: 0 }).then(
         () => reject(error),
         (cleanupError) => reject(new AggregateError(
           [error, cleanupError],
-          "fake provider startup failed and its owned group did not shut down cleanly",
+          "fake provider startup failed and its owned process did not shut down cleanly",
         )),
       );
     };
@@ -135,27 +175,27 @@ export function startFakeProviderServer({ timeoutMs = PORT_DEADLINE_MS } = {}) {
 }
 
 /**
- * Guarded shutdown of an owned process group. Signals gracefully, escalates via
- * the shared `terminateProcessGroup` if the child is still open, then ASSERTS —
- * using only creation-time receipts (`child.pid` as the group id) — that the
- * child closed and the group is absent. A denied or failed cleanup throws
- * rather than returning as if teardown were proven. Mirrors the fake-provider
- * shutdown in tests/integration/cache-lifecycle-acceptance.test.mjs.
+ * Guarded shutdown of an owned provider. Signals gracefully, escalates with
+ * SIGKILL if the child is still open, then ASSERTS — using only the
+ * creation-time pid — that the child closed and the process is absent. A
+ * denied or failed cleanup throws rather than returning as if teardown were
+ * proven. Removes the child from the cancellation registry only after death is
+ * verified, so an unverified provider remains owned.
  */
-async function stopOwnedGroup(child, closed, isClosed, graceMs) {
+async function stopOwnedChild(child, closed, isClosed, graceMs) {
   if (!child) return;
   if (!isClosed()) {
     try { child.kill("SIGTERM"); } catch { /* already gone */ }
     if (graceMs > 0) await Promise.race([closed, delay(graceMs)]);
     if (!isClosed()) {
-      const terminated = await terminateProcessGroup(child, { graceMs: 1_000, cleanupTimeoutMs: 5_000 });
-      assert.equal(terminated, true, "fake provider owned group must terminate");
-      await Promise.race([closed, delay(1_000)]);
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      await Promise.race([closed, delay(5_000)]);
     }
   }
-  child.unref();
   assert.equal(isClosed(), true, "fake provider must close before teardown completes");
-  assert.equal(processGroupExists(child.pid), false, "fake provider owned group must be absent after close");
+  assert.equal(isProcessAlive(child.pid), false, "fake provider process must be absent after close");
+  ownedProviderServers.delete(child);
+  child.unref();
 }
 
 // ── Isolated environment ────────────────────────────────────────

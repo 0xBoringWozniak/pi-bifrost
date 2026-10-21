@@ -4,6 +4,7 @@ import { git, matchNamedTestEvent, normalizedTestPath } from "./core.mjs";
 
 const MANIFEST = "change-evidence.json";
 const SHA = /^[a-f0-9]{40}$/;
+const ZERO_SHA = "0".repeat(40);
 
 function requireValue(condition, message) {
   if (!condition) throw new Error(`Change evidence: ${message}`);
@@ -57,13 +58,27 @@ export function validateChangeEvidence({ manifest, base, changedFiles, testEvent
 }
 
 export function changeEvidenceCase({ root, testEvents, env = process.env }) {
-  const required = env.GITHUB_EVENT_NAME === "pull_request" || Object.hasOwn(env, "BIFROST_EVIDENCE_BASE");
+  const isPullRequest = env.GITHUB_EVENT_NAME === "pull_request";
+  const isPush = env.GITHUB_EVENT_NAME === "push";
+  const required = isPullRequest || isPush || Object.hasOwn(env, "BIFROST_EVIDENCE_BASE");
   if (!required) return null;
   const result = { id: "change-evidence", requirements: ["R16"], boundary: "per-change executed evidence declarations", required: true, attempts: 1, artifacts: [MANIFEST], exclusions: [] };
   try {
-    const event = env.GITHUB_EVENT_NAME === "pull_request" ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : null;
-    const base = event ? event.pull_request?.base?.sha : env.BIFROST_EVIDENCE_BASE;
-    requireValue(typeof base === "string" && SHA.test(base), "a full base commit is required");
+    const eventPath = env.GITHUB_EVENT_PATH;
+    const event = (isPullRequest || isPush) && typeof eventPath === "string"
+      ? JSON.parse(readFileSync(eventPath, "utf8"))
+      : null;
+    const eventBase = isPullRequest
+      ? event?.pull_request?.base?.sha
+      : isPush
+        ? event?.before
+        : undefined;
+    // Event-driven checks are fail-closed: a missing or null event base cannot be
+    // rescued by a competing local BIFROST_EVIDENCE_BASE. Non-event runs use it.
+    const base = (isPullRequest || isPush)
+      ? eventBase
+      : env.BIFROST_EVIDENCE_BASE;
+    requireValue(typeof base === "string" && SHA.test(base) && base !== ZERO_SHA, "a full base commit is required");
     git(root, ["merge-base", "--is-ancestor", base, "HEAD"]);
     const changedFiles = git(root, ["diff", "--name-only", "--no-renames", "-z", base, "HEAD"]).split("\0").filter(Boolean);
     const manifestPath = join(root, MANIFEST);

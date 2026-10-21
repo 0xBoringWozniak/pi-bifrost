@@ -18,10 +18,35 @@ const MAX_CAPTURE_BYTES = 256 * 1024;
 const MAX_REPORTER_LINE_BYTES = 1024 * 1024;
 const MAX_REPORTER_EVENTS = 20_000;
 const MAX_REPORTER_EVENT_BYTES = 16 * 1024 * 1024;
+const NODE_TEST_GATES = new Map([
+  ["test", { paths: ["tests/*.test.ts", "tests/*.test.mjs"] }],
+  ["test:integration", { paths: ["tests/integration/*.test.mjs"] }],
+  // Bounded caller proof: the acceptance-runner test invokes the real CLI with
+  // only the named manifest evidence tests as its structured event source.
+  ["test:manifest-evidence", {
+    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs"],
+    pattern: [
+      "owns the fake provider across owner cancellation \\(baseline GREEN, bypass RED, restored GREEN\\)",
+      "keeps one fake-provider owner in the two former leak paths",
+      "valid apply merges exactly once and verifies push gates",
+      "repeated apply preserves the frozen intent and never merges twice",
+      "guard removal control: bypassing receipt validation reddens the named assertion, restore is green",
+      "third PR read receipt revocation rejects before intent or merge",
+      "CLI re-fetches head, base, and proposed identity before returning eligible",
+      "terminal control PR-body text never reaches terminal diagnostics",
+      "guard removal control: disabling final revalidation reddens the movement assertion, restore is green",
+      "multi-commit push validates full event.before diff and rejects intermediate base",
+      "event-driven push and pull request bases fail closed despite competing env",
+      "a real stale ancestor base fails declaration equality with named detail",
+      "fault control: selecting HEAD parent instead of event.before turns push base RED",
+    ].join("|"),
+  }],
+]);
 let activeChild;
 let activeTermination;
 let receivedSignal;
 const SUPPORTING_TESTS = [
+  { id: "support:controller:final-authorization", requirement: "R16", file: "tests/merge-controller.test.mjs", name: "source fault controls exercise server protection, final authorization, and saved intent", boundary: "actual fake-gh CLI; private source faults hit each named assertion and exact restoration passes" },
   {"id": "support:g07:campaign", "requirement": "R08", "file": "tests/reliability-v2-state-machine.test.ts", "name": "matches the independent model with the campaign default seed", "boundary": "single-scope/no-observation independent model; campaign FC_SEED varies this sample, pinned replays retained"},
   {"id": "support:g02:01", "requirement": "R06", "file": "tests/integration/activation-cancellation-acceptance.test.mjs", "name": "handles false and throwing physical activation without late dispatch", "boundary": "registered handler with fake pi/ctx; physical activation failure and cancellation"},
   {"id": "support:g02:02", "requirement": "R06", "file": "tests/integration/activation-cancellation-acceptance.test.mjs", "name": "stops an aborted registry wait and preserves a newer editor draft", "boundary": "registered handler with fake pi/ctx; physical activation failure and cancellation"},
@@ -286,19 +311,18 @@ export function runChild(command, args, {
 
 async function executeVerificationGate({ root, script, testEvents, artifactDir }) {
   const gateEnvironment = verificationGateEnvironment({ root, artifactDir, script });
-  if (script !== "test" && script !== "test:integration") {
+  const testGate = NODE_TEST_GATES.get(script);
+  if (!testGate) {
     return enforceGateNetworkBoundary(await runChild("npm", ["run", script], { cwd: root, env: gateEnvironment.env }), gateEnvironment.violationPath);
   }
   const reporterPath = join(root, "scripts", "acceptance", "test-event-reporter.mjs");
-  const testPaths = script === "test"
-    ? ["tests/*.test.ts", "tests/*.test.mjs"]
-    : ["tests/integration/*.test.mjs"];
   let malformedEvent = false;
   const result = await runChild(process.execPath, [
     "--test",
     "--experimental-strip-types",
     `--test-reporter=${reporterPath}`,
-    ...testPaths,
+    ...(testGate.pattern ? [`--test-name-pattern=${testGate.pattern}`] : []),
+    ...testGate.paths,
   ], {
     cwd: root,
     env: gateEnvironment.env,

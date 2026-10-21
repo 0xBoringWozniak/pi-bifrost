@@ -27,11 +27,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { processGroupExists, terminateProcessGroup } from "../../scripts/acceptance/core.mjs";
+import { startFakeProviderServer } from "../fixtures/http-pi-harness.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PI = join(ROOT, "node_modules", ".bin", "pi");
 const EXTENSION = join(ROOT, "index.ts");
-const FAKE_SERVER = join(ROOT, "scripts", "fake-provider-server.mjs");
 const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 
 /** Production index.ts hash that the fault proof must leave byte-identical. */
@@ -132,48 +132,8 @@ function assertBackendTraceContract(rows, backend, declared) {
 let server;
 
 // ── fake provider ───────────────────────────────────────────────
-
-async function startFakeServer() {
-  const child = spawn("node", [FAKE_SERVER], { stdio: ["ignore", "pipe", "ignore"], detached: true });
-  let closed = false;
-  const childClosed = new Promise((resolve) => child.once("close", () => { closed = true; resolve(); }));
-  child.unref();
-  try {
-    const ready = await new Promise((resolve, reject) => {
-      let output = "";
-      const timer = setTimeout(() => reject(new Error("fake provider startup timed out")), 10_000);
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => {
-        output += chunk;
-        try { const record = JSON.parse(output); clearTimeout(timer); resolve(record); }
-        catch { /* wait for the startup record */ }
-      });
-      child.once("error", (error) => { clearTimeout(timer); reject(error); });
-      child.once("close", () => { clearTimeout(timer); reject(new Error("fake provider exited before startup")); });
-    });
-    return {
-      child,
-      port: ready.port,
-      async shutdown() {
-        if (!closed) await Promise.race([childClosed, new Promise((r) => setTimeout(r, 500))]);
-        if (!closed) {
-          const terminated = await terminateProcessGroup(child, { graceMs: 1000, cleanupTimeoutMs: 2000 });
-          assert.equal(terminated, true, "fake provider group must terminate");
-          await Promise.race([childClosed, new Promise((r) => setTimeout(r, 2000))]);
-        }
-        assert.equal(closed, true, "fake provider must close before teardown completes");
-        assert.equal(processGroupExists(child.pid), false, "fake provider group must be absent after close");
-      },
-    };
-  } catch (error) {
-    try { child.stdout.destroy(); } catch {}
-    const terminated = await terminateProcessGroup(child, { graceMs: 1000, cleanupTimeoutMs: 2000 });
-    await Promise.race([childClosed, new Promise((r) => setTimeout(r, 2000))]);
-    assert.equal(terminated, true, "fake provider group must terminate on startup failure");
-    assert.equal(processGroupExists(child.pid), false, "fake provider group must be absent after startup failure");
-    throw error;
-  }
-}
+// Sole owner: tests/fixtures/http-pi-harness.mjs. Ownership is cancellation-
+// safe because the provider stays in this worker's process group.
 
 async function stats() {
   const response = await fetch(`http://127.0.0.1:${server.port}/_stats`);
@@ -648,8 +608,8 @@ async function assertPiNativeTraceScenario(extension) {
 // ── scenarios ───────────────────────────────────────────────────
 
 describe("command and artifact privacy acceptance", { timeout: 600_000, concurrency: 1 }, () => {
-  before(async () => { server = await startFakeServer(); });
-  after(async () => { await server?.shutdown(); });
+  before(async () => { server = await startFakeProviderServer(); });
+  after(async () => { await server?.stop(); });
 
   it("keeps the debug trace inside an explicit key allowlist and free of canaries", async () => {
     await scenario({
