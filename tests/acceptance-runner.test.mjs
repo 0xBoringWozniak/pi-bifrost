@@ -630,6 +630,8 @@ describe("acceptance runner boundary", () => {
     git("update-ref", "refs/remotes/origin/v2", merged);
     assert.equal(git("merge-base", "origin/v2", "HEAD"), merged);
     assert.notEqual(merged, predecessor, "the current delivery tip is not the historic push predecessor");
+    assert.ok(head !== predecessor && git("rev-list", "--ancestry-path", `${predecessor}..${merged}`).split("\n").includes(head),
+      "the owned merged-push fixture must exercise a real intermediate commit");
     const eventPath = join(directory, "push.json");
     writeFileSync(eventPath, JSON.stringify({ before: predecessor, after: merged, ref: "refs/heads/v2" }));
     const env = { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath };
@@ -841,9 +843,12 @@ describe("acceptance runner boundary", () => {
     };
     runCaller(predecessor, "passed", head);
     const intermediate = git("rev-list", "--ancestry-path", `${predecessor}..HEAD`).split("\n").find((sha) => sha !== head);
-    assert.ok(intermediate, "the caller proof requires a real intermediate commit");
-    assert.notEqual(intermediate, predecessor, "negative base must differ from event.before");
-    runCaller(intermediate, "failed", predecessor);
-    runCaller(predecessor, "passed", intermediate);
+    // A candidate can be a single commit. The owned merged-push fixture above
+    // guarantees a real intermediate witness; the direct single-commit caller
+    // instead proves that HEAD itself cannot replace the event predecessor.
+    const wrongBase = intermediate ?? head;
+    assert.notEqual(wrongBase, predecessor, "negative base must differ from event.before");
+    runCaller(wrongBase, "failed", predecessor);
+    runCaller(predecessor, "passed", wrongBase);
   });
 });

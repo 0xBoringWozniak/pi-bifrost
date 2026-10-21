@@ -78,7 +78,7 @@
         "tests/acceptance-runner.test.mjs"
       ],
       "boundary": "The existing bounded workflow caller executes exact safe file/name witnesses from the submitted declaration plus fixed predecessor controls; it no longer depends on the prior controller PR test inventory. Full unit/integration release gates remain mandatory.",
-      "assertions": "Actual merged-push gate forwarding retains event.before and executes every declared boundary/invariant/fault witness. Disabling declaration witness selection fails the named missing boundary assertion; removed event context and wrong predecessor independently fail, exact restored source passes. The full submitted CLI source-fault proof is a separately required supporting unit witness, avoiding recursive invocation of the gate from its own declaration.",
+      "assertions": "Actual merged-push gate forwarding retains event.before and executes every declared boundary/invariant/fault witness. Disabling declaration witness selection fails the named missing boundary assertion; removed event context and wrong predecessor independently fail, exact restored source passes. The full submitted CLI source-fault proof is a separately required supporting unit witness, avoiding recursive invocation of the gate from its own declaration. The owned merged-push fixture guarantees a real intermediate commit; a direct one-commit candidate separately rejects HEAD as the wrong base without assuming contributor history.",
       "boundaryTest": {
         "file": "tests/acceptance-runner.test.mjs",
         "name": "selects exact bounded declaration witnesses and rejects unsafe test paths"
