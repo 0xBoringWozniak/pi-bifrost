@@ -215,6 +215,8 @@ function gitleaksCommand(history) {
     return {
       args: [
         history ? "git" : "dir",
+        "--config",
+        ".gitleaks.toml",
         "--redact",
         "--no-banner",
         "--report-format",
@@ -230,7 +232,7 @@ function gitleaksCommand(history) {
   };
 }
 
-const CHECKS = {
+export const CHECKS = {
   arch: {
     tool: "depcruise",
     summary: "Architecture boundaries (dependency-cruiser)",
@@ -273,7 +275,7 @@ const CHECKS = {
     tool: "semgrep",
     summary: "Repository security rules (Semgrep)",
     command: () => ({
-      args: ["scan", "--config", ".semgrep.yml", "--json", "--quiet", "--metrics=off", "--disable-version-check", "."],
+      args: ["scan", "--config", "semgrep/", "--json", "--quiet", "--metrics=off", "--disable-version-check", "."],
     }),
     parse: parseSemgrep,
   },

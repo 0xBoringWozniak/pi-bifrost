@@ -24,7 +24,7 @@ const NODE_TEST_GATES = new Map([
   // Bounded caller proof: the acceptance-runner test invokes the real CLI with
   // only the named manifest evidence tests as its structured event source.
   ["test:manifest-evidence", {
-    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/toolbox.test.mjs"],
+    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/toolbox.test.mjs", "tests/tooling-config.test.mjs"],
     pattern: [
       "owns the fake provider across owner cancellation \\(baseline GREEN, bypass RED, restored GREEN\\)",
       "keeps one fake-provider owner in the two former leak paths",
@@ -45,6 +45,9 @@ const NODE_TEST_GATES = new Map([
       "the committed ast-grep rules pass their own valid and invalid fixtures",
       "parses every Knip issue kind into one flat finding list",
       "reports unavailable tools with install hints instead of a false pass",
+      "the committed Semgrep rules and fixtures share exact rule identifiers and file names",
+      "every checkout disables credential persistence",
+      "the credential-persistence check rejects a checkout that omits the setting",
     ].join("|"),
   }],
 ]);
