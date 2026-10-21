@@ -912,6 +912,76 @@ describe("goal-driven scenarios", () => {
   });
 });
 
+describe("order, pause labeling, and inventory pagination", () => {
+  it("keeps registry order for preview routing and sorts only the displayed inventory", async () => {
+    const harness = freshHarness({
+      available: [
+        makeModel("test", "z9", 1, 2, 100_000),
+        makeModel("test", "a1", 1, 2, 100_000),
+      ],
+    });
+    try {
+      const previewDetails = detailsOf<ConfigAgentPreviewResult>(await harness.run({
+        operation: "preview",
+        candidate: { schemaVersion: 2, default: "work", models: { work: ["test"] } },
+      }));
+      const work = previewDetails.tiers.find((tier) => tier.tier === "work");
+      assert.equal(work?.selected, "test/z9", "first must resolve in Pi's registry order like live routing");
+
+      const inspectDetails = detailsOf<ConfigAgentInspectResult>(await harness.run({ operation: "inspect" }));
+      assert.deepEqual(
+        inspectDetails.inventory.map((model) => model.key),
+        ["test/a1", "test/z9"],
+        "the displayed inventory sorts for reading",
+      );
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("labels preview results as assuming no paused models", async () => {
+    const harness = freshHarness();
+    try {
+      const previewResult = await harness.run({
+        operation: "preview",
+        candidate: { schemaVersion: 2, default: "work", models: { work: ["beta/code"], deep: ["alpha/strong"] } },
+      });
+      const previewDetails = detailsOf<ConfigAgentPreviewResult>(previewResult);
+      assert.equal(previewDetails.status, "ok");
+      assert.ok(
+        previewDetails.notes.some((note) => /circuit|paused/i.test(note)),
+        "the result notes must state the pause assumption",
+      );
+      assert.match(contentOf(previewResult), /assumes healthy/, "the report must state the pause assumption");
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("pages the inspect inventory past the report cap", async () => {
+    const harness = freshHarness({
+      available: Array.from({ length: 45 }, (_, index) => makeModel("bulk", `m${String(index).padStart(2, "0")}`, 1, 2, 100_000)),
+    });
+    try {
+      const page1 = detailsOf<ConfigAgentInspectResult>(await harness.run({ operation: "inspect" }));
+      assert.equal(page1.inventory.length, 45, "the result keeps the full list; only the report caps it");
+
+      const page1Text = contentOf(await harness.run({ operation: "inspect" }));
+      assert.match(page1Text, /"offset": 40/, "the report tells the agent how to see the rest");
+
+      const page2 = detailsOf<ConfigAgentInspectResult>(await harness.run({ operation: "inspect", offset: 40 }));
+      assert.equal(page2.inventoryOffset, 40);
+      assert.equal(page2.inventory.length, 5);
+      assert.equal(page2.inventory[0]?.key, "bulk/m40");
+
+      const filtered = detailsOf<ConfigAgentInspectResult>(await harness.run({ operation: "inspect", provider: "bulk", offset: 40 }));
+      assert.equal(filtered.inventory.length, 5);
+    } finally {
+      harness.cleanup();
+    }
+  });
+});
+
 describe("tool surface", () => {
   it("exposes one cohesive tool with a stable name", () => {
     const harness = freshHarness();
@@ -922,7 +992,7 @@ describe("tool surface", () => {
       assert.ok(harness.tool.promptSnippet);
       const properties = (harness.tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
       assert.deepEqual(Object.keys(properties).sort(), [
-        "candidate", "catalogDigest", "effectiveDigest", "operation", "patch",
+        "candidate", "catalogDigest", "effectiveDigest", "offset", "operation", "patch",
         "prompts", "proposalDigest", "provider", "remove", "source", "sourceDigest",
       ]);
     } finally {

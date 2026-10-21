@@ -156,6 +156,8 @@ export interface ConfigAgentInspectResult {
   /** Total available models before an `inventoryProvider` filter. */
   readonly availableModelCount: number;
   readonly inventoryProvider?: string;
+  /** Start of the reported page within the sorted display list; absent on the first page. */
+  readonly inventoryOffset?: number;
   readonly knownUnavailableCount: number;
   readonly notes: readonly string[];
 }
@@ -449,7 +451,9 @@ export function buildConfigAgentCatalog(
     // Available entries must exist in the known list so the router snapshot stays consistent.
     if (projected && knownModels.has(projected.key)) availableModels.push(projected);
   }
-  availableModels.sort((left, right) => left.key.localeCompare(right.key));
+  // `available` keeps Pi's registry order on purpose: pool matching and
+  // `first` selection are order-sensitive, so the preview router must see
+  // the same order live routing sees. `inspect` sorts only its display.
   return {
     available: availableModels,
     known: [...knownModels.values()].sort((left, right) => left.key.localeCompare(right.key)),
@@ -947,6 +951,7 @@ export async function previewConfigCandidate(input: ConfigAgentPreviewInput): Pr
   const notes: string[] = [
     "Offline preview: no prompt was sent anywhere and no classifier or model was invoked.",
     "Tier assignments use the configured strategy with a fixed random source, so `random` picks the same candidate every time here.",
+    "Preview assumes healthy models: saved circuit breaks and provider cooldowns are not loaded, so live routing may skip a paused model that resolves here.",
   ];
   if (classifiersCanChangeRoutes) {
     notes.push("The candidate enables the classifier, so prompt classification in a live session can pick a different tier than these cases show. Cases marked classifier_dependent show only the no-classifier path.");
@@ -1189,6 +1194,8 @@ export interface ConfigAgentInspectInput {
   readonly extensionDir: string;
   /** Optional display filter for one provider; it never changes validation or routing. */
   readonly provider?: string;
+  /** Page start within the sorted, filtered inventory; it never changes validation or routing. */
+  readonly offset?: number;
 }
 
 export function inspectConfigAgent(input: ConfigAgentInspectInput): ConfigAgentInspectResult {
@@ -1208,7 +1215,12 @@ export function inspectConfigAgent(input: ConfigAgentInspectInput): ConfigAgentI
   if (catalog.metadataIncomplete.length > 0) {
     restrictions.push(`${catalog.metadataIncomplete.length} catalog model(s) report unusable cost or context metadata and cannot be routed: ${catalog.metadataIncomplete.slice(0, 8).join(", ")}`);
   }
-  const inventory = provider ? catalog.available.filter((model) => model.provider === provider) : catalog.available;
+  const filtered = provider ? catalog.available.filter((model) => model.provider === provider) : catalog.available;
+  // Routing keeps Pi's registry order (see buildConfigAgentCatalog); inspect
+  // sorts a copy only so the report reads in a stable, predictable order.
+  const sorted = [...filtered].sort((left, right) => left.key.localeCompare(right.key));
+  const offset = Math.max(input.offset ?? 0, 0);
+  const inventory = sorted.slice(offset);
   const knownUnavailableCount = catalog.known.length - catalog.available.length;
   const notes = [
     "No credentials, tokens, or account data are read or reported by this tool.",
@@ -1218,6 +1230,9 @@ export function inspectConfigAgent(input: ConfigAgentInspectInput): ConfigAgentI
     notes.push(inventory.length > 0
       ? `The reported inventory is filtered to provider "${provider}" for display only.`
       : `No available model belongs to provider "${provider}"; the reported inventory is empty.`);
+  }
+  if (offset > 0) {
+    notes.push(`Inventory continues from offset ${offset} of the sorted display list; models before it were listed by the previous page.`);
   }
   return {
     operation: "inspect",
@@ -1231,6 +1246,7 @@ export function inspectConfigAgent(input: ConfigAgentInspectInput): ConfigAgentI
     inventory,
     availableModelCount: catalog.available.length,
     ...(provider ? { inventoryProvider: provider } : {}),
+    ...(offset > 0 ? { inventoryOffset: offset } : {}),
     knownUnavailableCount,
     notes,
   };
@@ -1286,6 +1302,7 @@ const ConfigAgentParameters = Type.Object({
   remove: Type.Optional(Type.Array(Type.String(), { description: "Top-level keys to delete. Requires patch." })),
   prompts: Type.Optional(Type.Array(Type.String(), { description: "Representative prompts to evaluate in preview. Offline: nothing is sent anywhere." })),
   provider: Type.Optional(Type.String({ description: "Restrict the inventory reported by inspect to one provider. Display only." })),
+  offset: Type.Optional(Type.Number({ minimum: 0, description: "Page start for the inspect inventory (sorted display order); repeat inspect with the suggested offset to list more models. Display only." })),
   proposalDigest: Type.Optional(Type.String({ description: "proposalDigest returned by check or preview for this exact candidate." })),
   sourceDigest: Type.Optional(Type.String({ description: "sourceDigest returned by check or preview for this exact candidate. When the source file does not exist yet, check reports the literal \"absent\"; pass that string back unchanged." })),
   effectiveDigest: Type.Optional(Type.String({ description: "effectiveDigest returned by check or preview for this exact candidate." })),
@@ -1351,6 +1368,7 @@ export function createBifrostConfigTool(deps: ConfigAgentToolDeps): ToolDefiniti
             cwd,
             extensionDir: deps.extensionDir,
             ...(params.provider !== undefined ? { provider: params.provider } : {}),
+            ...(params.offset !== undefined ? { offset: params.offset } : {}),
           });
           break;
         case "check":

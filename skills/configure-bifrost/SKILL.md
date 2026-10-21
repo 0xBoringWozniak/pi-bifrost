@@ -25,7 +25,8 @@ goal needs something Bifrost does not do, say so.
    precedence, the current effective policy, the baseline tiers, and current
    restrictions. Never use a model id from memory or from documentation. When the
    inventory is long, repeat inspect with `"provider": "<id>"` to list one
-   provider's models; the filter only narrows what is reported.
+   provider's models, and page further with `"offset": 40`, then `80`, and so
+   on; the filter and offset only narrow what is reported.
 3. **Compose the smallest policy that meets the goal.** See
    [references/configuration-reference.md](references/configuration-reference.md)
    for the fields, strategies, and worked examples. Prefer few tiers and

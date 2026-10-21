@@ -64,7 +64,10 @@ function renderInspect(result: ConfigAgentInspectResult): string {
   ];
   lines.push("available model inventory:");
   for (const model of result.inventory.slice(0, 40)) lines.push(`  ${modelLine(model)}`);
-  if (result.inventory.length > 40) lines.push(`  ... ${result.inventory.length - 40} more; repeat inspect with a provider to narrow this list`);
+  if (result.inventory.length > 40) {
+    const nextOffset = (result.inventoryOffset ?? 0) + 40;
+    lines.push(`  ... ${result.inventory.length - 40} more; repeat inspect with${result.inventoryProvider ? ` "provider": "${result.inventoryProvider}" and` : ""} "offset": ${nextOffset} to list the rest`);
+  }
   if (result.issues.length > 0) {
     lines.push("issues:");
     for (const issue of result.issues) lines.push(`  ${issue.severity}: ${issue.message}`);
