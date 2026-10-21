@@ -1,116 +1,26 @@
 {
   "schemaVersion": 1,
-  "base": "df2a906e285128f8ef7d0fb111e603ea2c6be4d1",
+  "base": "774b1bbdc932059d542d2b95b5b914d9c99aab2c",
   "contracts": [
     {
-      "id": "host-neutral-router-sdk",
-      "requirement": "R13",
-      "files": [
-        "README.md",
-        "classification-pipeline.ts",
-        "commands.ts",
-        "config-load.ts",
-        "config.ts",
-        "docs/router-api.md",
-        "examples/README.md",
-        "examples/host-adapter.mjs",
-        "examples/router-standalone.mjs",
-        "index.ts",
-        "package-lock.json",
-        "package.json",
-        "router.ts",
-        "routing.ts",
-        "tests/auto-bootstrap-runtime.test.ts",
-        "tests/bifrost-commands.test.ts",
-        "tests/config-load.test.ts",
-        "tests/config-source-override.test.ts",
-        "tests/integration/init-regression.test.mjs",
-        "tests/router-package.test.mjs",
-        "virtual-model.ts"
-      ],
-      "boundary": "Existing advisory router consumes host-neutral DTOs and optional Pi peers. Pure config policy is separate from byte-identically preserved host loading; the packed consumer checks the actual published JS/declaration graph, examples and preserved LICENSE inventory. No dispatch or policy automation added.",
-      "assertions": "A clean consumer installs no Pi packages, compiles the complete strict declaration graph and runs both examples without creating host state. Injecting a real Pi import into the installed router graph fails the named dependency assertion before execution; exact restoration is GREEN. Existing host extension/config inheritance compatibility remains.",
-      "boundaryTest": {
-        "file": "tests/router-package.test.mjs",
-        "name": "compiles and runs the shipped examples in a clean standalone consumer with no Pi packages installed"
-      },
-      "invariant": {
-        "file": "tests/router-package.test.mjs",
-        "name": "installs the packed JS API and resolves without loader flags on Node 22.19+"
-      },
-      "fault": {
-        "file": "tests/router-package.test.mjs",
-        "name": "rejects a Pi dependency injected into the actual packed router graph and restores it"
-      }
-    },
-    {
-      "id": "sdk-native-guard-reanchor",
+      "id": "native-auto-missing-route-fault",
       "requirement": "R06",
       "files": [
-        "tests/fixtures/replay-fault-control.mjs",
-        "tests/integration/activation-cancellation-acceptance.test.mjs",
-        "tests/integration/affinity-policy-acceptance.test.mjs",
-        "tests/integration/classifier-transport-acceptance.test.mjs",
-        "tests/integration/command-privacy-acceptance.test.mjs",
-        "tests/integration/economic-policy-acceptance.test.mjs",
-        "tests/integration/native-activation-cancel.test.mjs"
+        "tests/integration/auto-missing-route-fault.test.mjs"
       ],
-      "boundary": "Index import/type adapter changes require exact source integrity hashes in seven existing native proof callers; original fault assertions and process ownership remain intact. This does not claim new nonstreaming or Auto activation coverage.",
-      "assertions": "Real AgentSession abort/manual/false/throw cases still pass; real v1 output-effect and tool-effect source guard faults still reach their named no-replay assertions and restore GREEN on the exact new index hash.",
+      "boundary": "Real native Pi CLI with production Bifrost Auto: after a successful warmup, an explicitly terminal tier references a missing target. It must not dispatch the previous healthy physical model. This is not virtual registration activation-false/throw or nonstreaming cancellation proof.",
+      "assertions": "Owned pristine GREEN; bypass explicit-boundary checks in both sticky and fallback callers; same native request-counter assertion RED; byte-identical restored GREEN. All creation-time owned groups close and are absent before scratch reclaim.",
       "boundaryTest": {
-        "file": "tests/integration/native-activation-cancel.test.mjs",
-        "name": "cancels real AgentSession activation behind a proven deny-all fence"
+        "file": "tests/integration/auto-missing-route-fault.test.mjs",
+        "name": "proves missing Auto targets cannot escape an explicit boundary through sticky or fallback dispatch"
       },
       "invariant": {
-        "file": "tests/integration/auto-virtual.test.mjs",
-        "name": "anchors the baseline source hash and proves isSideEffectFreeAllowanceFailure faults the output-effect no-replay assertion"
+        "file": "tests/integration/auto-missing-route-fault.test.mjs",
+        "name": "proves missing Auto targets cannot escape an explicit boundary through sticky or fallback dispatch"
       },
       "fault": {
-        "file": "tests/integration/auto-virtual.test.mjs",
-        "name": "proves autoBoundaryStillActive faults the synthetic tool side-effect no-replay assertion"
-      }
-    },
-    {
-      "id": "declaration-driven-bounded-caller",
-      "requirement": "R16",
-      "files": [
-        "scripts/acceptance.mjs",
-        "tests/acceptance-runner.test.mjs"
-      ],
-      "boundary": "The existing bounded workflow caller executes exact safe file/name witnesses from the submitted declaration plus fixed predecessor controls; it no longer depends on the prior controller PR test inventory. Full unit/integration release gates remain mandatory.",
-      "assertions": "Actual merged-push gate forwarding retains event.before and executes every declared boundary/invariant/fault witness. Disabling declaration witness selection fails the named missing boundary assertion; removed event context and wrong predecessor independently fail, exact restored source passes. The full submitted CLI source-fault proof is a separately required supporting unit witness, avoiding recursive invocation of the gate from its own declaration. The owned merged-push fixture guarantees a real intermediate commit; a direct one-commit candidate separately rejects HEAD as the wrong base without assuming contributor history.",
-      "boundaryTest": {
-        "file": "tests/acceptance-runner.test.mjs",
-        "name": "selects exact bounded declaration witnesses and rejects unsafe test paths"
-      },
-      "invariant": {
-        "file": "tests/acceptance-runner.test.mjs",
-        "name": "builds a sanitized, isolated gate environment with the loopback network fence"
-      },
-      "fault": {
-        "file": "tests/acceptance-runner.test.mjs",
-        "name": "fault control: dropping declaration witnesses fails the named bounded selection assertion"
-      }
-    },
-    {
-      "id": "native-probe-fixture-deadline",
-      "requirement": "R16",
-      "files": [
-        "tests/integration/auto-virtual.test.mjs"
-      ],
-      "boundary": "Existing real pinned Pi background probe/HTTP contract fixture separates the successful native parameter-compatible transport from an intentionally nonresponding probe held by the existing server gate. Test-only budget3s replaces an incidental250ms race; production probe policy is unchanged.",
-      "assertions": "The native healthy/parameter-compatible probe must succeed; the owned held probe must time out; quota pause stops queued siblings, auth errors and incomplete-cache reporting remain required. Actual400ms fixture latency makes the old healthy assertion RED and the corrected case GREEN. Releasing the held witness makes its named timeout assertion RED. Exact restore returns GREEN. The existing RPC close/finalizer stays unchanged; release is an ordinary test step only after observed RPC close.",
-      "boundaryTest": {
-        "file": "tests/integration/auto-virtual.test.mjs",
-        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
-      },
-      "invariant": {
-        "file": "tests/integration/auto-virtual.test.mjs",
-        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
-      },
-      "fault": {
-        "file": "tests/integration/auto-virtual.test.mjs",
-        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
+        "file": "tests/integration/auto-missing-route-fault.test.mjs",
+        "name": "proves missing Auto targets cannot escape an explicit boundary through sticky or fallback dispatch"
       }
     }
   ]
