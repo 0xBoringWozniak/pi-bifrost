@@ -91,6 +91,27 @@
         "file": "tests/acceptance-runner.test.mjs",
         "name": "fault control: dropping declaration witnesses fails the named bounded selection assertion"
       }
+    },
+    {
+      "id": "native-probe-fixture-deadline",
+      "requirement": "R16",
+      "files": [
+        "tests/integration/auto-virtual.test.mjs"
+      ],
+      "boundary": "Existing real pinned Pi background probe/HTTP contract fixture separates the successful native parameter-compatible transport from an intentionally nonresponding probe held by the existing server gate. Test-only budget3s replaces an incidental250ms race; production probe policy is unchanged.",
+      "assertions": "The native healthy/parameter-compatible probe must succeed; the owned held probe must time out; quota pause stops queued siblings, auth errors and incomplete-cache reporting remain required. Actual400ms fixture latency makes the old healthy assertion RED and the corrected case GREEN. Releasing the held witness makes its named timeout assertion RED. Exact restore returns GREEN. The existing RPC close/finalizer stays unchanged; release is an ordinary test step only after observed RPC close.",
+      "boundaryTest": {
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
+      },
+      "invariant": {
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
+      },
+      "fault": {
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
+      }
     }
   ]
 }
