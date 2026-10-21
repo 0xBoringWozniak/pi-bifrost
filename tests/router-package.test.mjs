@@ -272,7 +272,9 @@ describe("packed experimental router consumer", () => {
 
       mkdirSync(join(consumer, "examples"));
       for (const example of ["router-standalone.mjs", "host-adapter.mjs"]) {
-        copyFileSync(join(process.cwd(), "examples", example), join(consumer, "examples", example));
+        const publishedExample = join(packageRoot, "examples", example);
+        assert.ok(existsSync(publishedExample), `the published package must contain examples/${example}`);
+        copyFileSync(publishedExample, join(consumer, "examples", example));
       }
       const before = readdirSync(consumer);
       const standalone = execFileSync(process.execPath, ["examples/router-standalone.mjs"], {
