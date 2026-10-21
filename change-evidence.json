@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "base": "da3ef946d620e23ab89202629382a1c52168231f",
+  "base": "df2a906e285128f8ef7d0fb111e603ea2c6be4d1",
   "contracts": [
     {
       "id": "host-neutral-router-sdk",
