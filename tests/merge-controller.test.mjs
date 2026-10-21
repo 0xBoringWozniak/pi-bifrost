@@ -26,6 +26,7 @@ function die(code) { process.stderr.write(code + "\\n"); process.exit(1); }
 const joined = args.join(" ");
 if (joined.includes("headRefOid,baseRefName")) {
   world.prReads = (world.prReads ?? 0) + 1;
+  if (world.prReads === 1 && world.concurrentIntentPath) fs.writeFileSync(world.concurrentIntentPath, world.concurrentIntentBytes);
   if (world.prReads === 3 && world.finalThreads) world.threads = world.finalThreads;
   if (world.prReads === 3 && world.finalCiRuns) world.ciRuns = world.finalCiRuns;
   fs.writeFileSync(process.env.FAKE_GH_WORLD, JSON.stringify(world));
@@ -799,12 +800,23 @@ test("source fault controls exercise server protection, final authorization, and
     { claim: "strict server guard", source: source.replace("function requireServerBaseGuard(repo, baseBranch) {", "function requireServerBaseGuard(repo, baseBranch) { return { bypass: true };"), fixture: () => scaffold({ world: makeWorld({ effectiveRules: [] }) }), assertion: "missing strict server guard must prevent merge" },
     { claim: "final unresolved threads", source: source.slice(0, finalStart) + "  const finalAuthorizationChanged = false;\n" + source.slice(finalEnd), fixture: () => scaffold({ world: makeWorld({ finalThreads: [{ isResolved: false }] }) }), assertion: "final unresolved threads must prevent merge" },
     { claim: "final CI attempt", source: source.slice(0, finalStart) + "  const finalAuthorizationChanged = false;\n" + source.slice(finalEnd), fixture: () => scaffold({ world: makeWorld({ finalCiRuns: [makeRun(10, HEAD, "pull_request", { run_attempt: 2 })] }) }), assertion: "final changed CI attempt must prevent merge" },
-    { claim: "saved intent", source: source.replace(intentGuard, ""), fixture: () => scaffold(), assertion: "blocked dry-run must preserve the saved apply intent bytes", savedIntent: true },
+    { claim: "concurrent intent", source: source.replace("if (exclusive) linkSync(temp, target);", "if (false) linkSync(temp, target);"), fixture: () => scaffold(), assertion: "dry run must not overwrite a concurrently created apply intent", concurrentIntent: true },
+    { claim: "saved intent", source: source.replace(intentGuard, "").replace("if (exclusive) linkSync(temp, target);", "if (false) linkSync(temp, target);"), fixture: () => scaffold(), assertion: "blocked dry-run must preserve the saved apply intent bytes", savedIntent: true },
   ];
   for (const row of rows) {
     assert.notEqual(row.source, source, row.claim + " mutation must apply");
     const exercise = () => {
       const fixture = row.fixture();
+      if (row.concurrentIntent) {
+        const saved = JSON.stringify({ outcome: "apply-intent", applyIntent: { headSha: HEAD, baseSha: BASE } });
+        fixture.world.concurrentIntentPath = fixture.outcomePath;
+        fixture.world.concurrentIntentBytes = saved;
+        saveWorld(fixture);
+        const result = runController(fixture, [], REPO_ROOT, copy);
+        assert.equal(readFileSync(fixture.outcomePath, "utf8"), saved, row.assertion);
+        assert.notEqual(result.status, 0);
+        return;
+      }
       if (row.savedIntent) {
         // Create an actual apply intent before a later blocked dry run.
         assert.equal(runController(fixture, ["--apply"], REPO_ROOT, copy).status, 0);
@@ -831,3 +843,17 @@ test("source fault controls exercise server protection, final authorization, and
   }
   assert.equal(readFileSync(SCRIPT, "utf8"), source, "author source must remain byte-identical");
 });
+
+for (const findings of [0, 1]) {
+  test(`dry run preserves a concurrently published intent with ${findings} findings`, () => {
+    const fixture = scaffold({ receipt: defaultReceipt({ unresolvedBlockingFindings: findings }) });
+    const saved = JSON.stringify({ outcome: "apply-intent", applyIntent: { headSha: HEAD, baseSha: BASE } });
+    fixture.world.concurrentIntentPath = fixture.outcomePath;
+    fixture.world.concurrentIntentBytes = saved;
+    saveWorld(fixture);
+    const result = runController(fixture);
+    assert.equal(readFileSync(fixture.outcomePath, "utf8"), saved, "dry run must not overwrite a concurrently created apply intent");
+    assert.notEqual(result.status, 0, "a lost exclusive output claim must stop the dry run");
+    assert.equal(result.mergeCalls.length, 0);
+  });
+}

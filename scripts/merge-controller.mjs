@@ -8,7 +8,7 @@
 // policy; it is a local trust boundary. Every check fails closed.
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import {
@@ -340,7 +340,7 @@ function testedSources(repo, run, headSha, proposed) {
     testedSource(repo, run, page.artifacts, `merge-result-evidence-${proposed.sha}`, proposed.sha, "Upload merge-result evidence")];
 }
 
-function writeOutcome(path, payload) {
+function writeOutcome(path, payload, { exclusive = false } = {}) {
   if (!path) return;
   const target = resolve(path), temp = target + ".tmp-" + process.pid;
   let fd;
@@ -348,7 +348,8 @@ function writeOutcome(path, payload) {
     fd = openSync(temp, "wx", 0o600);
     writeFileSync(fd, JSON.stringify(payload, null, 2) + "\n");
     fsyncSync(fd); closeSync(fd); fd = undefined;
-    renameSync(temp, target);
+    if (exclusive) linkSync(temp, target);
+    else renameSync(temp, target);
     fd = openSync(dirname(target), "r"); fsyncSync(fd);
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -357,7 +358,7 @@ function writeOutcome(path, payload) {
 }
 
 function emit(payload, outcomePath) {
-  try { writeOutcome(outcomePath, payload); }
+  try { writeOutcome(outcomePath, payload, { exclusive: payload.mode === "dry-run" }); }
   catch (error) {
     console.log(JSON.stringify({ outcome: "outcome-persistence-failed", error: error.message, operation: payload }, null, 2));
     process.exitCode = 1;

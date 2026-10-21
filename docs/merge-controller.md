@@ -47,7 +47,10 @@ checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-
 The final GitHub read must still be eligible and bind the same workflow, run,
 and attempt. New unresolved threads or a new CI attempt prevent intent and
 merge. Every dry run refuses an existing outcome before any rejection path can
-write it; use `--check` to inspect a saved apply intent.
+write it; use `--check` to inspect a saved apply intent. At publication, dry-run
+output uses an atomic no-replace link from its fsynced private temporary file.
+An intent created during GitHub reads also remains untouched, and the dry run
+stops instead of replacing it.
 
 ## Trusted review receipt
 
