@@ -604,12 +604,19 @@ describe("acceptance runner boundary", () => {
     }
   });
 
+  // Hosted runner performance varies widely between moments (the same green
+  // caller run measured 58s, 92s, and over 110s across consecutive CI runs).
+  // Phase caps are ceilings, so they carry ~2.5x headroom over the slowest
+  // observed run instead of tracking the fast-runner case; the deadline stays
+  // well above a slow but healthy proof and below the outer test timeout.
+  const CALLER_PHASE_BUDGET_MS = 300_000;
+  const CALLER_PROOF_DEADLINE_MS = 660_000;
   async function exerciseWorkflowCaller({ t, topology }) {
     const root = process.cwd();
     const directory = mkdtempSync(join(tmpdir(), "bifrost-merged-push-caller-"));
     let completed = false;
     let cleanupVerified = true;
-    const deadline = Date.now() + 220_000;
+    const deadline = Date.now() + CALLER_PROOF_DEADLINE_MS;
     try {
     const checkout = join(directory, "checkout");
     execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", root, checkout]);
@@ -645,7 +652,7 @@ describe("acceptance runner boundary", () => {
       'import { spawnSync } from "node:child_process";',
       `import { verificationGateEnvironment } from ${JSON.stringify(pathToFileURL(join(checkout, "scripts/acceptance/core.mjs")).href)};`,
       `const { env } = verificationGateEnvironment({ root: ${JSON.stringify(checkout)}, artifactDir: ${JSON.stringify(join(directory, "gate-artifacts"))}, script: "test" });`,
-      'const result = spawnSync(process.execPath, ["--test", "--test-name-pattern=workflow acceptance CLI records actual-predecessor change evidence with bounded gates", "tests/acceptance-runner.test.mjs"], { env, stdio: "inherit", timeout: 110_000 });',
+      'const result = spawnSync(process.execPath, ["--test", "--test-name-pattern=workflow acceptance CLI records actual-predecessor change evidence with bounded gates", "tests/acceptance-runner.test.mjs"], { env, stdio: "inherit", timeout: ' + JSON.stringify(CALLER_PHASE_BUDGET_MS) + ' });',
       'process.exit(result.status ?? 1);',
     ].join("\n"));
     // The submitted gate environment, not a direct synthetic child environment,
@@ -655,7 +662,7 @@ describe("acceptance runner boundary", () => {
         const remainingMs = deadline - Date.now();
         assert.ok(remainingMs > 0, "actual caller proof must stay inside its overall deadline");
         const result = await runChild(process.execPath, [launcher], {
-          cwd: checkout, env, timeoutMs: Math.min(115_000, remainingMs),
+          cwd: checkout, env, timeoutMs: Math.min(CALLER_PHASE_BUDGET_MS + 5_000, remainingMs),
         });
         cleanupVerified = cleanupVerified && result.processCleanupFailed === false;
         assert.equal(result.processCleanupFailed, false, "actual caller owned cleanup must be proven before source-copy reclaim");
@@ -718,10 +725,10 @@ describe("acceptance runner boundary", () => {
     }
   }
 
-  it("merged-push checkout runs the actual workflow caller with event.before", { timeout: 240_000 }, (t) =>
+  it("merged-push checkout runs the actual workflow caller with event.before", { timeout: 720_000 }, (t) =>
     exerciseWorkflowCaller({ t, topology: "multi" }));
 
-  it("single-commit checkout runs the actual workflow caller without inventing an intermediate", { timeout: 240_000 }, (t) =>
+  it("single-commit checkout runs the actual workflow caller without inventing an intermediate", { timeout: 720_000 }, (t) =>
     exerciseWorkflowCaller({ t, topology: "single" }));
 
   it("selects exact bounded declaration witnesses and rejects unsafe test paths", () => {
@@ -769,7 +776,7 @@ describe("acceptance runner boundary", () => {
     t.diagnostic(JSON.stringify({ sourceSha256: sha256Text(source), faultSha256: sha256Text(mutant), restoredSha256: sha256Text(readFileSync(target, "utf8")), phases: ["GREEN", "named selection AssertionError RED", "restored GREEN"] }));
   });
 
-  it("workflow acceptance CLI records actual-predecessor change evidence with bounded gates", { timeout: 110_000 }, (t) => {
+  it("workflow acceptance CLI records actual-predecessor change evidence with bounded gates", { timeout: CALLER_PHASE_BUDGET_MS }, (t) => {
     const root = process.cwd();
     const manifest = JSON.parse(readFileSync(join(root, "change-evidence.json"), "utf8"));
     const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
