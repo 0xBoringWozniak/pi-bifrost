@@ -24,8 +24,10 @@ const NODE_TEST_GATES = new Map([
   // Bounded caller proof: the acceptance-runner test invokes the real CLI with
   // only the named manifest evidence tests as its structured event source.
   ["test:manifest-evidence", {
-    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs"],
+    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs"],
     pattern: [
+      "owns the fake provider across owner cancellation \\(baseline GREEN, bypass RED, restored GREEN\\)",
+      "keeps one fake-provider owner in the two former leak paths",
       "valid apply merges exactly once and verifies push gates",
       "repeated apply preserves the frozen intent and never merges twice",
       "guard removal control: bypassing receipt validation reddens the named assertion, restore is green",

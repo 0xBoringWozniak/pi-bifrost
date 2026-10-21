@@ -690,7 +690,7 @@ describe("acceptance runner boundary", () => {
     writeFileSync(join(fixture, "verify-stub.mjs"), [
       "export async function runVerification({ execute }) {",
       '  const outcome = await execute({ script: "test:manifest-evidence", index: 0 });',
-      '  if (outcome.status !== 0) throw new Error("focused manifest evidence test failed");',
+      '  if (outcome.status !== 0) throw new Error("focused manifest evidence test failed: " + outcome.stdout + outcome.stderr);',
       "  return { gates: [] };",
       "}",
     ].join("\n") + "\n");
@@ -715,7 +715,7 @@ describe("acceptance runner boundary", () => {
       try {
         const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
         const changeEvidence = evidence.cases.find((item) => item.id === "change-evidence");
-        assert.equal(changeEvidence?.status, expectedStatus, changeEvidence?.detail ?? "change-evidence case missing");
+        assert.equal(changeEvidence?.status, expectedStatus, changeEvidence?.detail ?? JSON.stringify(evidence.cases));
         if (expectedStatus === "failed") {
           assert.match(changeEvidence.detail, /missing, unsupported or stale declaration/);
           assert.notEqual(result.status, 0, "a stale event base must fail the actual CLI");
