@@ -107,7 +107,7 @@ function ownedProviderAbsent(receipt, label) {
     `${label}: owned fake provider must be absent after owner cancellation`);
 }
 
-async function runCancelledOwner({ scratch, runs, label, source, hard = true, direct = false }) {
+async function runCancelledOwner({ scratch, runs, label, source, hard = true, direct = false, observeGroup = processGroupExists }) {
   const workerPath = join(scratch, `${label}.mjs`);
   const receiptPath = join(scratch, `${label}.json`);
   writeFileSync(workerPath, source);
@@ -149,7 +149,11 @@ async function runCancelledOwner({ scratch, runs, label, source, hard = true, di
     } else if (hard) {
       try { process.kill(-worker.pid, "SIGKILL"); } catch { /* group already gone */ }
       await Promise.race([closed, delay(3_000)]);
-      terminated = !processGroupExists(worker.pid);
+      // Owner close can precede OS reaping of the rest of its group. Require
+      // bounded observed absence rather than equating these separate events.
+      await waitFor(() => !observeGroup(worker.pid), 5_000,
+        `${label}: owner process group must terminate`);
+      terminated = true;
     } else {
       // Graceful cancellation also exercises the direct-signal handler path.
       terminated = await terminateProcessGroup(worker, { graceMs: 1_000, cleanupTimeoutMs: 5_000 });
@@ -173,7 +177,17 @@ it("owns the fake provider across owner cancellation (baseline GREEN, bypass RED
   let pendingError;
   try {
     // 1. Baseline GREEN: the shared owner is cancellation-safe.
-    const baseline = await runCancelledOwner({ scratch, runs, label: "baseline", source: BASELINE_WORKER });
+    let absentObservations = 0;
+    const observeDelayedAbsence = (pid) => {
+      const exists = processGroupExists(pid);
+      // Conservatively report one extra live observation only after real death.
+      // Removing the caller's wait must fail even on a fast-reaping host.
+      if (!exists && ++absentObservations === 1) return true;
+      return exists;
+    };
+    const baseline = await runCancelledOwner({ scratch, runs, label: "baseline", source: BASELINE_WORKER,
+      observeGroup: observeDelayedAbsence });
+    assert.ok(absentObservations >= 2, "hard cancellation must observe group absence after the delayed observation");
     assert.doesNotThrow(() => ownedProviderAbsent(baseline, "baseline"),
       "the shared owner must tear its provider down with the cancelled owner group");
 

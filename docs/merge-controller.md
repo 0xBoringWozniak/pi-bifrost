@@ -34,6 +34,21 @@ Normal GitHub branch protections still apply. There is no admin bypass:
 gh pr merge <pr> --repo <repo> --merge --match-head-commit <head>
 ```
 
+The head-only merge flag cannot atomically compare a base SHA. Apply therefore
+also verifies the effective branch rules and their repository ruleset: active
+pull-request enforcement, strict `release-gates` checks, and an empty bypass
+actor list. GitHub's strict checks require the branch to be current with its
+base at merge time. Missing, unsupported, truncated, or bypassable policy fails
+closed. The controller rechecks this policy before persisting intent; it never
+changes protections. This relies on the server continuing to enforce that
+policy, not a client-side atomic base-SHA claim. See [GitHub strict status
+checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging).
+
+The final GitHub read must still be eligible and bind the same workflow, run,
+and attempt. New unresolved threads or a new CI attempt prevent intent and
+merge. Every dry run refuses an existing outcome before any rejection path can
+write it; use `--check` to inspect a saved apply intent.
+
 ## Trusted review receipt
 
 Every field is required. Missing findings are never treated as zero.

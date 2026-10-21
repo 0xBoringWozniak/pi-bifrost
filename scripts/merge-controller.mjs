@@ -189,6 +189,33 @@ export function bindReceiptToEvidence(receipt, { headSha, baseSha, sourceTreeSha
   return errors;
 }
 
+function requiresCurrentBase(rule) {
+  return rule?.type === "required_status_checks"
+    && rule.parameters?.strict_required_status_checks_policy === true
+    && Array.isArray(rule.parameters.required_status_checks)
+    && rule.parameters.required_status_checks.some((check) => check.context === REQUIRED_JOB);
+}
+
+function requireServerBaseGuard(repo, baseBranch) {
+  try {
+    const rules = ghJson(["api", `repos/${repo}/rules/branches/${encodeURIComponent(baseBranch)}?per_page=100`]);
+    if (!Array.isArray(rules) || rules.length >= 100) fail("server-protection", "effective branch rules unavailable or truncated");
+    for (const rule of rules) {
+      if (!requiresCurrentBase(rule) || rule.ruleset_source_type !== "Repository" || rule.ruleset_source !== repo
+        || !Number.isSafeInteger(rule.ruleset_id) || rule.ruleset_id <= 0) continue;
+      const policy = ghJson(["api", `repos/${repo}/rulesets/${rule.ruleset_id}`]);
+      if (policy?.id !== rule.ruleset_id || policy.target !== "branch" || policy.enforcement !== "active"
+        || !Array.isArray(policy.bypass_actors) || policy.bypass_actors.length !== 0 || !Array.isArray(policy.rules)
+        || !policy.rules.some(requiresCurrentBase) || !policy.rules.some((item) => item.type === "pull_request")) continue;
+      return { rulesetId: rule.ruleset_id, strict: true, requiredCheck: REQUIRED_JOB, bypassActors: 0 };
+    }
+  } catch (error) {
+    if (error instanceof ControllerError) throw error;
+    fail("server-protection", "effective strict server protection could not be verified");
+  }
+  fail("server-protection", "an active non-bypassable strict release-gates and pull-request ruleset is required");
+}
+
 function collectEvidence(repo, number) {
   const pr = ghJson(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,baseRefName,baseRefOid,isDraft,body,author"]);
   const workflow = ghJson(["api", `repos/${repo}/actions/workflows/verification.yml`]);
@@ -420,6 +447,7 @@ let outcomeContext;
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = candidateRoot();
+  if (!args.apply && !args.check && args.outcome && existsSync(resolve(args.outcome))) fail("outcome", "dry-run must not overwrite an existing outcome; use --check");
   const repo = args.repo ?? ghJson(["repo", "view", "--json", "nameWithOwner"], root).nameWithOwner;
 
   if (args.apply && args.check) fail("cli", "--apply and --check are mutually exclusive");
@@ -500,6 +528,7 @@ function main() {
   const receiptErrors = [...shape.errors, ...identityErrors, ...evidenceErrors];
   const githubBlockers = (evidence.eligibility.blockers ?? []).filter((blocker) => blocker !== "no independent approval on current head");
   const blockers = [...githubBlockers, ...receiptErrors];
+  const serverGuard = blockers.length ? null : requireServerBaseGuard(repo, baseBranch);
   const tested = blockers.length ? null : testedSources(repo, evidence.currentRun, headSha, proposed);
 
   const summary = {
@@ -513,6 +542,7 @@ function main() {
     trustedReview: { reviewerAgent: receipt?.reviewerAgent, implementerAgent: receipt?.implementerAgent, valid: receiptErrors.length === 0 },
     blockers,
     testedSources: tested,
+    serverGuard,
     limitations: LIMITATIONS,
   };
 
@@ -522,7 +552,6 @@ function main() {
   }
 
   if (!args.apply) {
-    if (args.outcome && existsSync(args.outcome)) fail("outcome", "dry-run must not overwrite an existing outcome; use --check");
     emit({ ...summary, outcome: "dry-run" }, args.outcome);
     return;
   }
@@ -561,13 +590,20 @@ function main() {
   const finalPreHead = finalPrecheck.pr.headRefOid;
   const finalPreBase = finalPrecheck.pr.baseRefOid;
   const finalProposed = fetchProposedMerge(repo, args.pr);
+  const finalGithubBlockers = (finalPrecheck.eligibility.blockers ?? []).filter((blocker) => blocker !== "no independent approval on current head");
+  const finalAuthorizationChanged = finalGithubBlockers.length !== 0
+    || finalPrecheck.workflow.id !== evidence.workflow.id
+    || finalPrecheck.currentRun?.id !== evidence.currentRun?.id
+    || finalPrecheck.currentRun?.run_attempt !== evidence.currentRun?.run_attempt;
   const finalProposedMismatch = finalProposed.sha !== proposed.sha || finalProposed.tree !== proposed.tree
     || JSON.stringify(finalProposed.parents) !== JSON.stringify(proposed.parents)
     || finalProposed.parents.length !== 2 || finalProposed.parents[0] !== baseSha || finalProposed.parents[1] !== headSha;
-  if (finalPreHead !== headSha || finalPreBase !== baseSha || finalPrecheck.pr.baseRefName !== baseBranch || finalProposedMismatch) {
+  if (finalPreHead !== headSha || finalPreBase !== baseSha || finalPrecheck.pr.baseRefName !== baseBranch || finalProposedMismatch || finalAuthorizationChanged) {
     emit({ ...summary, head: finalPreHead, base: finalPreBase, proposedMerge: { sha: proposed.sha, parents: proposed.parents, tree: proposed.tree }, outcome: "rejected-toctou" }, args.outcome);
     return;
   }
+  const finalServerGuard = requireServerBaseGuard(repo, baseBranch);
+  if (JSON.stringify(finalServerGuard) !== JSON.stringify(serverGuard)) fail("server-protection", "server base protection changed during apply");
   // GitHub reads above may outlive a receipt revocation; revalidate the live
   // trust input only after those reads, immediately before persisting intent.
   const finalTrusted = readTrustedReceipt(args.receipt, root);

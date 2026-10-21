@@ -208,7 +208,10 @@ describe("acceptance runner boundary", () => {
     const directory = mkdtempSync(join(tmpdir(), "bifrost-acceptance-env-"));
     temporary.push(directory);
     try {
-      const { env, violationPath } = verificationGateEnvironment({ root: process.cwd(), artifactDir: directory, script: "test:integration" });
+      const { env, violationPath } = verificationGateEnvironment({ root: process.cwd(), artifactDir: directory, script: "test:integration", sourceEnv: { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: "/fixture/push.json", GITHUB_TOKEN: "ambient-token-fixture" } });
+      assert.equal(env.GITHUB_EVENT_NAME, "push");
+      assert.equal(env.GITHUB_EVENT_PATH, "/fixture/push.json");
+      assert.equal(env.GITHUB_TOKEN, undefined);
       assert.equal(env.OPENAI_API_KEY, undefined);
       assert.equal(env.HOME, join(directory, "gates", "test-integration", "home"));
       assert.equal(env.PI_CODING_AGENT_DIR, join(env.HOME, ".pi", "agent"));
@@ -611,12 +614,12 @@ describe("acceptance runner boundary", () => {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
     git("checkout", "--quiet", "--detach", head);
     // Include the current worktree's fixes while keeping all mutations private.
-    for (const file of ["scripts/merge-controller.mjs", "scripts/acceptance.mjs", "tests/merge-controller.test.mjs", "tests/acceptance-runner.test.mjs", "change-evidence.json"]) {
+    for (const file of ["scripts/merge-controller.mjs", "scripts/acceptance.mjs", "scripts/acceptance/core.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/merge-controller.test.mjs", "tests/acceptance-runner.test.mjs", "change-evidence.json"]) {
       cpSync(join(root, file), join(checkout, file));
     }
     symlinkSync(realpathSync(join(root, "node_modules")), join(checkout, "node_modules"), "dir");
     const predecessor = JSON.parse(readFileSync(join(checkout, "change-evidence.json"), "utf8")).base;
-    git("add", "--", "scripts/merge-controller.mjs", "scripts/acceptance.mjs", "tests/merge-controller.test.mjs", "tests/acceptance-runner.test.mjs", "change-evidence.json");
+    git("add", "--", "scripts/merge-controller.mjs", "scripts/acceptance.mjs", "scripts/acceptance/core.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/merge-controller.test.mjs", "tests/acceptance-runner.test.mjs", "change-evidence.json");
     const merged = execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", git("write-tree"), "-p", predecessor, "-p", head], {
       cwd: checkout, input: "synthetic merged push\n", encoding: "utf8",
     }).trim();
@@ -628,13 +631,34 @@ describe("acceptance runner boundary", () => {
     writeFileSync(eventPath, JSON.stringify({ before: predecessor, after: merged, ref: "refs/heads/v2" }));
     const env = { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath };
     delete env.NODE_TEST_CONTEXT;
-    const runCallerTest = () => spawnSync(process.execPath, ["--test", "--test-name-pattern=workflow acceptance CLI records actual-predecessor change evidence with bounded gates", "tests/acceptance-runner.test.mjs"], {
-      cwd: checkout, env, encoding: "utf8", timeout: 110_000,
+    const launcher = join(directory, "gate-launcher.mjs");
+    writeFileSync(launcher, [
+      'import { spawnSync } from "node:child_process";',
+      `import { verificationGateEnvironment } from ${JSON.stringify(pathToFileURL(join(checkout, "scripts/acceptance/core.mjs")).href)};`,
+      `const { env } = verificationGateEnvironment({ root: ${JSON.stringify(checkout)}, artifactDir: ${JSON.stringify(join(directory, "gate-artifacts"))}, script: "test" });`,
+      'const result = spawnSync(process.execPath, ["--test", "--test-name-pattern=workflow acceptance CLI records actual-predecessor change evidence with bounded gates", "tests/acceptance-runner.test.mjs"], { env, stdio: "inherit", timeout: 110_000 });',
+      'process.exit(result.status ?? 1);',
+    ].join("\n"));
+    // The submitted gate environment, not a direct synthetic child environment,
+    // must carry the push payload into the real unit caller.
+    const runCallerTest = () => spawnSync(process.execPath, [launcher], {
+      cwd: checkout, env, encoding: "utf8", timeout: 115_000,
     });
     const result = runCallerTest();
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /workflow acceptance CLI records actual-predecessor change evidence with bounded gates/);
     assert.match(result.stdout, /pass 1/);
+
+    const corePath = join(checkout, "scripts/acceptance/core.mjs");
+    const coreSource = readFileSync(corePath, "utf8");
+    const contextKeys = ', "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH"';
+    assert.equal(coreSource.split(contextKeys).length, 2);
+    writeFileSync(corePath, coreSource.replace(contextKeys, ""));
+    const contextRed = runCallerTest();
+    assert.notEqual(contextRed.status, 0, contextRed.stdout + contextRed.stderr);
+    assert.match(contextRed.stdout, /the declaration base must be the actual merge predecessor/);
+    writeFileSync(corePath, coreSource);
+    assert.equal(readFileSync(corePath, "utf8"), coreSource);
 
     const testPath = join(checkout, "tests/acceptance-runner.test.mjs");
     const source = readFileSync(testPath, "utf8");
@@ -652,7 +676,7 @@ describe("acceptance runner boundary", () => {
     assert.equal(restored.status, 0, restored.stdout + restored.stderr);
     assert.match(restored.stdout, /pass 1/);
     assert.equal(readFileSync(join(root, "tests/acceptance-runner.test.mjs"), "utf8"), source);
-    t.diagnostic(JSON.stringify({ predecessor, merged, green: result.status, red: red.status, restored: restored.status }));
+    t.diagnostic(JSON.stringify({ predecessor, merged, green: result.status, contextRed: contextRed.status, red: red.status, restored: restored.status }));
   });
 
   it("workflow acceptance CLI records actual-predecessor change evidence with bounded gates", { timeout: 110_000 }, (t) => {

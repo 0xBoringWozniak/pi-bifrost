@@ -46,6 +46,7 @@ let activeChild;
 let activeTermination;
 let receivedSignal;
 const SUPPORTING_TESTS = [
+  { id: "support:controller:final-authorization", requirement: "R16", file: "tests/merge-controller.test.mjs", name: "source fault controls exercise server protection, final authorization, and saved intent", boundary: "actual fake-gh CLI; private source faults hit each named assertion and exact restoration passes" },
   {"id": "support:g07:campaign", "requirement": "R08", "file": "tests/reliability-v2-state-machine.test.ts", "name": "matches the independent model with the campaign default seed", "boundary": "single-scope/no-observation independent model; campaign FC_SEED varies this sample, pinned replays retained"},
   {"id": "support:g02:01", "requirement": "R06", "file": "tests/integration/activation-cancellation-acceptance.test.mjs", "name": "handles false and throwing physical activation without late dispatch", "boundary": "registered handler with fake pi/ctx; physical activation failure and cancellation"},
   {"id": "support:g02:02", "requirement": "R06", "file": "tests/integration/activation-cancellation-acceptance.test.mjs", "name": "stops an aborted registry wait and preserves a newer editor draft", "boundary": "registered handler with fake pi/ctx; physical activation failure and cancellation"},

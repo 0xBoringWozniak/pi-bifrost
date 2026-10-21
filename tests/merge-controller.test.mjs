@@ -24,6 +24,12 @@ if (process.env.FAKE_GH_LOG) fs.appendFileSync(process.env.FAKE_GH_LOG, JSON.str
 function out(v) { process.stdout.write(typeof v === "string" ? v : JSON.stringify(v)); process.exit(0); }
 function die(code) { process.stderr.write(code + "\\n"); process.exit(1); }
 const joined = args.join(" ");
+if (joined.includes("headRefOid,baseRefName")) {
+  world.prReads = (world.prReads ?? 0) + 1;
+  if (world.prReads === 3 && world.finalThreads) world.threads = world.finalThreads;
+  if (world.prReads === 3 && world.finalCiRuns) world.ciRuns = world.finalCiRuns;
+  fs.writeFileSync(process.env.FAKE_GH_WORLD, JSON.stringify(world));
+}
 if (world.revokeReceipt && joined.includes("headRefOid,baseRefName")) {
   world.reads = (world.reads ?? 0) + 1;
   if (world.reads === (world.revokeReceiptRead ?? 2)) fs.writeFileSync(world.receiptPath, JSON.stringify(world.revokedReceipt));
@@ -63,6 +69,8 @@ if (args[0] === "pr" && args[1] === "view") {
   out(pr);
 }
 if (args[0] === "api") {
+  if (joined.includes("/rules/branches/")) out(world.effectiveRules);
+  if (joined.match(/\\/rulesets\\/\\d+$/)) out(world.serverRuleset);
   if (world.postMergeCommitError && joined.endsWith("/commits/" + world.afterMerge.mergeCommit.oid)) die(world.postMergeCommitError);
   if (world.postMergeRefError && joined.includes("/git/ref/heads/")) die(world.postMergeRefError);
   if (joined.includes("actions/workflows/verification.yml")) out({ id: world.workflowId ?? 123 });
@@ -138,6 +146,12 @@ function makeWorld(overrides = {}) {
     repo: "org/repo",
     pr: { headRefOid: HEAD, baseRefName: "v2", baseRefOid: BASE, isDraft: false, body: "Refs #1", author: { login: "author-bot" }, files: ["x"] },
     diff: DIFF,
+    effectiveRules: [{ type: "required_status_checks", ruleset_source_type: "Repository", ruleset_source: "org/repo", ruleset_id: 77,
+      parameters: { strict_required_status_checks_policy: true, required_status_checks: [{ context: "release-gates" }] } }],
+    serverRuleset: { id: 77, target: "branch", enforcement: "active", bypass_actors: [], rules: [
+      { type: "pull_request" },
+      { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, required_status_checks: [{ context: "release-gates" }] } },
+    ] },
     pull: { merge_commit_sha: PROPOSED_SHA },
     commits: {
       [HEAD]: { commit: { tree: { sha: TREE } } },
@@ -722,4 +736,98 @@ test("failing gh child stderr never prints raw token", () => {
   const result = runController(fixture, ["--apply"]);
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(token));
   assert.equal(result.mergeCalls.length, 0);
+});
+
+
+test("refuses apply without strict server current-base checks", () => {
+  const fixture = scaffold({ world: makeWorld({ effectiveRules: [] }) });
+  const result = runController(fixture, ["--apply"]);
+  assert.equal(result.mergeCalls.length, 0, "missing strict server guard must prevent merge");
+  assert.notEqual(result.status, 0);
+});
+
+test("refuses apply with a bypassable server current-base rule", () => {
+  const world = makeWorld();
+  world.serverRuleset.bypass_actors = [{ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" }];
+  const result = runController(scaffold({ world }), ["--apply"]);
+  assert.equal(result.mergeCalls.length, 0, "bypassable strict server guard must prevent merge");
+  assert.notEqual(result.status, 0);
+});
+
+test("third PR read unresolved threads reject before intent or merge", () => {
+  const fixture = scaffold({ world: makeWorld({ finalThreads: [{ isResolved: false }] }) });
+  const result = runController(fixture, ["--apply"]);
+  assert.equal(JSON.parse(readFileSync(fixture.worldPath)).prReads, 3);
+  assert.equal(result.mergeCalls.length, 0, "final unresolved threads must prevent merge");
+  assert.notEqual(result.status, 0);
+  assert.equal(JSON.parse(readFileSync(fixture.outcomePath)).applyIntent, undefined);
+});
+
+test("third PR read changed CI attempt rejects before intent or merge", () => {
+  const world = makeWorld({ finalCiRuns: [makeRun(10, HEAD, "pull_request", { run_attempt: 2 })] });
+  const fixture = scaffold({ world });
+  const result = runController(fixture, ["--apply"]);
+  assert.equal(result.mergeCalls.length, 0, "final changed CI attempt must prevent merge");
+  assert.notEqual(result.status, 0);
+  assert.equal(JSON.parse(readFileSync(fixture.outcomePath)).applyIntent, undefined);
+});
+
+test("blocked dry-run preserves existing apply intent bytes", () => {
+  const fixture = scaffold();
+  assert.equal(runController(fixture, ["--apply"]).status, 0);
+  const original = readFileSync(fixture.outcomePath, "utf8");
+  writeFileSync(fixture.receiptPath, JSON.stringify(defaultReceipt({ unresolvedBlockingFindings: 1 })));
+  const result = runController(fixture);
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(fixture.outcomePath, "utf8"), original, "blocked dry-run must preserve the saved apply intent bytes");
+});
+
+test("source fault controls exercise server protection, final authorization, and saved intent", (t) => {
+  const source = readFileSync(SCRIPT, "utf8");
+  const owner = scaffold();
+  const root = join(owner.dir, "private-controller");
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: root }).status, 0);
+  const copy = join(realpathSync(root), "scripts", "merge-controller.mjs");
+  writeFileSync(join(root, "scripts", "merge-eligibility.mjs"), readFileSync(new URL("../scripts/merge-eligibility.mjs", import.meta.url)));
+  const finalStart = source.indexOf("  const finalAuthorizationChanged = ");
+  const finalEnd = source.indexOf("  const finalProposedMismatch = ", finalStart);
+  assert.ok(finalStart > 0 && finalEnd > finalStart);
+  const intentGuard = '  if (!args.apply && !args.check && args.outcome && existsSync(resolve(args.outcome))) fail("outcome", "dry-run must not overwrite an existing outcome; use --check");';
+  assert.equal(source.split(intentGuard).length, 2);
+  const rows = [
+    { claim: "strict server guard", source: source.replace("function requireServerBaseGuard(repo, baseBranch) {", "function requireServerBaseGuard(repo, baseBranch) { return { bypass: true };"), fixture: () => scaffold({ world: makeWorld({ effectiveRules: [] }) }), assertion: "missing strict server guard must prevent merge" },
+    { claim: "final unresolved threads", source: source.slice(0, finalStart) + "  const finalAuthorizationChanged = false;\n" + source.slice(finalEnd), fixture: () => scaffold({ world: makeWorld({ finalThreads: [{ isResolved: false }] }) }), assertion: "final unresolved threads must prevent merge" },
+    { claim: "final CI attempt", source: source.slice(0, finalStart) + "  const finalAuthorizationChanged = false;\n" + source.slice(finalEnd), fixture: () => scaffold({ world: makeWorld({ finalCiRuns: [makeRun(10, HEAD, "pull_request", { run_attempt: 2 })] }) }), assertion: "final changed CI attempt must prevent merge" },
+    { claim: "saved intent", source: source.replace(intentGuard, ""), fixture: () => scaffold(), assertion: "blocked dry-run must preserve the saved apply intent bytes", savedIntent: true },
+  ];
+  for (const row of rows) {
+    assert.notEqual(row.source, source, row.claim + " mutation must apply");
+    const exercise = () => {
+      const fixture = row.fixture();
+      if (row.savedIntent) {
+        // Create an actual apply intent before a later blocked dry run.
+        assert.equal(runController(fixture, ["--apply"], REPO_ROOT, copy).status, 0);
+        const saved = readFileSync(fixture.outcomePath, "utf8");
+        writeFileSync(fixture.receiptPath, JSON.stringify(defaultReceipt({ unresolvedBlockingFindings: 1 })));
+        const result = runController(fixture, [], REPO_ROOT, copy);
+        assert.notEqual(result.status, 0);
+        assert.equal(readFileSync(fixture.outcomePath, "utf8"), saved, row.assertion);
+        return;
+      }
+      const result = runController(fixture, ["--apply"], REPO_ROOT, copy);
+      assert.equal(result.mergeCalls.length, 0, row.assertion);
+      assert.notEqual(result.status, 0);
+    };
+    writeFileSync(copy, source);
+    exercise();
+    writeFileSync(copy, row.source);
+    assert.equal(readFileSync(copy, "utf8"), row.source);
+    assert.throws(exercise, (error) => error.name === "AssertionError" && error.message.includes(row.assertion), row.claim + " must fail the intended assertion, not an import or fixture error");
+    writeFileSync(copy, source);
+    assert.equal(readFileSync(copy, "utf8"), source);
+    exercise();
+    t.diagnostic(JSON.stringify({ claim: row.claim, assertion: row.assertion, sourceSha256: createHash("sha256").update(source).digest("hex"), faultSha256: createHash("sha256").update(row.source).digest("hex"), restoredSha256: createHash("sha256").update(readFileSync(copy)).digest("hex"), phases: ["GREEN", "intended AssertionError RED", "restored GREEN"] }));
+  }
+  assert.equal(readFileSync(SCRIPT, "utf8"), source, "author source must remain byte-identical");
 });
