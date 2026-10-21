@@ -1,99 +1,116 @@
 {
   "schemaVersion": 1,
-  "base": "b2f089dab70bce3944d5ca0a149bbf8f1d87f7f8",
+  "base": "df2a906e285128f8ef7d0fb111e603ea2c6be4d1",
   "contracts": [
     {
-      "id": "operational-merge-controller",
-      "requirement": "R16",
+      "id": "host-neutral-router-sdk",
+      "requirement": "R13",
       "files": [
-        "docs/merge-controller.md",
-        "scripts/merge-controller.mjs",
-        "tests/merge-controller.test.mjs"
+        "README.md",
+        "classification-pipeline.ts",
+        "commands.ts",
+        "config-load.ts",
+        "config.ts",
+        "docs/router-api.md",
+        "examples/README.md",
+        "examples/host-adapter.mjs",
+        "examples/router-standalone.mjs",
+        "index.ts",
+        "package-lock.json",
+        "package.json",
+        "router.ts",
+        "routing.ts",
+        "tests/auto-bootstrap-runtime.test.ts",
+        "tests/bifrost-commands.test.ts",
+        "tests/config-load.test.ts",
+        "tests/config-source-override.test.ts",
+        "tests/integration/init-regression.test.mjs",
+        "tests/router-package.test.mjs",
+        "virtual-model.ts"
       ],
-      "boundary": "local fail-closed controller verifies an independent receipt, exact candidate/proposed-merge evidence, GitHub checks, review state, and post-merge push evidence before recording outcome; immediately before merge it re-fetches the proposed merge SHA, tree, and ordered parents and requires them to remain the originally bound identity with parents exactly [base, head]; check rereads the canonical receipt after GitHub checks and reads artifact ZIPs with Python 3 isolated imports. After the final GitHub reads, it repeats canonical receipt path, digest, shape, expected identity, and evidence binding before persisting apply intent. Apply requires a live active repository ruleset with strict release-gates checks, pull-request enforcement and no bypass actors; this server policy closes the base-movement window after local reads.",
-      "assertions": "Controller never invokes merge when required evidence is stale, unavailable, altered, unresolved, or the final proposed merge identity moves; check never records merged-and-verified if the receipt is revoked during its GitHub checks; a shadow zipfile.py in the launch directory cannot execute; dry run stays non-mutating and checks preserve frozen intent. Receipt revocation on the third PR read rejects with nonzero status, zero merge calls, and no apply intent. The third read must retain eligibility and the same workflow/run/attempt. Missing or bypassable strict server protection rejects; rejected dry runs preserve existing intent bytes. Atomic no-replace output publication also preserves an intent created concurrently during GitHub reads, for eligible and blocked dry runs. All fake-GitHub controller launchers use one fixture environment; the real concurrent-apply case pins an unrelated ambient GITHUB_REPOSITORY and still merges exactly once in its fixture.",
+      "boundary": "Existing advisory router consumes host-neutral DTOs and optional Pi peers. Pure config policy is separate from byte-identically preserved host loading; the packed consumer checks the actual published JS/declaration graph, examples and preserved LICENSE inventory. No dispatch or policy automation added.",
+      "assertions": "A clean consumer installs no Pi packages, compiles the complete strict declaration graph and runs both examples without creating host state. Injecting a real Pi import into the installed router graph fails the named dependency assertion before execution; exact restoration is GREEN. Existing host extension/config inheritance compatibility remains.",
       "boundaryTest": {
-        "file": "tests/merge-controller.test.mjs",
-        "name": "valid apply merges exactly once and verifies push gates"
+        "file": "tests/router-package.test.mjs",
+        "name": "compiles and runs the shipped examples in a clean standalone consumer with no Pi packages installed"
       },
       "invariant": {
-        "file": "tests/merge-controller.test.mjs",
-        "name": "repeated apply preserves the frozen intent and never merges twice"
+        "file": "tests/router-package.test.mjs",
+        "name": "installs the packed JS API and resolves without loader flags on Node 22.19+"
       },
       "fault": {
-        "file": "tests/merge-controller.test.mjs",
-        "name": "third PR read receipt revocation rejects before intent or merge"
+        "file": "tests/router-package.test.mjs",
+        "name": "rejects a Pi dependency injected into the actual packed router graph and restores it"
       }
     },
     {
-      "id": "merge-eligibility-revalidation",
-      "requirement": "R16",
+      "id": "sdk-native-guard-reanchor",
+      "requirement": "R06",
       "files": [
-        "scripts/merge-eligibility.mjs",
-        "tests/merge-eligibility.test.mjs"
+        "tests/fixtures/replay-fault-control.mjs",
+        "tests/integration/activation-cancellation-acceptance.test.mjs",
+        "tests/integration/affinity-policy-acceptance.test.mjs",
+        "tests/integration/classifier-transport-acceptance.test.mjs",
+        "tests/integration/command-privacy-acceptance.test.mjs",
+        "tests/integration/economic-policy-acceptance.test.mjs",
+        "tests/integration/native-activation-cancel.test.mjs"
       ],
-      "boundary": "eligibility CLI re-fetches PR head/base and re-reads proposed-merge sha/parents/tree before returning an eligible result, bounds run, job, and review-thread evidence to one explicit first-100 page or fixed page/count/time bounds, and prints only fixed bounded terminal diagnostics.",
-      "assertions": "Eligibility fails closed with fixed blockers when head or base moves, the proposed tree or parents change, inventories truncate, or pagination exceeds its bounds; untrusted PR body and GitHub response text never reaches stdout or stderr.",
+      "boundary": "Index import/type adapter changes require exact source integrity hashes in seven existing native proof callers; original fault assertions and process ownership remain intact. This does not claim new nonstreaming or Auto activation coverage.",
+      "assertions": "Real AgentSession abort/manual/false/throw cases still pass; real v1 output-effect and tool-effect source guard faults still reach their named no-replay assertions and restore GREEN on the exact new index hash.",
       "boundaryTest": {
-        "file": "tests/merge-eligibility.test.mjs",
-        "name": "CLI re-fetches head, base, and proposed identity before returning eligible"
+        "file": "tests/integration/native-activation-cancel.test.mjs",
+        "name": "cancels real AgentSession activation behind a proven deny-all fence"
       },
       "invariant": {
-        "file": "tests/merge-eligibility.test.mjs",
-        "name": "terminal control PR-body text never reaches terminal diagnostics"
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "anchors the baseline source hash and proves isSideEffectFreeAllowanceFailure faults the output-effect no-replay assertion"
       },
       "fault": {
-        "file": "tests/merge-eligibility.test.mjs",
-        "name": "guard removal control: disabling final revalidation reddens the movement assertion, restore is green"
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "proves autoBoundaryStillActive faults the synthetic tool side-effect no-replay assertion"
       }
     },
     {
-      "id": "push-change-evidence-predecessor",
+      "id": "declaration-driven-bounded-caller",
       "requirement": "R16",
       "files": [
         "scripts/acceptance.mjs",
-        "scripts/acceptance/change-evidence.mjs",
-        "tests/acceptance-runner.test.mjs",
-        "tests/change-evidence.test.mjs",
-        "scripts/acceptance/core.mjs"
+        "tests/acceptance-runner.test.mjs"
       ],
-      "boundary": "acceptance change evidence binds an event-driven push to the actual predecessor commit, keeps pull-request metadata authoritative, and fails closed without an environment-base fallback; the workflow acceptance CLI computes the case from installed dependencies on the real candidate. The sanitized unit gate forwards only the GitHub event name and payload path, preserving the real push predecessor without forwarding credentials.",
-      "assertions": "Push events use event.before and reject missing, null, zero, stale, unknown, or intermediate bases; PR events use pull_request.base.sha despite a competing environment base; declaration base equality and changed-file coverage remain exact; the real acceptance CLI records GREEN for the actual merge predecessor and runs the named rejection and HEAD-parent fault controls. Removing event context from the actual gate environment fails the same named predecessor assertion on a checkout whose origin/v2 already equals HEAD.",
+      "boundary": "The existing bounded workflow caller executes exact safe file/name witnesses from the submitted declaration plus fixed predecessor controls; it no longer depends on the prior controller PR test inventory. Full unit/integration release gates remain mandatory.",
+      "assertions": "Actual merged-push gate forwarding retains event.before and executes every declared boundary/invariant/fault witness. Disabling declaration witness selection fails the named missing boundary assertion; removed event context and wrong predecessor independently fail, exact restored source passes. The full submitted CLI source-fault proof is a separately required supporting unit witness, avoiding recursive invocation of the gate from its own declaration. The owned merged-push fixture guarantees a real intermediate commit; a direct one-commit candidate separately rejects HEAD as the wrong base without assuming contributor history.",
       "boundaryTest": {
-        "file": "tests/change-evidence.test.mjs",
-        "name": "multi-commit push validates full event.before diff and rejects intermediate base"
+        "file": "tests/acceptance-runner.test.mjs",
+        "name": "selects exact bounded declaration witnesses and rejects unsafe test paths"
       },
       "invariant": {
-        "file": "tests/change-evidence.test.mjs",
-        "name": "event-driven push and pull request bases fail closed despite competing env"
+        "file": "tests/acceptance-runner.test.mjs",
+        "name": "builds a sanitized, isolated gate environment with the loopback network fence"
       },
       "fault": {
-        "file": "tests/change-evidence.test.mjs",
-        "name": "fault control: selecting HEAD parent instead of event.before turns push base RED"
+        "file": "tests/acceptance-runner.test.mjs",
+        "name": "fault control: dropping declaration witnesses fails the named bounded selection assertion"
       }
     },
     {
-      "id": "fake-provider-cancellation-ownership",
+      "id": "native-probe-fixture-deadline",
       "requirement": "R16",
       "files": [
-        "tests/fixtures/http-pi-harness.mjs",
-        "tests/integration/cache-lifecycle-acceptance.test.mjs",
-        "tests/integration/command-privacy-acceptance.test.mjs",
-        "tests/integration/fake-provider-ownership.test.mjs"
+        "tests/integration/auto-virtual.test.mjs"
       ],
-      "boundary": "Real fake HTTP provider remains in the owning suite process group; normal stop and direct owner signals reclaim only creation-recorded children. Scratch cleanup requires observed owner close and process absence.",
-      "assertions": "Hard group cancellation and direct owner SIGTERM leave neither owner group nor provider alive; the detached pre-fix launcher fails the identical named ownership assertion; uncertain cleanup retains scratch and preserves any pending error. Observed owner close does not imply immediate group reaping; a bounded absence wait is required before scratch reclamation.",
+      "boundary": "Existing real pinned Pi background probe/HTTP contract fixture separates the successful native parameter-compatible transport from an intentionally nonresponding probe held by the existing server gate. Test-only budget3s replaces an incidental250ms race; production probe policy is unchanged.",
+      "assertions": "The native healthy/parameter-compatible probe must succeed; the owned held probe must time out; quota pause stops queued siblings, auth errors and incomplete-cache reporting remain required. Actual400ms fixture latency makes the old healthy assertion RED and the corrected case GREEN. Releasing the held witness makes its named timeout assertion RED. Exact restore returns GREEN. The existing RPC close/finalizer stays unchanged; release is an ordinary test step only after observed RPC close.",
       "boundaryTest": {
-        "file": "tests/integration/fake-provider-ownership.test.mjs",
-        "name": "owns the fake provider across owner cancellation (baseline GREEN, bypass RED, restored GREEN)"
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
       },
       "invariant": {
-        "file": "tests/integration/fake-provider-ownership.test.mjs",
-        "name": "keeps one fake-provider owner in the two former leak paths"
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
       },
       "fault": {
-        "file": "tests/integration/fake-provider-ownership.test.mjs",
-        "name": "owns the fake provider across owner cancellation (baseline GREEN, bypass RED, restored GREEN)"
+        "file": "tests/integration/auto-virtual.test.mjs",
+        "name": "pauses a quota-exhausted background provider before dispatching queued sibling probes"
       }
     }
   ]

@@ -24,7 +24,7 @@ import { resolveConfiguredTier } from "../../routing.ts";
 import { buildRouteDecisionSummary } from "../../classification-pipeline.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const PRODUCTION_INDEX_SHA256 = "3164a3dbc41a864c68bede2f9e7365c5ed32bbbcd91fc584a3d07446014e3f12";
+const PRODUCTION_INDEX_SHA256 = "14752568bd935068ca5874156bd324f45336dc29bd305523fe6e0ca5973c3303";
 const SELECTION_CANDIDATES_GUARD = "const selectionCandidates = targetPool.selectionCandidates ?? targetPool.healthyCandidates;";
 const SELECTION_CANDIDATES_MUTANT = "const selectionCandidates = targetPool.candidates ?? targetPool.selectionCandidates ?? targetPool.healthyCandidates;";
 

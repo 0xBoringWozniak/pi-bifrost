@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { dirname, join, relative, resolve } from "node:path";
@@ -21,20 +21,11 @@ const MAX_REPORTER_EVENT_BYTES = 16 * 1024 * 1024;
 const NODE_TEST_GATES = new Map([
   ["test", { paths: ["tests/*.test.ts", "tests/*.test.mjs"] }],
   ["test:integration", { paths: ["tests/integration/*.test.mjs"] }],
-  // Bounded caller proof: the acceptance-runner test invokes the real CLI with
-  // only the named manifest evidence tests as its structured event source.
+  // The bounded caller executes the current declaration's exact witnesses,
+  // plus the fixed push-base controls, instead of a prior PR's test inventory.
   ["test:manifest-evidence", {
-    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs"],
+    paths: ["tests/change-evidence.test.mjs"],
     pattern: [
-      "owns the fake provider across owner cancellation \\(baseline GREEN, bypass RED, restored GREEN\\)",
-      "keeps one fake-provider owner in the two former leak paths",
-      "valid apply merges exactly once and verifies push gates",
-      "repeated apply preserves the frozen intent and never merges twice",
-      "guard removal control: bypassing receipt validation reddens the named assertion, restore is green",
-      "third PR read receipt revocation rejects before intent or merge",
-      "CLI re-fetches head, base, and proposed identity before returning eligible",
-      "terminal control PR-body text never reaches terminal diagnostics",
-      "guard removal control: disabling final revalidation reddens the movement assertion, restore is green",
       "multi-commit push validates full event.before diff and rejects intermediate base",
       "event-driven push and pull request bases fail closed despite competing env",
       "a real stale ancestor base fails declaration equality with named detail",
@@ -46,6 +37,8 @@ let activeChild;
 let activeTermination;
 let receivedSignal;
 const SUPPORTING_TESTS = [
+  { id: "support:manifest:single-commit", requirement: "R16", file: "tests/acceptance-runner.test.mjs", name: "single-commit checkout runs the actual workflow caller without inventing an intermediate", boundary: "owned one-commit fixture; real submitted CLI and context/declaration/predecessor faults, no contributor-history precondition" },
+  { id: "support:manifest:actual-caller", requirement: "R16", file: "tests/acceptance-runner.test.mjs", name: "merged-push checkout runs the actual workflow caller with event.before", boundary: "actual submitted declaration witnesses through sanitized unit gate and real CLI; private context/declaration-selection/predecessor faults" },
   { id: "support:controller:final-authorization", requirement: "R16", file: "tests/merge-controller.test.mjs", name: "source fault controls exercise server protection, final authorization, and saved intent", boundary: "actual fake-gh CLI; private source faults hit each named assertion and exact restoration passes" },
   {"id": "support:g07:campaign", "requirement": "R08", "file": "tests/reliability-v2-state-machine.test.ts", "name": "matches the independent model with the campaign default seed", "boundary": "single-scope/no-observation independent model; campaign FC_SEED varies this sample, pinned replays retained"},
   {"id": "support:g02:01", "requirement": "R06", "file": "tests/integration/activation-cancellation-acceptance.test.mjs", "name": "handles false and throwing physical activation without late dispatch", "boundary": "registered handler with fake pi/ctx; physical activation failure and cancellation"},
@@ -309,9 +302,38 @@ export function runChild(command, args, {
   });
 }
 
+export function manifestEvidenceGate(root) {
+  const path = join(root, "change-evidence.json");
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.size > 256 * 1024) throw new Error("Manifest evidence declaration exceeds its bound");
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  if (!Array.isArray(manifest.contracts) || !manifest.contracts.length || manifest.contracts.length > 100) {
+    throw new Error("Manifest evidence contracts are unavailable or unbounded");
+  }
+  const base = NODE_TEST_GATES.get("test:manifest-evidence");
+  const paths = new Set(base.paths);
+  const patterns = [base.pattern];
+  for (const contract of manifest.contracts) {
+    for (const dimension of ["boundaryTest", "invariant", "fault"]) {
+      const witness = contract?.[dimension];
+      if (witness && Object.keys(witness).length === 1 && typeof witness.exception === "string" && witness.exception.trim()) continue;
+      if (!witness || typeof witness.file !== "string" || witness.file.length > 512
+        || !/^tests\/[\w./-]+\.test\.(?:mjs|ts)$/.test(witness.file)
+        || witness.file.split("/").some((part) => !part || part === "." || part === "..")
+        || typeof witness.name !== "string" || !witness.name.trim() || witness.name.length > 1024) {
+        throw new Error("Manifest evidence witness is malformed");
+      }
+      paths.add(witness.file);
+      patterns.push(witness.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    }
+  }
+  if (paths.size > 100 || patterns.join("|").length > 64 * 1024) throw new Error("Manifest evidence selection exceeds its bound");
+  return { paths: [...paths], pattern: patterns.join("|") };
+}
+
 async function executeVerificationGate({ root, script, testEvents, artifactDir }) {
   const gateEnvironment = verificationGateEnvironment({ root, artifactDir, script });
-  const testGate = NODE_TEST_GATES.get(script);
+  const testGate = script === "test:manifest-evidence" ? manifestEvidenceGate(root) : NODE_TEST_GATES.get(script);
   if (!testGate) {
     return enforceGateNetworkBoundary(await runChild("npm", ["run", script], { cwd: root, env: gateEnvironment.env }), gateEnvironment.violationPath);
   }
