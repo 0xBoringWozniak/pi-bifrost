@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "base": "cdf9d4beb78f5341e7f79c277b249e1fa8c82488",
+  "base": "de28fcc3966a58499834a22ebdbfdd707181d792",
   "contracts": [
     {
       "id": "logging-bounded-core",

@@ -7,6 +7,20 @@ import { resolve } from "node:path";
 const WORKFLOW_PATH = ".github/workflows/verification.yml";
 const REQUIRED_JOB = "release-gates";
 const LIMITATIONS = ["GitHub ruleset does not enforce this report; human merge required"];
+const GH_TIMEOUT_MS = 30_000;
+const MAX_REVIEW_THREAD_PAGES = 10;
+const MAX_REVIEW_THREADS = 1_000;
+const REVIEW_THREAD_PAGINATION_DEADLINE_MS = 60_000;
+const SHA40 = /^[0-9a-f]{40}$/;
+
+// Terminal diagnostics are a fixed, bounded vocabulary. PR-controlled text
+// (body, dependency tokens, GitHub responses) must never reach the terminal.
+class EligibilityDiagnostic extends Error {}
+
+function parseJson(text) {
+  try { return JSON.parse(text); }
+  catch { throw new EligibilityDiagnostic("GitHub response was not valid JSON"); }
+}
 
 export function parseDependencies(body) {
   const lines = (body ?? "").split(/\r?\n/);
@@ -26,7 +40,7 @@ export function parseDependencies(body) {
       const ref = token.match(/^(?:PR\s+)?#(\d+)$/i);
       if (github) refs.push({ kind: github[2].toLowerCase() === "pull" ? "pr" : "issue", repo: github[1].toLowerCase(), number: Number(github[3]) });
       else if (ref) refs.push({ kind: "ref", number: Number(ref[1]) });
-      else throw new Error(`unsupported dependency syntax: ${token || value}`);
+      else throw new EligibilityDiagnostic("unsupported dependency syntax");
     }
   }
   return refs;
@@ -108,16 +122,21 @@ export function evaluateEligibility({ pr, workflowFileMatchesBase, workflowRuns,
 }
 
 function gh(args) {
-  return execFileSync("gh", args, { encoding: "utf8" }).trim();
+  try {
+    return execFileSync("gh", args, { encoding: "utf8", timeout: GH_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch (error) {
+    if (error?.killed || error?.signal) throw new EligibilityDiagnostic("GitHub command timed out");
+    throw new EligibilityDiagnostic("GitHub command failed");
+  }
 }
 
 function ghJson(args) {
-  return JSON.parse(gh(args));
+  return parseJson(gh(args));
 }
 
-function getReviews(repo, number) {
+export function getReviews(repo, number) {
   const output = gh(["api", "--paginate", "--jq", ".[]", `repos/${repo}/pulls/${number}/reviews`]);
-  return output ? output.split("\n").map((line) => JSON.parse(line)).map((review) => ({
+  return output ? output.split("\n").map((line) => parseJson(line)).map((review) => ({
     state: review.state,
     author: review.user?.login,
     commit_id: review.commit_id,
@@ -125,11 +144,19 @@ function getReviews(repo, number) {
   })) : [];
 }
 
-export function getReviewThreads(repo, number, query = ghJson) {
+export function getReviewThreads(repo, number, query = ghJson, options = {}) {
+  const maxPages = options.maxPages ?? MAX_REVIEW_THREAD_PAGES;
+  const maxThreads = options.maxThreads ?? MAX_REVIEW_THREADS;
+  const deadlineMs = options.deadlineMs ?? REVIEW_THREAD_PAGINATION_DEADLINE_MS;
+  const now = options.now ?? Date.now;
+  const started = now();
   const threads = [];
   const cursors = new Set();
   let cursor;
+  let pages = 0;
   do {
+    if (pages >= maxPages) throw new EligibilityDiagnostic("Review thread pagination exceeds page bound");
+    if (now() - started >= deadlineMs) throw new EligibilityDiagnostic("Review thread pagination exceeds time bound");
     const result = query(["api", "graphql", "-f", "query=query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}",
       "-F", "owner=" + repo.split("/")[0], "-F", "name=" + repo.split("/")[1], "-F", `number=${number}`,
       ...(cursor ? ["-F", `cursor=${cursor}`] : [])]);
@@ -137,19 +164,21 @@ export function getReviewThreads(repo, number, query = ghJson) {
     const pageInfo = page?.pageInfo;
     if (!page || !Array.isArray(page.nodes) || !pageInfo || typeof pageInfo.hasNextPage !== "boolean"
       || (pageInfo.endCursor !== null && (typeof pageInfo.endCursor !== "string" || !pageInfo.endCursor))) {
-      throw new Error("Review thread pagination unavailable");
+      throw new EligibilityDiagnostic("Review thread pagination unavailable");
     }
-    if (pageInfo.hasNextPage && (!pageInfo.endCursor || cursors.has(pageInfo.endCursor))) throw new Error("Review thread pagination unavailable");
+    if (pageInfo.hasNextPage && (!pageInfo.endCursor || cursors.has(pageInfo.endCursor))) throw new EligibilityDiagnostic("Review thread pagination unavailable");
     cursors.add(pageInfo.endCursor);
     threads.push(...page.nodes);
+    if (threads.length > maxThreads) throw new EligibilityDiagnostic("Review thread item count exceeds bound");
+    pages += 1;
     cursor = pageInfo.hasNextPage ? pageInfo.endCursor : null;
   } while (cursor);
   return threads;
 }
 
-function dependencyEvidence(repo, ref, baseBranch, baseOid) {
+export function dependencyEvidence(repo, ref, baseBranch, baseOid) {
   const dependencyRepo = ref.repo ?? repo.toLowerCase();
-  if (dependencyRepo !== repo.toLowerCase()) throw new Error("cross-repository dependency unsupported");
+  if (dependencyRepo !== repo.toLowerCase()) throw new EligibilityDiagnostic("cross-repository dependency unsupported");
   const issue = ghJson(["api", `repos/${repo}/issues/${ref.number}`]);
   if (!issue.pull_request) return { kind: "issue", number: ref.number, state: issue.state?.toUpperCase() };
   const pr = ghJson(["pr", "view", String(ref.number), "--repo", repo, "--json", "state,mergedAt,baseRefName,mergeCommit"]);
@@ -162,7 +191,13 @@ function dependencyEvidence(repo, ref, baseBranch, baseOid) {
 }
 
 export function runEvidence(repo, workflowId, head, query = ghJson) {
-  const runs = query(["api", `repos/${repo}/actions/workflows/${workflowId}/runs?head_sha=${head}&event=pull_request&per_page=100`]).workflow_runs ?? [];
+  const page = query(["api", `repos/${repo}/actions/workflows/${workflowId}/runs?head_sha=${head}&event=pull_request&per_page=100`]);
+  const runs = page?.workflow_runs;
+  // The runs and jobs endpoints stay on one explicit first-100 page. A
+  // truncated or unverifiable inventory fails closed instead of paginating.
+  if (!Array.isArray(runs) || !Number.isSafeInteger(page?.total_count) || page.total_count !== runs.length) {
+    throw new EligibilityDiagnostic("workflow run inventory incomplete or exceeds bound");
+  }
   const groups = new Map();
   for (const run of runs) {
     if (run?.head_sha !== head || run.event !== "pull_request" || run.workflow_id !== workflowId) continue;
@@ -177,14 +212,54 @@ export function runEvidence(repo, workflowId, head, query = ghJson) {
   });
   if (!candidateRuns.length) return [];
   const latest = candidateRuns[0];
-  const jobs = query(["api", `repos/${repo}/actions/runs/${latest.id}/jobs?per_page=100`]).jobs ?? [];
+  const jobsPage = query(["api", `repos/${repo}/actions/runs/${latest.id}/jobs?per_page=100`]);
+  const jobs = jobsPage?.jobs;
+  if (!Array.isArray(jobs) || !Number.isSafeInteger(jobsPage?.total_count) || jobsPage.total_count !== jobs.length) {
+    throw new EligibilityDiagnostic("workflow job inventory incomplete or exceeds bound");
+  }
   return [{ head_sha: latest.head_sha, event: latest.event, workflow_path: latest.path,
     conclusion: latest.conclusion, jobs: jobs.map((job) => ({ name: job.name, conclusion: job.conclusion })) }];
 }
 
+// Current proposed-merge identity: exact merge commit, its parents, and its
+// tree. Returns null unless every part is a well-formed 40-hex identity.
+export function fetchProposedMergeIdentity(repo, number, query = ghJson) {
+  const pull = query(["api", `repos/${repo}/pulls/${number}`]);
+  const sha = pull?.merge_commit_sha;
+  if (!SHA40.test(sha ?? "")) return null;
+  const commit = query(["api", `repos/${repo}/commits/${sha}`]);
+  const parents = Array.isArray(commit?.parents) ? commit.parents.map((parent) => parent?.sha) : [];
+  const tree = commit?.commit?.tree?.sha ?? commit?.tree?.sha;
+  if (!SHA40.test(tree ?? "")) return null;
+  return { sha, parents, tree };
+}
+
+// Final revalidation before eligibility may return. The PR is re-fetched and
+// must still present the evaluated head, base branch, and base commit; the
+// proposed merge is read again and must agree with the evidence-phase read
+// and with the fresh [base, head] parents. Any drift or unavailable identity
+// returns a fixed blocker so the result fails closed.
+export function revalidateEligibilityBinding({ repo, number, expected, initial, query = ghJson }) {
+  const fresh = query(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,baseRefName,baseRefOid"]);
+  if (fresh?.headRefOid !== expected.head || fresh?.baseRefOid !== expected.base || fresh?.baseRefName !== expected.baseRefName) {
+    return "PR head or base changed during eligibility revalidation";
+  }
+  const current = fetchProposedMergeIdentity(repo, number, query);
+  if (!initial || !current) return "proposed merge identity unavailable";
+  if (current.sha !== initial.sha || current.tree !== initial.tree
+    || current.parents.length !== initial.parents.length
+    || current.parents.some((parent, index) => parent !== initial.parents[index])) {
+    return "proposed merge identity changed during eligibility revalidation";
+  }
+  if (current.parents.length !== 2 || current.parents[0] !== fresh.baseRefOid || current.parents[1] !== fresh.headRefOid) {
+    return "proposed merge does not match current base and head";
+  }
+  return null;
+}
+
 function main() {
   const number = process.argv[2];
-  if (!/^\d+$/.test(number ?? "")) throw new Error("Usage: node scripts/merge-eligibility.mjs <pr-number>");
+  if (!/^\d+$/.test(number ?? "")) throw new EligibilityDiagnostic("Usage: node scripts/merge-eligibility.mjs <pr-number>");
   const repo = process.env.GITHUB_REPOSITORY ?? ghJson(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner;
   const pr = ghJson(["pr", "view", number, "--repo", repo, "--json", "headRefOid,baseRefName,baseRefOid,isDraft,body,author"]);
   const workflow = ghJson(["api", `repos/${repo}/actions/workflows/verification.yml`]);
@@ -197,8 +272,15 @@ function main() {
   const dependencies = refs.map((ref) => dependencyEvidence(repo, ref, pr.baseRefName, pr.baseRefOid));
   const result = evaluateEligibility({ pr, workflowFileMatchesBase: workflowHashesMatch(baseWorkflow, headWorkflow),
     workflowRuns, reviews, reviewThreads, dependencies });
-  console.log(JSON.stringify({ ...result, policyLimit: LIMITATIONS[0] }, null, 2));
-  process.exitCode = result.eligible ? 0 : 1;
+  let outcome = result;
+  if (result.eligible) {
+    const initial = fetchProposedMergeIdentity(repo, number);
+    const drift = revalidateEligibilityBinding({ repo, number,
+      expected: { head: pr.headRefOid, base: pr.baseRefOid, baseRefName: pr.baseRefName }, initial });
+    if (drift) outcome = { ...result, eligible: false, blockers: [...result.blockers, drift] };
+  }
+  console.log(JSON.stringify({ ...outcome, policyLimit: LIMITATIONS[0] }, null, 2));
+  process.exitCode = outcome.eligible ? 0 : 1;
 }
 
 function isMain() {
@@ -216,7 +298,8 @@ function isMain() {
 if (isMain()) {
   try { main(); }
   catch (error) {
-    console.error(`Eligibility check failed closed: ${error.message}`);
+    const detail = error instanceof EligibilityDiagnostic ? error.message : "unexpected internal failure";
+    console.error(`Eligibility check failed closed: ${detail}`);
     process.exitCode = 1;
   }
 }
