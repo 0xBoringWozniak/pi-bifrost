@@ -24,7 +24,7 @@ const NODE_TEST_GATES = new Map([
   // Bounded caller proof: the acceptance-runner test invokes the real CLI with
   // only the named manifest evidence tests as its structured event source.
   ["test:manifest-evidence", {
-    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs"],
+    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/toolbox.test.mjs"],
     pattern: [
       "owns the fake provider across owner cancellation \\(baseline GREEN, bypass RED, restored GREEN\\)",
       "keeps one fake-provider owner in the two former leak paths",
@@ -39,6 +39,12 @@ const NODE_TEST_GATES = new Map([
       "event-driven push and pull request bases fail closed despite competing env",
       "a real stale ancestor base fails declaration equality with named detail",
       "fault control: selecting HEAD parent instead of event.before turns push base RED",
+      "rejects a runtime host-SDK import in the resolve-only router and accepts the type-only form",
+      "projects dependency-cruiser violations with rule and edge",
+      "the type-only allowance is load-bearing: removing it turns the passing fixture red",
+      "the committed ast-grep rules pass their own valid and invalid fixtures",
+      "parses every Knip issue kind into one flat finding list",
+      "reports unavailable tools with install hints instead of a false pass",
     ].join("|"),
   }],
 ]);
