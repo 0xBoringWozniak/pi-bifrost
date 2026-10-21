@@ -70,6 +70,30 @@
         "file": "tests/change-evidence.test.mjs",
         "name": "fault control: selecting HEAD parent instead of event.before turns push base RED"
       }
+    },
+    {
+      "id": "fake-provider-cancellation-ownership",
+      "requirement": "R16",
+      "files": [
+        "tests/fixtures/http-pi-harness.mjs",
+        "tests/integration/cache-lifecycle-acceptance.test.mjs",
+        "tests/integration/command-privacy-acceptance.test.mjs",
+        "tests/integration/fake-provider-ownership.test.mjs"
+      ],
+      "boundary": "Real fake HTTP provider remains in the owning suite process group; normal stop and direct owner signals reclaim only creation-recorded children. Scratch cleanup requires observed owner close and process absence.",
+      "assertions": "Hard group cancellation and direct owner SIGTERM leave neither owner group nor provider alive; the detached pre-fix launcher fails the identical named ownership assertion; uncertain cleanup retains scratch and preserves any pending error.",
+      "boundaryTest": {
+        "file": "tests/integration/fake-provider-ownership.test.mjs",
+        "name": "owns the fake provider across owner cancellation (baseline GREEN, bypass RED, restored GREEN)"
+      },
+      "invariant": {
+        "file": "tests/integration/fake-provider-ownership.test.mjs",
+        "name": "keeps one fake-provider owner in the two former leak paths"
+      },
+      "fault": {
+        "file": "tests/integration/fake-provider-ownership.test.mjs",
+        "name": "owns the fake provider across owner cancellation (baseline GREEN, bypass RED, restored GREEN)"
+      }
     }
   ]
 }

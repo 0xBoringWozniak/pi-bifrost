@@ -107,7 +107,7 @@ function ownedProviderAbsent(receipt, label) {
     `${label}: owned fake provider must be absent after owner cancellation`);
 }
 
-async function runCancelledOwner({ scratch, label, source, hard = true }) {
+async function runCancelledOwner({ scratch, runs, label, source, hard = true, direct = false }) {
   const workerPath = join(scratch, `${label}.mjs`);
   const receiptPath = join(scratch, `${label}.json`);
   writeFileSync(workerPath, source);
@@ -118,7 +118,13 @@ async function runCancelledOwner({ scratch, label, source, hard = true }) {
   let stderr = "";
   worker.stderr.setEncoding("utf8");
   worker.stderr.on("data", (chunk) => { stderr += chunk; });
-  const closed = new Promise((resolve) => worker.once("close", (code, signal) => resolve({ code, signal })));
+  let closeObserved = false;
+  const closed = new Promise((resolve) => worker.once("close", (code, signal) => {
+    closeObserved = true;
+    resolve({ code, signal });
+  }));
+  const owned = { worker, closed, receiptPath, receipt: undefined, isClosed: () => closeObserved };
+  runs.push(owned);
   try {
     await waitFor(() => existsSync(receiptPath), 15_000,
       () => `${label}: worker did not publish its creation receipt (stderr=${stderr.trim()})`);
@@ -130,10 +136,17 @@ async function runCancelledOwner({ scratch, label, source, hard = true }) {
     assert.equal(receipt.ownerPid, worker.pid,
       `${label}: receipt must identify the actual spawned owner`);
 
+    owned.receipt = receipt;
+
     // Hard cancellation is the acceptance gate's escalation: a handler cannot
     // run, so only process-group membership can keep the provider owned.
     let terminated;
-    if (hard) {
+    if (direct) {
+      worker.kill("SIGTERM");
+      await waitFor(() => !processGroupExists(worker.pid), 5_000,
+        `${label}: direct owner cancellation must also reap its provider`);
+      terminated = true;
+    } else if (hard) {
       try { process.kill(-worker.pid, "SIGKILL"); } catch { /* group already gone */ }
       await Promise.race([closed, delay(3_000)]);
       terminated = !processGroupExists(worker.pid);
@@ -156,17 +169,16 @@ async function runCancelledOwner({ scratch, label, source, hard = true }) {
 
 it("owns the fake provider across owner cancellation (baseline GREEN, bypass RED, restored GREEN)", { skip: WIN32, timeout: 60_000 }, async () => {
   const scratch = mkdtempSync(join(tmpdir(), "bifrost-provider-ownership-"));
-  const receipts = [];
+  const runs = [];
+  let pendingError;
   try {
     // 1. Baseline GREEN: the shared owner is cancellation-safe.
-    const baseline = await runCancelledOwner({ scratch, label: "baseline", source: BASELINE_WORKER });
-    receipts.push(baseline);
+    const baseline = await runCancelledOwner({ scratch, runs, label: "baseline", source: BASELINE_WORKER });
     assert.doesNotThrow(() => ownedProviderAbsent(baseline, "baseline"),
       "the shared owner must tear its provider down with the cancelled owner group");
 
     // 2. Ownership bypass RED: same assertion, old detached+unref shape.
-    const bypassReceipt = await runCancelledOwner({ scratch, label: "bypass", source: BYPASS_WORKER });
-    receipts.push(bypassReceipt);
+    const bypassReceipt = await runCancelledOwner({ scratch, runs, label: "bypass", source: BYPASS_WORKER });
     assert.throws(
       () => ownedProviderAbsent(bypassReceipt, "ownership bypass"),
       /owned fake provider must be absent after owner cancellation/,
@@ -179,21 +191,55 @@ it("owns the fake provider across owner cancellation (baseline GREEN, bypass RED
       "the bypass provider group must be absent after receipt-based reclamation");
 
     // 3. Restored GREEN: the shared owner still passes after the fault.
-    const restored = await runCancelledOwner({ scratch, label: "restored", source: BASELINE_WORKER, hard: false });
-    receipts.push(restored);
+    const restored = await runCancelledOwner({ scratch, runs, label: "restored", source: BASELINE_WORKER, hard: false });
     assert.doesNotThrow(() => ownedProviderAbsent(restored, "restored"),
       "restoring the shared owner must restore cancellation-safe teardown");
+    const direct = await runCancelledOwner({ scratch, runs, label: "direct", source: BASELINE_WORKER, direct: true });
+    ownedProviderAbsent(direct, "direct owner signal");
+  } catch (error) {
+    pendingError = error;
+    throw error;
   } finally {
-    // Reclaim only provider pids recorded at creation. No pattern match and no
-    // sweep: a failed phase must not leave the control's own provider behind.
-    for (const receipt of receipts) {
-      if (!isProcessAlive(receipt.serverPid)) continue;
-      if (processGroupExists(receipt.serverPid)) {
-        try { process.kill(-receipt.serverPid, "SIGKILL"); } catch { /* already gone */ }
+    // Keep every creation receipt even if a phase throws before returning.
+    // Reclaim scratch only after observed owner close and proven process death.
+    const failures = [];
+    for (const owned of runs) {
+      try {
+        if (processGroupExists(owned.worker.pid)) {
+          assert.equal(await terminateProcessGroup(owned.worker, { graceMs: 100, cleanupTimeoutMs: 2_000 }), true);
+        }
+        await Promise.race([owned.closed, delay(2_000)]);
+        const receipt = owned.receipt ?? (existsSync(owned.receiptPath)
+          ? JSON.parse(readFileSync(owned.receiptPath, "utf8")) : undefined);
+        assert.equal(receipt?.ownerPid, owned.worker.pid, "cleanup requires the actual owner receipt");
+        assert.ok(Number.isInteger(receipt.serverPid) && receipt.serverPid > 0);
+        if (isProcessAlive(receipt.serverPid)) {
+          if (receipt.owner === "bypass") {
+            assert.equal(await terminateProcessGroup({ pid: receipt.serverPid }, { graceMs: 100, cleanupTimeoutMs: 2_000 }), true);
+          } else {
+            process.kill(receipt.serverPid, "SIGKILL");
+          }
+          await waitFor(() => !isProcessAlive(receipt.serverPid), 2_000, "recorded provider must die before reclaim");
+        }
+        assert.equal(owned.isClosed(), true, "owner close must be observed before reclaim");
+        ownedProviderAbsent(receipt, "cleanup");
+      } catch (error) {
+        failures.push(error);
       }
-      try { process.kill(receipt.serverPid, "SIGKILL"); } catch { /* already gone */ }
     }
-    rmSync(scratch, { recursive: true, force: true });
+    if (failures.length === 0) {
+      try { rmSync(scratch, { recursive: true, force: true }); }
+      catch (error) { failures.push(error); }
+    }
+    if (failures.length > 0) {
+      const cleanupError = new AggregateError(failures, `unverified provider cleanup; retained ${scratch}`);
+      if (pendingError) {
+        pendingError.cleanupError = cleanupError;
+        pendingError.retainedScratch = scratch;
+      } else {
+        throw cleanupError;
+      }
+    }
   }
 });
 
