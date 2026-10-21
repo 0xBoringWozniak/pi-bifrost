@@ -604,7 +604,7 @@ describe("acceptance runner boundary", () => {
     }
   });
 
-  it("merged-push checkout runs the actual workflow caller with event.before", { timeout: 240_000 }, async (t) => {
+  async function exerciseWorkflowCaller({ t, topology }) {
     const root = process.cwd();
     const directory = mkdtempSync(join(tmpdir(), "bifrost-merged-push-caller-"));
     let completed = false;
@@ -623,15 +623,19 @@ describe("acceptance runner boundary", () => {
     symlinkSync(realpathSync(join(root, "node_modules")), join(checkout, "node_modules"), "dir");
     const predecessor = JSON.parse(readFileSync(join(checkout, "change-evidence.json"), "utf8")).base;
     git("add", "--", "scripts/merge-controller.mjs", "scripts/acceptance.mjs", "scripts/acceptance/core.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/merge-controller.test.mjs", "tests/acceptance-runner.test.mjs", "change-evidence.json");
-    const merged = execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", git("write-tree"), "-p", predecessor, "-p", head], {
+    const merged = execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", git("write-tree"), "-p", predecessor, ...(topology === "multi" ? ["-p", head] : [])], {
       cwd: checkout, input: "synthetic merged push\n", encoding: "utf8",
     }).trim();
     git("checkout", "--quiet", "--detach", merged);
     git("update-ref", "refs/remotes/origin/v2", merged);
     assert.equal(git("merge-base", "origin/v2", "HEAD"), merged);
     assert.notEqual(merged, predecessor, "the current delivery tip is not the historic push predecessor");
-    assert.ok(head !== predecessor && git("rev-list", "--ancestry-path", `${predecessor}..${merged}`).split("\n").includes(head),
-      "the owned merged-push fixture must exercise a real intermediate commit");
+    const ancestry = git("rev-list", "--ancestry-path", `${predecessor}..${merged}`).split("\n");
+    if (topology === "multi") {
+      assert.ok(head !== predecessor && ancestry.includes(head), "the owned merged-push fixture must exercise a real intermediate commit");
+    } else {
+      assert.deepEqual(ancestry, [merged], "the owned single-commit fixture must not contain an intermediate commit");
+    }
     const eventPath = join(directory, "push.json");
     writeFileSync(eventPath, JSON.stringify({ before: predecessor, after: merged, ref: "refs/heads/v2" }));
     const env = { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath };
@@ -706,13 +710,19 @@ describe("acceptance runner boundary", () => {
     assert.equal(restored.status, 0, restored.stdout + restored.stderr);
     assert.match(restored.stdout, /pass 1/);
     assert.equal(readFileSync(join(root, "tests/acceptance-runner.test.mjs"), "utf8"), source);
-    t.diagnostic(JSON.stringify({ predecessor, merged, green: result.status, contextRed: contextRed.status, declarationRed: declarationRed.status, red: red.status, restored: restored.status }));
+    t.diagnostic(JSON.stringify({ topology, predecessor, merged, green: result.status, contextRed: contextRed.status, declarationRed: declarationRed.status, red: red.status, restored: restored.status }));
     completed = true;
     } finally {
       if (completed && cleanupVerified) rmSync(directory, { recursive: true, force: true });
       else process.stderr.write(`Retained actual caller source copy: ${directory}\n`);
     }
-  });
+  }
+
+  it("merged-push checkout runs the actual workflow caller with event.before", { timeout: 240_000 }, (t) =>
+    exerciseWorkflowCaller({ t, topology: "multi" }));
+
+  it("single-commit checkout runs the actual workflow caller without inventing an intermediate", { timeout: 240_000 }, (t) =>
+    exerciseWorkflowCaller({ t, topology: "single" }));
 
   it("selects exact bounded declaration witnesses and rejects unsafe test paths", () => {
     const directory = mkdtempSync(join(tmpdir(), "bifrost-manifest-selection-"));

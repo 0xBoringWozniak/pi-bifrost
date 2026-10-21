@@ -37,6 +37,7 @@ let activeChild;
 let activeTermination;
 let receivedSignal;
 const SUPPORTING_TESTS = [
+  { id: "support:manifest:single-commit", requirement: "R16", file: "tests/acceptance-runner.test.mjs", name: "single-commit checkout runs the actual workflow caller without inventing an intermediate", boundary: "owned one-commit fixture; real submitted CLI and context/declaration/predecessor faults, no contributor-history precondition" },
   { id: "support:manifest:actual-caller", requirement: "R16", file: "tests/acceptance-runner.test.mjs", name: "merged-push checkout runs the actual workflow caller with event.before", boundary: "actual submitted declaration witnesses through sanitized unit gate and real CLI; private context/declaration-selection/predecessor faults" },
   { id: "support:controller:final-authorization", requirement: "R16", file: "tests/merge-controller.test.mjs", name: "source fault controls exercise server protection, final authorization, and saved intent", boundary: "actual fake-gh CLI; private source faults hit each named assertion and exact restoration passes" },
   {"id": "support:g07:campaign", "requirement": "R08", "file": "tests/reliability-v2-state-machine.test.ts", "name": "matches the independent model with the campaign default seed", "boundary": "single-scope/no-observation independent model; campaign FC_SEED varies this sample, pinned replays retained"},
