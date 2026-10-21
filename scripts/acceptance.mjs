@@ -24,7 +24,7 @@ const NODE_TEST_GATES = new Map([
   // Bounded caller proof: the acceptance-runner test invokes the real CLI with
   // only the named manifest evidence tests as its structured event source.
   ["test:manifest-evidence", {
-    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/toolbox.test.mjs", "tests/tooling-config.test.mjs"],
+    paths: ["tests/change-evidence.test.mjs", "tests/merge-controller.test.mjs", "tests/merge-eligibility.test.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/toolbox.test.mjs", "tests/tooling-config.test.mjs", "tests/performance-tooling.test.mjs"],
     pattern: [
       "owns the fake provider across owner cancellation \\(baseline GREEN, bypass RED, restored GREEN\\)",
       "keeps one fake-provider owner in the two former leak paths",
@@ -48,6 +48,12 @@ const NODE_TEST_GATES = new Map([
       "the committed Semgrep rules and fixtures share exact rule identifiers and file names",
       "every checkout disables credential persistence",
       "the credential-persistence check rejects a checkout that omits the setting",
+      "the deterministic routing workload reports a stable checksum",
+      "builds Hyperfine plans for allowlisted workloads",
+      "reports a missing Hyperfine binary as unavailable",
+      "every npm script named in the developer guide exists",
+      "the developer guide names the committed tool configuration files",
+      "the command drift check reports an unknown npm script",
     ].join("|"),
   }],
 ]);
