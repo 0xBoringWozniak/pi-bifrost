@@ -14,6 +14,20 @@ Two local provider fixtures exist. `scripts/fake-provider-server.mjs` is an HTTP
 
 Before review, run `npm run verify:release` on a clean, frozen candidate. Attach its result manifest to the reviewed revision. If source changes during the run, rerun the full command on the final candidate. Partial reruns do not replace a failed manifest. The reviewer checks this map against the changed behavior and checks that assertions can fail for the reported regression.
 
+## Per-change executed evidence
+
+PR acceptance requires a tracked `change-evidence.json` declaration. Set `schemaVersion` to `1` and `base` to the PR base commit's full SHA. Update the branch when that base is no longer an ancestor. The declaration must match the current PR base; an older declaration fails.
+
+Each entry in `contracts` has a unique `id`, a requirement (`R01` through `R17`), exact changed `files`, a `boundary`, and observable `assertions`. Cover every changed file, including tests, documentation and workflows. The declaration itself is excluded from this list. File renames count as deletion and addition.
+
+Each contract declares `boundaryTest`, `invariant`, and `fault`. Each dimension is either `{ "file": "tests/example.test.ts", "name": "exact Node test name" }` or `{ "exception": "specific reason this dimension does not apply" }`. The fault case must assert that a controlled faulty implementation fails the intended assertion. A failure caused by invalid input alone does not establish fault sensitivity.
+
+The existing deterministic acceptance run checks each test reference against its completed Node events. Missing, duplicate, failed, skipped and TODO cases fail acceptance. References use exact repository-relative paths and exact case names. This first version supports the Node unit and integration events already captured by the runner. For a boundary outside that capture, document the exception and its separate evidence for review.
+
+For a local run, set `BIFROST_EVIDENCE_BASE` to the full base SHA and run `npm run acceptance`. CI reads the PR base from the GitHub event instead. Acceptance records the declaration in its result, alongside the existing start/end revision and source fingerprints. The declaration does not embed its own commit SHA, which would change whenever the declaration is committed.
+
+The validator checks declared test execution, not semantic adequacy. An independent reviewer must judge contract completeness, assertions, fault controls and exception rationales on the exact head. A declaration is not an approval. This change does not activate automatic merging or alter branch protection. Push and manual runs without an explicit base retain the existing release gates. The PR workflow must first be adopted before this requirement is operational; existing PRs are not modified by this local implementation.
+
 ## Release feature map
 
 The requirement IDs come from [the PRD](../PRD.md). These rows name test boundaries, not percentages of coverage. More than one row can use the same user scenario.

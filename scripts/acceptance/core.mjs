@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, join, sep } from "node:path";
+import { delimiter, join, resolve, sep } from "node:path";
 
 const PROFILES = new Set(["deterministic", "contract", "live"]);
 
@@ -158,8 +158,15 @@ export function summarizeCases(cases) {
   };
 }
 
-export function matchNamedTestEvent(events, { file, name }) {
-  const matches = events.filter((event) => event.file?.endsWith(file) && event.name === name);
+export function normalizedTestPath(root, file) {
+  const resolved = resolve(root, file);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function matchNamedTestEvent(events, { file, name }, root) {
+  const target = normalizedTestPath(root, file);
+  const matches = events.filter((event) => typeof event.file === "string"
+    && normalizedTestPath(root, event.file) === target && event.name === name);
   return matches.length === 1 ? matches[0] : undefined;
 }
 
@@ -203,7 +210,7 @@ export async function terminateProcessGroup(child, {
   return !isGroupAlive(groupId);
 }
 
-export function verificationGateEnvironment({ root, artifactDir, script }) {
+export function verificationGateEnvironment({ root, artifactDir, script, sourceEnv = process.env }) {
   const gateRoot = gateDirectory(artifactDir, script);
   const home = join(gateRoot, "home");
   const violationPath = join(gateRoot, "network-violations.log");
@@ -211,7 +218,7 @@ export function verificationGateEnvironment({ root, artifactDir, script }) {
   mkdirSync(gateRoot, { recursive: true, mode: 0o700 });
   writeFileSync(violationPath, "", { mode: 0o600 });
   const env = {
-    PATH: [join(root, "node_modules", ".bin"), process.env.PATH ?? "/usr/bin:/bin"].join(delimiter),
+    PATH: [join(root, "node_modules", ".bin"), sourceEnv.PATH ?? "/usr/bin:/bin"].join(delimiter),
     HOME: home,
     PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
     CI: "1",
@@ -222,8 +229,8 @@ export function verificationGateEnvironment({ root, artifactDir, script }) {
     BIFROST_TEST_NETWORK_VIOLATIONS: violationPath,
     NODE_OPTIONS: `--require=${join(root, "scripts", "test-outbound-guard.cjs")}`,
   };
-  for (const key of ["TMPDIR", "LANG", "TERM"]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
+  for (const key of ["TMPDIR", "LANG", "TERM", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH"]) {
+    if (sourceEnv[key] !== undefined) env[key] = sourceEnv[key];
   }
   return { env, violationPath };
 }

@@ -6,6 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readd
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REPLAY_GUARD_BASELINE_SHA256, REPLAY_GUARD_FUNCTIONS, FAULT_PROOFS, runReplayGuardFaultProof } from "../fixtures/replay-fault-control.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -920,11 +921,21 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     const configPath = join(work, ".pi", "bifrost.json");
     const logPath = join(work, "probe-debug.jsonl");
     const extensionDir = mkdtempSync(join(tmpdir(), "bifrost-debug-extension-"));
-    const extensionPath = createDebugExtension(extensionDir, logPath);
+    // The timeout witness never responds; successful probes need no race
+    // against a 250ms wall-clock budget on a busy hosted runner.
+    const extensionPath = createDebugExtension(extensionDir, logPath, true, 3_000);
+    const heldModel = "probe-background-held-timeout";
+    const probeGate = async (action) => {
+      const response = await fetch(`http://127.0.0.1:${server.port}/_probe-gate/${action}?model=${heldModel}`, {
+        method: "POST", signal: AbortSignal.timeout(2_000),
+      });
+      assert.equal(response.ok, true, `owned probe gate ${action} must succeed`);
+    };
     try {
+      await probeGate("hold");
       writePiModels({ home, port: server.port, models: [
         { provider: "fake", id: "background-credits-exhausted", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
-        ...["probe-background-slow-fail", "sibling-one", "sibling-two", "sibling-three", "sibling-four"].map((id) => ({
+        ...[heldModel, "sibling-one", "sibling-two", "sibling-three", "sibling-four"].map((id) => ({
           provider: "fake", id, reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 },
         })),
         { provider: "openai-codex", id: "gpt-fixture", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
@@ -957,6 +968,9 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
         assert.ok(fakeProbes.length <= 3, `queued fake-provider probes should stop after the initial concurrency window: ${JSON.stringify(fakeProbes)}`);
         assert.equal(fakeProbes.some((item) => ["sibling-three", "sibling-four"].includes(item.model)), false,
           `after the initial concurrency window, queued siblings must not start: ${JSON.stringify(fakeProbes)}`);
+        const heldProbe = fakeProbes.find((item) => item.model === heldModel);
+        assert.equal(heldProbe?.completed, false, "the timeout witness must have started without receiving a response");
+        assert.notEqual(heldProbe?.gateReleased, true, "the timeout witness must remain held until after the assertions");
         const providerStatePath = join(work, ".pi", "bifrost-provider-reliability.json");
         assert.equal(existsSync(providerStatePath), true, "the confirmed provider quota pause is persisted");
         assert.match(readFileSync(providerStatePath, "utf8"), /fake/u);
@@ -964,16 +978,17 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
       } finally {
         await rpc.close();
       }
+      await probeGate("release");
       const events = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
       const runIds = new Set(events.filter((event) => event.module === "probe").map((event) => event.runId));
       assert.equal(runIds.size, 1, "one background probe run has one correlation ID");
       const outcomes = events.filter((event) => event.module === "probe" && event.event === "model_result");
       assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === "background-credits-exhausted"
         && event.status === "error" && event.reason === "allowance_exhausted"), JSON.stringify(outcomes));
-      assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === "probe-background-slow-fail"
-        && event.status === "timeout" && event.reason === "timeout"), JSON.stringify(outcomes));
+      assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === heldModel
+        && event.status === "timeout" && event.reason === "timeout"), "the held native probe must time out: " + JSON.stringify(outcomes));
       assert.ok(outcomes.some((event) => event.provider === "good" && event.model === "codex-like-temperature-rejects"
-        && event.status === "ok"), JSON.stringify(outcomes));
+        && event.status === "ok"), "the native parameter-compatible probe must succeed before its bounded deadline: " + JSON.stringify(outcomes));
       const codexOutcomes = outcomes.filter((event) => event.provider === "openai-codex");
       const catalog = events.find((event) => event.module === "probe" && event.event === "catalog");
       assert.ok(codexOutcomes.length > 0, "Pi's enabled native Codex models appear in the probe catalog");
@@ -1122,6 +1137,44 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     }
   });
 
+  it("surfaces malformed SSE as one failed provider attempt without replay", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bifrost-auto-malformed-sse-home-"));
+    const work = mkdtempSync(join(tmpdir(), "bifrost-auto-malformed-sse-work-"));
+    try {
+      writeFixture({
+        home, work, port: server.port,
+        models: [
+          { id: "malformed-sse", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
+          { id: "zz-healthy", reasoning: false, cost: { input: 20, output: 20, cacheRead: 0, cacheWrite: 0 } },
+        ],
+        bifrost: {
+          enabled: true, default: "quick", strategy: "first", classifier: { enabled: false },
+          models: { quick: ["fake/malformed-sse", "fake/zz-healthy"] },
+          categoryStrategies: { quick: "cheapest" },
+          reliability: {
+            enabled: true, allowanceCooldownScope: "model", retryOnAllowanceExhausted: true,
+            failureThreshold: 1, windowMinutes: 5, cooldownMinutes: 60,
+          },
+        },
+      });
+      const before = await fakeStats(server.port);
+      const result = await runAuto({ home, work, messages: ["malformed transport request"] });
+      const after = await fakeStats(server.port);
+      assert.equal(result.code, 1, result.stderr);
+      assert.equal(result.stdout.trim(), "");
+      assert.match(result.stderr, /Bifrost auto: quick → fake\/malformed-sse/);
+      assert.match(result.stderr, /Error reading response: malformed server-sent event JSON\./);
+      assert.equal((after.attempts["malformed-sse"] ?? 0) - (before.attempts["malformed-sse"] ?? 0), 1, result.stderr);
+      assert.equal((after.attempts["zz-healthy"] ?? 0) - (before.attempts["zz-healthy"] ?? 0), 0, "parser failure must not trigger allowance recovery");
+      const generationStats = after.stats.slice(before.stats.length).filter((item) => item.kind === "generation");
+      assert.deepEqual(generationStats.map(({ model }) => model), ["malformed-sse"], "malformed SSE must not trigger additional generation requests");
+      assert.equal(generationStats.length, 1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
   it("opens the circuit on failure and visibly degrades to the last dispatched model", async () => {
     const home = mkdtempSync(join(tmpdir(), "bifrost-auto-home-"));
     const work = mkdtempSync(join(tmpdir(), "bifrost-auto-work-"));
@@ -1226,5 +1279,43 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }
+  });
+});
+
+// This is an integrity anchor plus executable fault proofs — see
+// tests/fixtures/replay-fault-control.mjs for the guard inventory, the named
+// proof specs, and the still-outstanding follow-ups.
+describe("G03 replay guard integrity anchor", () => {
+  it("anchors the baseline source hash and proves isSideEffectFreeAllowanceFailure faults the output-effect no-replay assertion", async () => {
+    const source = readFileSync(EXTENSION_PATH, "utf8");
+    const hash = createHash("sha256").update(source).digest("hex");
+    assert.equal(hash, REPLAY_GUARD_BASELINE_SHA256);
+    for (const fn of REPLAY_GUARD_FUNCTIONS) {
+      assert.ok(source.includes(`function ${fn}`), `missing production replay guard: ${fn}`);
+    }
+
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, log: (message) => process.stderr.write(`${message}\n`) });
+    assert.equal(receipt.guard, "isSideEffectFreeAllowanceFailure");
+    assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
+    assert.notEqual(receipt.mutantSha256, receipt.baselineSha256, "the guard bypass must change the source hash");
+    assert.equal(receipt.restoredSha256, REPLAY_GUARD_BASELINE_SHA256, "the proof must restore the baseline source");
+    assert.equal(receipt.phases.green, 0);
+    assert.equal(receipt.phases.red, 1);
+    assert.equal(receipt.phases.restoredGreen, 0);
+  });
+
+  it("proves autoBoundaryStillActive faults the synthetic tool side-effect no-replay assertion", async () => {
+    const proof = FAULT_PROOFS.autoBoundaryToolSideEffect;
+    const receipt = await runReplayGuardFaultProof({ root: ROOT, proof, log: (message) => process.stderr.write(`${message}\n`) });
+
+    assert.equal(receipt.guard, proof.guard);
+    assert.equal(receipt.testName, proof.testName);
+    assert.equal(receipt.baselineSha256, REPLAY_GUARD_BASELINE_SHA256);
+    assert.notEqual(receipt.mutantSha256, receipt.baselineSha256, "the auto-boundary fault must change the source hash");
+    assert.equal(receipt.restoredSha256, REPLAY_GUARD_BASELINE_SHA256, "the proof must restore the baseline source");
+    assert.equal(receipt.redAssertionMessage, proof.redAssertionMessage);
+    assert.equal(receipt.phases.green, 0);
+    assert.equal(receipt.phases.red, 1);
+    assert.equal(receipt.phases.restoredGreen, 0);
   });
 });

@@ -6,10 +6,12 @@ import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
 const pidFile = process.env.BIFROST_DESCENDANT_PID_FILE;
+await new Promise(resolve => setTimeout(resolve, Number(process.env.BIFROST_DESCENDANT_STARTUP_DELAY_MS ?? 0)));
 if (!pidFile) throw new Error("BIFROST_DESCENDANT_PID_FILE is required by the descendant fixture");
 
 const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
   stdio: ["ignore", "inherit", "inherit"],
 });
 writeFileSync(pidFile, String(descendant.pid));
-process.exit(0);
+if (process.env.BIFROST_DESCENDANT_NEVER_READY === "1") process.exit(0);
+process.stdout.write("descendant-ready\n", () => process.exit(0));

@@ -5,12 +5,14 @@ import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
-import { classifyWithLLM as invokeClassifier, type ClassifierModel } from "./classifier.ts";
+import { classifyWithLLM as invokeClassifier } from "./classifier.ts";
 import { classifierCacheEnabled, classifierCacheKey, boundedClassifierPrompt, directStagePlan } from "./classifier-semantics.ts";
 import { ClassifierMetricsStore, classifierMetricsEnabled } from "./classifier-metrics.ts";
 import {
   buildRouteDecisionSummary,
   createPipeline,
+  type ClassifierModelRef,
+  type PipelineDeps,
   type ClassificationPipeline,
   type DirectClassifierAttempt,
   type DirectClassifierObservation,
@@ -31,8 +33,6 @@ import {
   type CacheEntry,
 } from "./cache.ts";
 import {
-  loadConfigForReload,
-  loadRules,
   configHasNoPools,
   DEFAULT_CLASSIFIER_CRITERIA,
   validateConfig,
@@ -44,10 +44,12 @@ import {
   validateEconomicConfig,
   type BifrostConfig,
 } from "./config.ts";
+import { loadConfigForReload, loadRules } from "./config-load.ts";
 import {
   resolveConfiguredTier,
   findCandidates,
   modelKey,
+  type ConfiguredTierResolution,
   type RoutedModelResolution,
   type SkippedCandidate,
   type AffinityRoutingContext,
@@ -336,7 +338,7 @@ function strictInputHandled(
 function resolveClassifierModels(
   ctx: ExtensionContext,
   config: BifrostConfig,
-): ClassifierModel[] {
+): ClassifierModelRef<Model<Api>>[] {
   const pattern = config.classifier?.model;
   if (!pattern) return [];
   return findCandidates(ctx, pattern)
@@ -344,7 +346,7 @@ function resolveClassifierModels(
     .map((model) => ({ kind: "registry" as const, model }));
 }
 
-function endpointClassifier(id: string, endpoint: string): ClassifierModel {
+function endpointClassifier(id: string, endpoint: string): ClassifierModelRef<Model<Api>> {
   return { kind: "endpoint", id, baseUrl: endpoint };
 }
 
@@ -479,7 +481,7 @@ function buildPipeline(
 
   // Resolve classifier models once at pipeline construction.
   // If classifier is disabled, pass empty array — pipeline skips LLM stage.
-  let classifierModels: ClassifierModel[] = [];
+  let classifierModels: ClassifierModelRef<Model<Api>>[] = [];
   let classifyDirect: ((text: string, tiers: readonly string[], signal?: AbortSignal) => Promise<DirectClassifierAttempt>) | undefined;
   const directConfigOk = !hasClassifierConfigErrors(config, effective.backend);
   const plan = directStagePlan({
@@ -558,7 +560,7 @@ function buildPipeline(
     }
   }
 
-  return createPipeline({
+  const pipelineDeps: PipelineDeps<Model<Api>> = {
     classifyDirect,
     totalTimeoutMs: config.classifier?.totalTimeoutMs,
     cacheLookup: (text) => {
@@ -571,7 +573,7 @@ function buildPipeline(
       return undefined;
     },
     classifierModels,
-    classifyWithLLM: async (model, text, tiers, signal) => {
+    classifyWithLLM: async (model: ClassifierModelRef<Model<Api>>, text, tiers, signal) => {
       if (model.kind === "registry") {
         const key = modelKey(model.model);
         if (isProviderClassifierUnavailable(model.model)) {
@@ -611,7 +613,8 @@ function buildPipeline(
     regexRules: loadRules(process.cwd(), config),
     defaultTier: config.default,
     tiers,
-  });
+  };
+  return createPipeline(pipelineDeps);
 }
 
 function classifierRetryAt(value: string, now: number): number | undefined {
@@ -2396,7 +2399,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     affinityContext?: AffinityRoutingContext,
     bypassV2Snapshot = false,
     random?: () => number,
-  ) {
+  ): ConfiguredTierResolution<Model<Api>> {
     let reliabilityState = reliabilityV2Enabled() && !bypassV2Snapshot
       ? projectReliabilityV2ForRouting(
           state.reliabilityV2Store?.readSnapshot(),
@@ -2450,7 +2453,7 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     failedModelKey: string,
     randomValue: number,
     explicitTier = false,
-  ): { model: Model<Api>; selectedTier: string; attempt: ReturnType<typeof resolveConfiguredTier> } | undefined {
+  ): { model: Model<Api>; selectedTier: string; attempt: ReturnType<typeof resolveForTier> } | undefined {
     const random = () => randomValue;
     const firstAttempt = resolveForTier(ctx, requestedTier, undefined, false, random);
     const first = firstAttempt.resolution;

@@ -1,14 +1,24 @@
-# Experimental resolve-only API
+# Router SDK
 
-The `pi-bifrost/router` package subpath exposes an experimental, host-neutral way to ask Bifrost for a route decision. It does not select a Pi model, dispatch a request, read configuration files, load provider credentials, or update session state.
+The `pi-bifrost/router` package subpath exposes Bifrost's routing engine as a host-neutral SDK: `createRouter(snapshot, options)` and `router.resolve(request)` evaluate explicit snapshots and return an inspectable, advisory route decision. The consumer decides whether, when, and how to execute it. Bifrost does not select a Pi model, dispatch a request, read configuration files, load provider credentials, update session state, persist anything, or make network calls on its own.
 
-The packed JavaScript API was verified on Node.js 24.14 and 26.9. Its Pi peer packages declare Node.js 22.19 or newer. This does not change the Pi extension's separate Pi 1.0.1 requirement.
+The Pi packages are optional peer dependencies (`peerDependenciesMeta`), needed only when the package runs as a Pi extension. The resolved route is a decision, not a dispatch authorization.
 
-The offline packed-consumer smoke test links the workspace's already-installed Pi peer packages into its temporary consumer. It verifies the packed API against those package files, but does not verify a fresh peer-dependency installation from a registry.
+The packed JavaScript API was verified on Node.js 24.14 and 26.9. When the Pi peer packages are installed, they declare Node.js 22.19 or newer; this does not change the Pi extension's separate Pi 1.0.1 requirement. The standalone consumer test installs the packed package into a directory with no Pi packages present, compiles a TypeScript consumer with `skipLibCheck` off, and runs the shipped examples. A separate compatibility test still links the workspace's Pi packages to prove the extension entry point works.
 
-When working from the source checkout, install the development dependencies and run `npm run build:router` to generate the ignored `dist/router` files. `npm pack` runs this build automatically.
+When working from the source checkout, run `npm run build:router` to generate the ignored `dist/router` files; `npm pack` runs this build automatically.
 
-```ts
+## What the SDK deliberately does not do
+
+- It never dispatches a model request or authorizes a later dispatch. Revalidate and re-resolve right before you execute.
+- It never reads or writes files, environment variables, or provider credentials, and never caches responses.
+- It never invents evidence: unavailable models, reliability state, economic facts, and affinity anchors are caller-supplied.
+- External classification calls something only when the caller injects a classifier port and explicitly grants permission; no other network behavior exists.
+- It never replaces a no-decision with a default model.
+
+## Plain JavaScript usage
+
+```js
 import { createRouter } from "pi-bifrost/router";
 
 const model = {
@@ -33,10 +43,22 @@ const router = createRouter({
 });
 
 const result = await router.resolve({ prompt: "Format this file" });
-if (result.status === "completed") {
+if (result.status === "completed" && result.decision.outcome === "selected") {
   console.log(result.decision.selected, result.asOf);
 }
 ```
+
+A complete runnable copy is `examples/router-standalone.mjs` (shipped in the package). It covers custom tiers, selected and no-decision results, and known-but-unavailable reporting.
+
+`status: "completed"` means the evaluation finished. It does not mean a model was selected: inspect `decision.outcome` — `"selected"`, `"unresolved"`, `"unclassified"`, `"usage"`, or `"config_invalid"`. A no-decision result never masquerades as a selection.
+
+## TypeScript usage
+
+```ts
+import { createRouter, type RouterSnapshot, type RouterResolveResult } from "pi-bifrost/router";
+```
+
+Public types are host-neutral DTOs (`RouterModel`, `RouterRegistrySnapshot`, `RouterSnapshot`, `RouterOptions`, `RouterResolveRequest`, `RouterResolveResult`, `RouterClassifierPort`, `RouterEconomicSnapshot`, `RouterAffinitySnapshot`); they never reference Pi types. Results support exhaustive narrowing on `result.status` and `decision.outcome`.
 
 Supply model costs and context windows from your own data. The API does not infer prices. `knownModels` is inventory; only `availableModels` can be selected. An exact configured reference that is known but unavailable is reported through `knownUnavailableModels`.
 
@@ -59,3 +81,19 @@ Affinity is off unless schema-v2 config explicitly sets `affinity.mode` to `obse
 A schema-v2 `routingScope` narrows the pool to an exact provider allowlist before reserves, circuits, affinity, and strategy selection run. The global allowlist applies to every pool, and each pool also applies its own tier allowlist, so a fallback tier is never constrained by the tier that failed. An excluded candidate is reported as `provider_not_allowed` with the rejecting level (`global` or `tier`). The scope is validated at the snapshot boundary like other config; unsupported scope fields are rejected before a route is resolved.
 
 An optional economic `preference.billingClass` can rank fresh explicit billing facts among the final eligible candidates of the selected tier. Observe mode leaves selection and random ordering unchanged; policy mode applies the existing strategy within the preferred subset when one exists. The summary exposes class, source alias, authority, freshness, and candidate counts without allowance balances or account references. This preference does not guarantee savings or spending limits.
+
+## Custom tiers and strategies
+
+Tier names are caller-defined. Configure any number of pools under `config.models` and per-tier strategies under `config.categoryStrategies`; the engine supports `first`, `cheapest`, `cheapest_input`, `cheapest_output`, `largest_context`, `random`, and `fastest`. Supply `random` (per resolution or at creation) for deterministic tests; omission preserves default randomness.
+
+Under `schemaVersion: 2`, a tier may declare ordered `tierPolicies.<tier>.fallbackTiers`. An explicitly empty fallback list is terminal; the resolver never escapes an explicit fallback boundary.
+
+Each `resolve` result carries structured exclusions: per-pool candidates with `exclusion` reasons (`open_circuit`, `trial_active`, `economic_reserve`) and a machine-readable `fallbackReason` where applicable.
+
+## Integrating a custom host
+
+A host (coding agent, subagent orchestrator) translates its own model inventory into the public DTOs, resolves an advisory route, revalidates against its live state, and executes through its own dispatch path. `examples/host-adapter.mjs` (shipped in the package) shows the full flow with a simulated host: build snapshot → `createRouter` → `resolve` → inspect the decision → revalidate → host dispatch. The Pi extension continues to work unchanged through the same package.
+
+## Configuration file loading
+
+Pure config validation (`validateConfig`, defaults, merging) is imported from `pi-bifrost/config.ts`; layered file loading with host paths (`loadConfigForReload`, `loadConfigWithSourceOverride`, `loadRules`) lives in `pi-bifrost/config-load.ts` and is Pi-extension-only. The routing SDK itself reads no files.

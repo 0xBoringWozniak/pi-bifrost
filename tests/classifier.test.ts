@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   categoryLabel,
@@ -509,5 +511,69 @@ describe("classifier", () => {
       // "not economical" should not match "economical"
       assert.equal(extractCategory("not economical", ["frontier", "economical"]), undefined);
     });
+  });
+});
+
+
+describe("classifier subprocess tool boundary", () => {
+  async function captureArgs(method: "subprocess" | "auto", classify = classifyWithLLM): Promise<string[]> {
+    const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough; kill: () => boolean };
+    child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true;
+    let args: string[] = [];
+    let directCalls = 0;
+    const result = await classify({ cwd: process.cwd(), modelRegistry: {
+      streamSimple: () => { directCalls++; return { result: async () => ({ content: [{ type: "text", text: "not-a-tier" }], stopReason: "stop" }) }; },
+    } } as never, { kind: "registry", model: makeModel("fixture", "classifier") }, ["frontier"], "request", {
+      method,
+      spawnImpl: ((_command: string, input: string[]) => {
+        args = [...input];
+        queueMicrotask(() => { child.stdout.write("frontier"); child.emit("close", 0); });
+        return child as unknown as ChildProcess;
+      }) as unknown as typeof import("node:child_process").spawn,
+    });
+    assert.equal(result, "frontier", "the classifier child must still return a category");
+    assert.equal(directCalls, method === "auto" ? 1 : 0, "auto must reach fallback after its empty direct result");
+    return args;
+  }
+
+  for (const method of ["subprocess", "auto"] as const) {
+    it(`disables all Pi tools for ${method} classifier subprocesses`, async () => {
+      const args = await captureArgs(method);
+      assert.equal(args.includes("--no-tools"), true, "classification subprocess must disable Pi tools");
+      assert.equal(args.includes("--no-extensions"), true);
+      assert.equal(args.includes("--no-context-files"), true);
+    });
+  }
+
+  it("the subprocess tool assertion detects a removed no-tools flag", async () => {
+    const sourcePath = new URL("../classifier.ts", import.meta.url);
+    const original = readFileSync(sourcePath, "utf8");
+    const flag = '    "--no-tools",\n';
+    assert.equal(original.split(flag).length, 2, "the fault requires one exact tool-disable flag");
+    const directory = mkdtempSync(join(tmpdir(), "bifrost-classifier-tools-"));
+    const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+    const load = async (text: string, phase: string) => {
+      const rewritten = text.replace(/(from\s+["'])(\.\/[^"']+)(["'])/gu,
+        (_match, before: string, relative: string, after: string) => `${before}${new URL(relative, sourcePath).href}${after}`);
+      const path = join(directory, `${phase}.ts`);
+      writeFileSync(path, rewritten);
+      return (await import(pathToFileURL(path).href)).classifyWithLLM as typeof classifyWithLLM;
+    };
+    const assertToolsDisabled = async (classify: typeof classifyWithLLM, method: "subprocess" | "auto") => {
+      assert.equal((await captureArgs(method, classify)).includes("--no-tools"), true,
+        "classification subprocess must disable Pi tools");
+    };
+    try {
+      const pristine = await load(original, "pristine");
+      const mutant = await load(original.replace(flag, ""), "mutant");
+      const restored = await load(original, "restored");
+      for (const method of ["subprocess", "auto"] as const) {
+        await assertToolsDisabled(pristine, method);
+        await assert.rejects(() => assertToolsDisabled(mutant, method),
+          { code: "ERR_ASSERTION", message: /classification subprocess must disable Pi tools/u });
+        await assertToolsDisabled(restored, method);
+      }
+      assert.equal(hash(readFileSync(sourcePath, "utf8")), hash(original), "the classifier source must remain byte-identical");
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 });

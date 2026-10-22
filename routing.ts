@@ -1,5 +1,3 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Api, Model } from "@earendil-works/pi-ai";
 import { getCircuitState, type ReliabilityConfig, type ReliabilityState } from "./reliability.ts";
 import { isGenerativeModel } from "./virtual-model.ts";
 import { evaluateReserves, type EconomicSnapshot, type ReserveEvaluation, type ReservePolicy } from "./economic-signals.ts";
@@ -21,35 +19,59 @@ export interface RouteRule {
   model: string;
 }
 
-export function modelKey(model: Model<Api> | undefined): string {
+/**
+ * Provider-neutral structural model used by the routing policy. Hosts adapt
+ * their model objects to this shape; extra host fields are allowed and
+ * preserved through generic inference for host callers.
+ */
+export interface RoutingModelBase {
+  /** Host transport discriminator; hosts may use it to exclude special entries. */
+  readonly api?: string;
+  readonly type?: string;
+  readonly provider: string;
+  readonly id: string;
+  readonly cost: { input: number; output: number };
+  readonly contextWindow: number;
+}
+
+export interface RoutingModelRegistry<M extends RoutingModelBase = RoutingModelBase> {
+  find(provider: string, modelId: string): M | undefined;
+  getAvailable(): M[];
+}
+
+export interface RoutingHostContext<M extends RoutingModelBase = RoutingModelBase> {
+  modelRegistry: RoutingModelRegistry<M>;
+}
+
+export function modelKey(model: RoutingModelBase | undefined): string {
   if (!model) return "none";
   return `${model.provider}/${model.id}`;
 }
 
 /** Sum of input + output token costs per 1M tokens. Does not include cache read/write costs. */
-export function modelCost(model: Model<Api>): number {
+export function modelCost(model: RoutingModelBase): number {
   return model.cost.input + model.cost.output;
 }
 
 /** Input token cost only. */
-export function modelInputCost(model: Model<Api>): number {
+export function modelInputCost(model: RoutingModelBase): number {
   return model.cost.input;
 }
 
 /** Output token cost only. */
-export function modelOutputCost(model: Model<Api>): number {
+export function modelOutputCost(model: RoutingModelBase): number {
   return model.cost.output;
 }
 
 /** Context window size. */
-export function modelContextSize(model: Model<Api>): number {
+export function modelContextSize(model: RoutingModelBase): number {
   return model.contextWindow;
 }
 
-export function findOneModel(
-  ctx: ExtensionContext,
+export function findOneModel<M extends RoutingModelBase>(
+  ctx: RoutingHostContext<M>,
   pattern: string,
-): Model<Api> | undefined {
+): M | undefined {
   if (!pattern) return undefined;
 
   if (pattern.includes("/")) {
@@ -72,9 +94,9 @@ interface ModelLowerMeta {
   readonly lowerProvider: string;
 }
 
-const modelLowerCache = new WeakMap<Model<Api>, ModelLowerMeta>();
+const modelLowerCache = new WeakMap<RoutingModelBase, ModelLowerMeta>();
 
-function modelLowerMeta(m: Model<Api>): ModelLowerMeta {
+function modelLowerMeta(m: RoutingModelBase): ModelLowerMeta {
   let meta = modelLowerCache.get(m);
   if (!meta) {
     meta = { lowerId: m.id.toLowerCase(), lowerProvider: m.provider.toLowerCase() };
@@ -83,18 +105,18 @@ function modelLowerMeta(m: Model<Api>): ModelLowerMeta {
   return meta;
 }
 
-function modelLowerMatches(m: Model<Api>, lower: string): boolean {
+function modelLowerMatches(m: RoutingModelBase, lower: string): boolean {
   const meta = modelLowerMeta(m);
   return meta.lowerId.includes(lower) || meta.lowerProvider.includes(lower);
 }
 
-export function findCandidates(
-  ctx: ExtensionContext,
+export function findCandidates<M extends RoutingModelBase>(
+  ctx: RoutingHostContext<M>,
   pattern: string | string[] | undefined,
-): Model<Api>[] {
+): M[] {
   if (!pattern) return [];
 
-  const candidates: Model<Api>[] = [];
+  const candidates: M[] = [];
   const seen = new Set<string>();
   const patterns = Array.isArray(pattern) ? pattern : [pattern];
   // Resolve once — avoid N getAvailable() calls for N substring patterns.
@@ -143,11 +165,11 @@ function minBy<T>(items: readonly T[], score: (item: T) => number): T | undefine
   return best;
 }
 
-export function selectModel(
-  candidates: Model<Api>[],
+export function selectModel<M extends RoutingModelBase>(
+  candidates: M[],
   strategy: RoutingStrategy,
   random: () => number = Math.random,
-): Model<Api> | undefined {
+): M | undefined {
   if (candidates.length === 0) return undefined;
   // Single candidate — return without scoring, matching the old sort's
   // behavior of never invoking the comparator (cost-less models stay safe).
@@ -171,11 +193,11 @@ export function selectModel(
   }
 }
 
-export function resolveModel(
-  ctx: ExtensionContext,
+export function resolveModel<M extends RoutingModelBase>(
+  ctx: RoutingHostContext<M>,
   pattern: string | string[] | undefined,
   strategy: RoutingStrategy,
-): Model<Api> | undefined {
+): M | undefined {
   return selectModel(findCandidates(ctx, pattern), strategy);
 }
 
@@ -187,12 +209,12 @@ export interface SkippedCandidate {
   scope?: RoutingScopeOrigin;
 }
 
-export interface HealthyModelResolution {
-  selected: Model<Api> | undefined;
-  candidates: Model<Api>[];
-  healthyCandidates: Model<Api>[];
+export interface HealthyModelResolution<M extends RoutingModelBase = RoutingModelBase> {
+  selected: M | undefined;
+  candidates: M[];
+  healthyCandidates: M[];
   /** Strategy pool after advisory/opt-in billing preference; never an exclusion list. */
-  selectionCandidates?: Model<Api>[];
+  selectionCandidates?: M[];
   billingPreference?: BillingPreferenceProjection;
   skipped: SkippedCandidate[];
   economic?: readonly EconomicCandidateEvaluation[];
@@ -212,12 +234,12 @@ export interface EconomicRouteContext {
   readonly preferenceBypassed?: boolean;
 }
 
-function selectFromHealthyPool(
-  healthyCandidates: Model<Api>[],
+function selectFromHealthyPool<M extends RoutingModelBase>(
+  healthyCandidates: M[],
   strategy: RoutingStrategy,
   random: () => number,
   economic: (EconomicRouteContext & { readonly evaluatedTier: string }) | undefined,
-): Pick<HealthyModelResolution, "selected" | "selectionCandidates" | "billingPreference"> {
+): Pick<HealthyModelResolution<M>, "selected" | "selectionCandidates" | "billingPreference"> {
   if (!economic?.policy.preference || economic.preferenceBypassed) {
     return { selected: selectModel(healthyCandidates, strategy, random), selectionCandidates: healthyCandidates };
   }
@@ -241,27 +263,27 @@ function selectFromHealthyPool(
   };
 }
 
-export interface RoutedModelResolution {
+export interface RoutedModelResolution<M extends RoutingModelBase = RoutingModelBase> {
   requestedTier: string;
   selectedTier?: string;
   fallbackTier?: string;
-  selected: Model<Api> | undefined;
+  selected: M | undefined;
   strategy: RoutingStrategy;
   skipped: SkippedCandidate[];
   fallbackReason?: "requested_tier_unhealthy" | "requested_tier_unavailable" | "requested_tier_excluded" | "requested_tier_provider_excluded" | "all_tiers_exhausted";
-  primary: HealthyModelResolution;
-  fallback?: HealthyModelResolution;
+  primary: HealthyModelResolution<M>;
+  fallback?: HealthyModelResolution<M>;
   /** Ordered pools attempted when an explicit tierPolicies boundary is active. */
-  attemptedTiers?: readonly RoutedTierAttempt[];
+  attemptedTiers?: readonly RoutedTierAttempt<M>[];
   explicitBoundary?: boolean;
   affinityObservation?: AffinityRouteObservation;
 }
 
-export interface RoutedTierAttempt {
+export interface RoutedTierAttempt<M extends RoutingModelBase = RoutingModelBase> {
   tier: string;
   strategy: RoutingStrategy;
   pattern: string | string[] | undefined;
-  resolution: HealthyModelResolution;
+  resolution: HealthyModelResolution<M>;
 }
 
 export interface TierResolutionOptions {
@@ -302,9 +324,9 @@ export interface RouteScopeContext {
   readonly evaluatedTier: string;
 }
 
-export interface ConfiguredTierResolution {
+export interface ConfiguredTierResolution<M extends RoutingModelBase = RoutingModelBase> {
   options: TierResolutionOptions;
-  resolution: RoutedModelResolution;
+  resolution: RoutedModelResolution<M>;
 }
 
 /** Compose configured tier pools and strategies identically for preview and runtime routes. */
@@ -334,8 +356,8 @@ export function buildTierResolutionOptions(
 }
 
 /** Resolve a configured tier and return the exact options used for explanation. */
-export function resolveConfiguredTier(
-  ctx: ExtensionContext,
+export function resolveConfiguredTier<M extends RoutingModelBase>(
+  ctx: RoutingHostContext<M>,
   tier: string,
   config: TierResolutionConfig,
   reliabilityState?: ReliabilityState,
@@ -344,7 +366,7 @@ export function resolveConfiguredTier(
   economic?: Omit<EconomicRouteContext, "now" | "requestedTier">,
   random?: () => number,
   affinity?: AffinityRoutingContext,
-): ConfiguredTierResolution {
+): ConfiguredTierResolution<M> {
   const options = buildTierResolutionOptions(tier, config);
   const routeNow = now ?? Date.now();
   const economicContext = economic ? { ...economic, requestedTier: tier, now: routeNow } : undefined;
@@ -414,8 +436,8 @@ export function resolveConfiguredTier(
   return { options, resolution };
 }
 
-export function resolveHealthyModel(
-  ctx: ExtensionContext,
+export function resolveHealthyModel<M extends RoutingModelBase>(
+  ctx: RoutingHostContext<M>,
   pattern: string | string[] | undefined,
   strategy: RoutingStrategy,
   reliabilityState: ReliabilityState | undefined,
@@ -424,7 +446,7 @@ export function resolveHealthyModel(
   economic?: EconomicRouteContext & { readonly evaluatedTier: string },
   random: () => number = Math.random,
   scope?: RouteScopeContext,
-): HealthyModelResolution {
+): HealthyModelResolution<M> {
   const configuredCandidates = findCandidates(ctx, pattern);
   // Hard provider scope runs first: an excluded provider never reaches
   // economic admission, reliability, affinity, or strategy selection.
@@ -473,7 +495,7 @@ export function resolveHealthyModel(
     };
   }
 
-  const healthyCandidates: Model<Api>[] = [];
+  const healthyCandidates: M[] = [];
   const skipped: SkippedCandidate[] = [...scopeSkipped];
   for (const candidate of candidates) {
     const circuit = getCircuitState(reliabilityState, modelKey(candidate), now, reliabilityConfig);
@@ -499,27 +521,27 @@ export function resolveHealthyModel(
 }
 
 /** Reliability exclusions only; provider scope rejections are reported separately. */
-function unreliableSkipped(pool: HealthyModelResolution): number {
+function unreliableSkipped<M extends RoutingModelBase>(pool: HealthyModelResolution<M>): number {
   return pool.skipped.filter((candidate) => candidate.reason !== "provider_not_allowed").length;
 }
 
-function scopeRejected(pool: HealthyModelResolution): boolean {
+function scopeRejected<M extends RoutingModelBase>(pool: HealthyModelResolution<M>): boolean {
   return pool.skipped.some((candidate) => candidate.reason === "provider_not_allowed");
 }
 
 /** Distinguish reliability, provider-scope, and reserve exclusions for one pool. */
-function tierExclusionReason(
-  pool: HealthyModelResolution,
+function tierExclusionReason<M extends RoutingModelBase>(
+  pool: HealthyModelResolution<M>,
   reserveExcludedPool: boolean,
-): RoutedModelResolution["fallbackReason"] {
+): RoutedModelResolution<M>["fallbackReason"] {
   if (unreliableSkipped(pool) > 0) return "requested_tier_unhealthy";
   if (scopeRejected(pool)) return "requested_tier_provider_excluded";
   if (reserveExcludedPool) return "requested_tier_excluded";
   return undefined;
 }
 
-export function resolveModelWithFallback(
-  ctx: ExtensionContext,
+export function resolveModelWithFallback<M extends RoutingModelBase>(
+  ctx: RoutingHostContext<M>,
   options: {
     requestedTier: string;
     requestedPattern: string | string[] | undefined;
@@ -534,7 +556,7 @@ export function resolveModelWithFallback(
     random?: () => number;
     scope?: CompiledRoutingScope;
   },
-): RoutedModelResolution {
+): RoutedModelResolution<M> {
   const now = options.now ?? Date.now();
   const primary = resolveHealthyModel(
     ctx,
@@ -560,8 +582,8 @@ export function resolveModelWithFallback(
     };
   }
 
-  const unavailable = (pool: HealthyModelResolution): boolean => pool.candidates.length === 0;
-  const reserveExcluded = (pool: HealthyModelResolution): boolean =>
+  const unavailable = (pool: HealthyModelResolution<M>): boolean => pool.candidates.length === 0;
+  const reserveExcluded = (pool: HealthyModelResolution<M>): boolean =>
     pool.economic?.some(({ evaluation }) => evaluation.mode === "policy" && evaluation.disposition === "rejected") === true;
   const requestedUnavailable = unavailable(primary);
   const requestedExcluded = reserveExcluded(primary);
@@ -578,7 +600,7 @@ export function resolveModelWithFallback(
           : undefined;
 
   // Compute final reason after evaluating fallback
-  const resolveFinalReason = (fb: HealthyModelResolution): RoutedModelResolution["fallbackReason"] => {
+  const resolveFinalReason = (fb: HealthyModelResolution<M>): RoutedModelResolution<M>["fallbackReason"] => {
     if (fb.selected) return fallbackReason;
     if (requestedUnavailable && primary.skipped.length === 0 && !requestedExcluded && unavailable(fb)) {
       return "requested_tier_unavailable";
@@ -629,8 +651,8 @@ export function resolveModelWithFallback(
   };
 }
 
-function resolveWithExplicitTierBoundary(
-  ctx: ExtensionContext,
+function resolveWithExplicitTierBoundary<M extends RoutingModelBase>(
+  ctx: RoutingHostContext<M>,
   options: TierResolutionOptions,
   fallbackTiers: readonly string[],
   config: TierResolutionConfig,
@@ -640,13 +662,13 @@ function resolveWithExplicitTierBoundary(
   economic?: EconomicRouteContext,
   random?: () => number,
   scope?: CompiledRoutingScope,
-): RoutedModelResolution {
+): RoutedModelResolution<M> {
   const tierOptions = [options.requestedTier, ...fallbackTiers].map((tier) => ({
     tier,
     pattern: config.models?.[tier] ?? tier,
     strategy: getStrategy(config.categoryStrategies, config.strategy, tier),
   }));
-  const attemptedTiers: RoutedTierAttempt[] = [];
+  const attemptedTiers: RoutedTierAttempt<M>[] = [];
   for (const { tier, pattern, strategy } of tierOptions) {
     const resolution = resolveHealthyModel(ctx, pattern, strategy, reliabilityState, reliabilityConfig, now,
       economic ? { ...economic, evaluatedTier: tier } : undefined, random,
@@ -759,7 +781,7 @@ const FRONTIER_COST_THRESHOLD = 5; // $/1M tokens (input + output)
 const QUICK_COST_THRESHOLD = 1;
 
 /** Assign a model to a tier based solely on token cost. */
-export function guessTier(model: Model<Api>): "frontier" | "general" | "quick" | undefined {
+export function guessTier(model: RoutingModelBase): "frontier" | "general" | "quick" | undefined {
   const cost = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);
   if (cost > FRONTIER_COST_THRESHOLD) return "frontier";
   if (cost < QUICK_COST_THRESHOLD) return "quick";

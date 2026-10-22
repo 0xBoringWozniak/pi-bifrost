@@ -7,18 +7,28 @@ const rawOrigin = process.env.BIFROST_TEST_ALLOWED_ORIGIN;
 const violationPath = process.env.BIFROST_TEST_NETWORK_VIOLATIONS;
 if (!violationPath) throw new Error("BIFROST_TEST_NETWORK_VIOLATIONS is required by the test network guard");
 
+const nativeChild = process.env.BIFROST_NATIVE_TOOL_CONTINUATION_CHILD === "1";
+const denyAll = process.env.BIFROST_TEST_DENY_ALL === "1" || nativeChild;
 const allowLoopback = process.env.BIFROST_TEST_ALLOW_LOOPBACK === "1";
 if (process.env.BIFROST_TEST_ALLOW_LOOPBACK && !allowLoopback) {
   throw new Error("BIFROST_TEST_ALLOW_LOOPBACK must be exactly 1 when set");
 }
-if (!rawOrigin && !allowLoopback) throw new Error("BIFROST_TEST_ALLOWED_ORIGIN is required by the test network guard");
-const allowed = rawOrigin ? new URL(rawOrigin) : null;
+if (process.env.BIFROST_TEST_DENY_ALL && process.env.BIFROST_TEST_DENY_ALL !== "1") {
+  throw new Error("BIFROST_TEST_DENY_ALL must be exactly 1 when set");
+}
+if (denyAll && (rawOrigin || allowLoopback)) {
+  throw new Error("deny-all guard cannot be combined with allowed origins");
+}
+if (!denyAll && !rawOrigin && !allowLoopback) throw new Error("BIFROST_TEST_ALLOWED_ORIGIN is required by the test network guard");
+
+const allowed = denyAll ? null : (rawOrigin ? new URL(rawOrigin) : null);
 if (allowed && (allowed.protocol !== "http:" || allowed.hostname !== "127.0.0.1" || !allowed.port)) {
   throw new Error("test network guard requires an exact 127.0.0.1 HTTP origin");
 }
 const allowedPort = allowed ? Number(allowed.port) : null;
 
 function isAllowed(host, port) {
+  if (denyAll) return false;
   if (allowLoopback) return host === "127.0.0.1" && Number(port) > 0;
   return allowed && host === allowed.hostname && Number(port) === allowedPort;
 }
