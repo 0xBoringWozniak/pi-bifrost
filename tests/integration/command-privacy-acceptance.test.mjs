@@ -35,7 +35,7 @@ const EXTENSION = join(ROOT, "index.ts");
 const OUTBOUND_GUARD = join(ROOT, "scripts", "test-outbound-guard.cjs");
 
 /** Production index.ts hash that the fault proof must leave byte-identical. */
-const PRODUCTION_INDEX_SHA256 = "3164a3dbc41a864c68bede2f9e7365c5ed32bbbcd91fc584a3d07446014e3f12";
+const PRODUCTION_INDEX_SHA256 = "14752568bd935068ca5874156bd324f45336dc29bd305523fe6e0ca5973c3303";
 
 // ── synthetic canaries ──────────────────────────────────────────
 // Distinct shapes so a leak is unambiguous, and words that survive cache
