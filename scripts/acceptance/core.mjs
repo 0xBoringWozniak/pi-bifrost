@@ -210,7 +210,7 @@ export async function terminateProcessGroup(child, {
   return !isGroupAlive(groupId);
 }
 
-export function verificationGateEnvironment({ root, artifactDir, script }) {
+export function verificationGateEnvironment({ root, artifactDir, script, sourceEnv = process.env }) {
   const gateRoot = gateDirectory(artifactDir, script);
   const home = join(gateRoot, "home");
   const violationPath = join(gateRoot, "network-violations.log");
@@ -218,7 +218,7 @@ export function verificationGateEnvironment({ root, artifactDir, script }) {
   mkdirSync(gateRoot, { recursive: true, mode: 0o700 });
   writeFileSync(violationPath, "", { mode: 0o600 });
   const env = {
-    PATH: [join(root, "node_modules", ".bin"), process.env.PATH ?? "/usr/bin:/bin"].join(delimiter),
+    PATH: [join(root, "node_modules", ".bin"), sourceEnv.PATH ?? "/usr/bin:/bin"].join(delimiter),
     HOME: home,
     PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
     CI: "1",
@@ -229,8 +229,8 @@ export function verificationGateEnvironment({ root, artifactDir, script }) {
     BIFROST_TEST_NETWORK_VIOLATIONS: violationPath,
     NODE_OPTIONS: `--require=${join(root, "scripts", "test-outbound-guard.cjs")}`,
   };
-  for (const key of ["TMPDIR", "LANG", "TERM"]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
+  for (const key of ["TMPDIR", "LANG", "TERM", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH"]) {
+    if (sourceEnv[key] !== undefined) env[key] = sourceEnv[key];
   }
   return { env, violationPath };
 }

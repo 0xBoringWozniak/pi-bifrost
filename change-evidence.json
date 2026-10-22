@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "base": "b2f089dab70bce3944d5ca0a149bbf8f1d87f7f8",
+  "base": "de28fcc3966a58499834a22ebdbfdd707181d792",
   "contracts": [
     {
       "id": "agent-config-tool",
@@ -8,7 +8,7 @@
       "files": [
         "config-agent.ts",
         "config-agent-report.ts",
-        "config.ts",
+        "config-load.ts",
         "commands.ts",
         "index.ts",
         "tests/config-agent.test.ts",

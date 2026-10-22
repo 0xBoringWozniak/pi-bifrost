@@ -23,13 +23,10 @@ import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionContext, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { configLayerPaths, loadConfigForReload, loadConfigWithSourceOverride, loadRules } from "./config-load.ts";
 import {
   MAX_CONFIG_SOURCE_BYTES,
   classifierTotalTimeoutIssue,
-  configLayerPaths,
-  loadConfigForReload,
-  loadConfigWithSourceOverride,
-  loadRules,
   validateConfig,
   validateTierPolicyConfig,
   type BifrostConfig,

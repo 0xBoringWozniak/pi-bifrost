@@ -19,7 +19,7 @@ import {
   type ConfigAgentInspectResult,
   type ConfigAgentPreviewResult,
 } from "../config-agent.ts";
-import { loadConfigForReload } from "../config.ts";
+import { loadConfigForReload } from "../config-load.ts";
 import { makeModel } from "./helpers.ts";
 
 interface HarnessOptions {
