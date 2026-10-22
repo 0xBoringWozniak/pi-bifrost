@@ -921,11 +921,21 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
     const configPath = join(work, ".pi", "bifrost.json");
     const logPath = join(work, "probe-debug.jsonl");
     const extensionDir = mkdtempSync(join(tmpdir(), "bifrost-debug-extension-"));
-    const extensionPath = createDebugExtension(extensionDir, logPath);
+    // The timeout witness never responds; successful probes need no race
+    // against a 250ms wall-clock budget on a busy hosted runner.
+    const extensionPath = createDebugExtension(extensionDir, logPath, true, 3_000);
+    const heldModel = "probe-background-held-timeout";
+    const probeGate = async (action) => {
+      const response = await fetch(`http://127.0.0.1:${server.port}/_probe-gate/${action}?model=${heldModel}`, {
+        method: "POST", signal: AbortSignal.timeout(2_000),
+      });
+      assert.equal(response.ok, true, `owned probe gate ${action} must succeed`);
+    };
     try {
+      await probeGate("hold");
       writePiModels({ home, port: server.port, models: [
         { provider: "fake", id: "background-credits-exhausted", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
-        ...["probe-background-slow-fail", "sibling-one", "sibling-two", "sibling-three", "sibling-four"].map((id) => ({
+        ...[heldModel, "sibling-one", "sibling-two", "sibling-three", "sibling-four"].map((id) => ({
           provider: "fake", id, reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 },
         })),
         { provider: "openai-codex", id: "gpt-fixture", reasoning: false, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0 } },
@@ -958,6 +968,9 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
         assert.ok(fakeProbes.length <= 3, `queued fake-provider probes should stop after the initial concurrency window: ${JSON.stringify(fakeProbes)}`);
         assert.equal(fakeProbes.some((item) => ["sibling-three", "sibling-four"].includes(item.model)), false,
           `after the initial concurrency window, queued siblings must not start: ${JSON.stringify(fakeProbes)}`);
+        const heldProbe = fakeProbes.find((item) => item.model === heldModel);
+        assert.equal(heldProbe?.completed, false, "the timeout witness must have started without receiving a response");
+        assert.notEqual(heldProbe?.gateReleased, true, "the timeout witness must remain held until after the assertions");
         const providerStatePath = join(work, ".pi", "bifrost-provider-reliability.json");
         assert.equal(existsSync(providerStatePath), true, "the confirmed provider quota pause is persisted");
         assert.match(readFileSync(providerStatePath, "utf8"), /fake/u);
@@ -965,16 +978,17 @@ describe("auto virtual production path", { timeout: 240_000, concurrency: 1 }, (
       } finally {
         await rpc.close();
       }
+      await probeGate("release");
       const events = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
       const runIds = new Set(events.filter((event) => event.module === "probe").map((event) => event.runId));
       assert.equal(runIds.size, 1, "one background probe run has one correlation ID");
       const outcomes = events.filter((event) => event.module === "probe" && event.event === "model_result");
       assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === "background-credits-exhausted"
         && event.status === "error" && event.reason === "allowance_exhausted"), JSON.stringify(outcomes));
-      assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === "probe-background-slow-fail"
-        && event.status === "timeout" && event.reason === "timeout"), JSON.stringify(outcomes));
+      assert.ok(outcomes.some((event) => event.provider === "fake" && event.model === heldModel
+        && event.status === "timeout" && event.reason === "timeout"), "the held native probe must time out: " + JSON.stringify(outcomes));
       assert.ok(outcomes.some((event) => event.provider === "good" && event.model === "codex-like-temperature-rejects"
-        && event.status === "ok"), JSON.stringify(outcomes));
+        && event.status === "ok"), "the native parameter-compatible probe must succeed before its bounded deadline: " + JSON.stringify(outcomes));
       const codexOutcomes = outcomes.filter((event) => event.provider === "openai-codex");
       const catalog = events.find((event) => event.module === "probe" && event.event === "catalog");
       assert.ok(codexOutcomes.length > 0, "Pi's enabled native Codex models appear in the probe catalog");

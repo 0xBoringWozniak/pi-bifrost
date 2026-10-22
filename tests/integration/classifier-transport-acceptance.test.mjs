@@ -48,7 +48,7 @@ import bifrostExtension from "../../index.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /** Production index.ts baseline recorded for G05 fault-control restoration. */
-const INDEX_BASELINE_SHA256 = "3164a3dbc41a864c68bede2f9e7365c5ed32bbbcd91fc584a3d07446014e3f12";
+const INDEX_BASELINE_SHA256 = "14752568bd935068ca5874156bd324f45336dc29bd305523fe6e0ca5973c3303";
 
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));

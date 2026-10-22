@@ -8,7 +8,7 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { gateDirectory, gitTruth, installedToolVersions, matchNamedTestEvent, parseArgs, sourceFingerprint, summarizeCases } from "../scripts/acceptance/core.mjs";
-import { buildGateEvidenceCases, registerTerminationHandlers, runChild, supportingTestCase, terminateProcessGroup, verificationGateEnvironment, writeNodeTestEventsArtifact } from "../scripts/acceptance.mjs";
+import { buildGateEvidenceCases, manifestEvidenceGate, registerTerminationHandlers, runChild, supportingTestCase, terminateProcessGroup, verificationGateEnvironment, writeNodeTestEventsArtifact } from "../scripts/acceptance.mjs";
 
 const temporary = [];
 after(() => temporary.forEach((path) => rmSync(path, { recursive: true, force: true })));
@@ -604,10 +604,20 @@ describe("acceptance runner boundary", () => {
     }
   });
 
-  it("merged-push checkout runs the actual workflow caller with event.before", { timeout: 240_000 }, (t) => {
+  // Hosted runner performance varies widely between moments (the same green
+  // caller run measured 58s, 92s, and over 110s across consecutive CI runs).
+  // Phase caps are ceilings, so they carry ~2.5x headroom over the slowest
+  // observed run instead of tracking the fast-runner case; the deadline stays
+  // well above a slow but healthy proof and below the outer test timeout.
+  const CALLER_PHASE_BUDGET_MS = 300_000;
+  const CALLER_PROOF_DEADLINE_MS = 660_000;
+  async function exerciseWorkflowCaller({ t, topology }) {
     const root = process.cwd();
     const directory = mkdtempSync(join(tmpdir(), "bifrost-merged-push-caller-"));
-    temporary.push(directory);
+    let completed = false;
+    let cleanupVerified = true;
+    const deadline = Date.now() + CALLER_PROOF_DEADLINE_MS;
+    try {
     const checkout = join(directory, "checkout");
     execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", root, checkout]);
     const git = (...args) => execFileSync("git", args, { cwd: checkout, encoding: "utf8" }).trim();
@@ -620,13 +630,19 @@ describe("acceptance runner boundary", () => {
     symlinkSync(realpathSync(join(root, "node_modules")), join(checkout, "node_modules"), "dir");
     const predecessor = JSON.parse(readFileSync(join(checkout, "change-evidence.json"), "utf8")).base;
     git("add", "--", "scripts/merge-controller.mjs", "scripts/acceptance.mjs", "scripts/acceptance/core.mjs", "tests/integration/fake-provider-ownership.test.mjs", "tests/merge-controller.test.mjs", "tests/acceptance-runner.test.mjs", "change-evidence.json");
-    const merged = execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", git("write-tree"), "-p", predecessor, "-p", head], {
+    const merged = execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", git("write-tree"), "-p", predecessor, ...(topology === "multi" ? ["-p", head] : [])], {
       cwd: checkout, input: "synthetic merged push\n", encoding: "utf8",
     }).trim();
     git("checkout", "--quiet", "--detach", merged);
     git("update-ref", "refs/remotes/origin/v2", merged);
     assert.equal(git("merge-base", "origin/v2", "HEAD"), merged);
     assert.notEqual(merged, predecessor, "the current delivery tip is not the historic push predecessor");
+    const ancestry = git("rev-list", "--ancestry-path", `${predecessor}..${merged}`).split("\n");
+    if (topology === "multi") {
+      assert.ok(head !== predecessor && ancestry.includes(head), "the owned merged-push fixture must exercise a real intermediate commit");
+    } else {
+      assert.deepEqual(ancestry, [merged], "the owned single-commit fixture must not contain an intermediate commit");
+    }
     const eventPath = join(directory, "push.json");
     writeFileSync(eventPath, JSON.stringify({ before: predecessor, after: merged, ref: "refs/heads/v2" }));
     const env = { ...process.env, GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath };
@@ -636,15 +652,28 @@ describe("acceptance runner boundary", () => {
       'import { spawnSync } from "node:child_process";',
       `import { verificationGateEnvironment } from ${JSON.stringify(pathToFileURL(join(checkout, "scripts/acceptance/core.mjs")).href)};`,
       `const { env } = verificationGateEnvironment({ root: ${JSON.stringify(checkout)}, artifactDir: ${JSON.stringify(join(directory, "gate-artifacts"))}, script: "test" });`,
-      'const result = spawnSync(process.execPath, ["--test", "--test-name-pattern=workflow acceptance CLI records actual-predecessor change evidence with bounded gates", "tests/acceptance-runner.test.mjs"], { env, stdio: "inherit", timeout: 110_000 });',
+      'const result = spawnSync(process.execPath, ["--test", "--test-name-pattern=workflow acceptance CLI records actual-predecessor change evidence with bounded gates", "tests/acceptance-runner.test.mjs"], { env, stdio: "inherit", timeout: ' + JSON.stringify(CALLER_PHASE_BUDGET_MS) + ' });',
       'process.exit(result.status ?? 1);',
     ].join("\n"));
     // The submitted gate environment, not a direct synthetic child environment,
     // must carry the push payload into the real unit caller.
-    const runCallerTest = () => spawnSync(process.execPath, [launcher], {
-      cwd: checkout, env, encoding: "utf8", timeout: 115_000,
-    });
-    const result = runCallerTest();
+    const runCallerTest = async () => {
+      try {
+        const remainingMs = deadline - Date.now();
+        assert.ok(remainingMs > 0, "actual caller proof must stay inside its overall deadline");
+        const result = await runChild(process.execPath, [launcher], {
+          cwd: checkout, env, timeoutMs: Math.min(CALLER_PHASE_BUDGET_MS + 5_000, remainingMs),
+        });
+        cleanupVerified = cleanupVerified && result.processCleanupFailed === false;
+        assert.equal(result.processCleanupFailed, false, "actual caller owned cleanup must be proven before source-copy reclaim");
+        assert.ok([0, 1].includes(result.status), "timeout or signal is not valid caller fault evidence");
+        return result;
+      } catch (error) {
+        cleanupVerified = false;
+        throw error;
+      }
+    };
+    const result = await runCallerTest();
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /workflow acceptance CLI records actual-predecessor change evidence with bounded gates/);
     assert.match(result.stdout, /pass 1/);
@@ -654,11 +683,23 @@ describe("acceptance runner boundary", () => {
     const contextKeys = ', "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH"';
     assert.equal(coreSource.split(contextKeys).length, 2);
     writeFileSync(corePath, coreSource.replace(contextKeys, ""));
-    const contextRed = runCallerTest();
+    const contextRed = await runCallerTest();
     assert.notEqual(contextRed.status, 0, contextRed.stdout + contextRed.stderr);
     assert.match(contextRed.stdout, /the declaration base must be the actual merge predecessor/);
     writeFileSync(corePath, coreSource);
     assert.equal(readFileSync(corePath, "utf8"), coreSource);
+
+    const acceptancePath = join(checkout, "scripts/acceptance.mjs");
+    const acceptanceSource = readFileSync(acceptancePath, "utf8");
+    const declarationSelection = '  return { paths: [...paths], pattern: patterns.join("|") };';
+    assert.equal(acceptanceSource.split(declarationSelection).length, 2);
+    writeFileSync(acceptancePath, acceptanceSource.replace(declarationSelection,
+      '  return NODE_TEST_GATES.get("test:manifest-evidence");'));
+    const declarationRed = await runCallerTest();
+    assert.notEqual(declarationRed.status, 0, declarationRed.stdout + declarationRed.stderr);
+    assert.match(declarationRed.stdout, /boundaryTest did not complete uniquely and successfully/);
+    writeFileSync(acceptancePath, acceptanceSource);
+    assert.equal(readFileSync(acceptancePath, "utf8"), acceptanceSource);
 
     const testPath = join(checkout, "tests/acceptance-runner.test.mjs");
     const source = readFileSync(testPath, "utf8");
@@ -667,19 +708,75 @@ describe("acceptance runner boundary", () => {
     const mutant = source.replace(anchor, '? git("merge-base", "origin/v2", "HEAD")');
     writeFileSync(testPath, mutant);
     assert.equal(readFileSync(testPath, "utf8"), mutant);
-    const red = runCallerTest();
+    const red = await runCallerTest();
     assert.notEqual(red.status, 0, red.stdout + red.stderr);
     assert.match(red.stdout, /the declaration base must be the actual merge predecessor/);
     writeFileSync(testPath, source);
     assert.equal(readFileSync(testPath, "utf8"), source);
-    const restored = runCallerTest();
+    const restored = await runCallerTest();
     assert.equal(restored.status, 0, restored.stdout + restored.stderr);
     assert.match(restored.stdout, /pass 1/);
     assert.equal(readFileSync(join(root, "tests/acceptance-runner.test.mjs"), "utf8"), source);
-    t.diagnostic(JSON.stringify({ predecessor, merged, green: result.status, contextRed: contextRed.status, red: red.status, restored: restored.status }));
+    t.diagnostic(JSON.stringify({ topology, predecessor, merged, green: result.status, contextRed: contextRed.status, declarationRed: declarationRed.status, red: red.status, restored: restored.status }));
+    completed = true;
+    } finally {
+      if (completed && cleanupVerified) rmSync(directory, { recursive: true, force: true });
+      else process.stderr.write(`Retained actual caller source copy: ${directory}\n`);
+    }
+  }
+
+  it("merged-push checkout runs the actual workflow caller with event.before", { timeout: 720_000 }, (t) =>
+    exerciseWorkflowCaller({ t, topology: "multi" }));
+
+  it("single-commit checkout runs the actual workflow caller without inventing an intermediate", { timeout: 720_000 }, (t) =>
+    exerciseWorkflowCaller({ t, topology: "single" }));
+
+  it("selects exact bounded declaration witnesses and rejects unsafe test paths", () => {
+    const directory = mkdtempSync(join(tmpdir(), "bifrost-manifest-selection-"));
+    temporary.push(directory);
+    const witness = { file: "tests/fixture.test.mjs", name: "literal a+(b)" };
+    const contract = { boundaryTest: witness, invariant: witness, fault: witness };
+    const declaration = { contracts: [contract] };
+    writeFileSync(join(directory, "change-evidence.json"), JSON.stringify(declaration));
+    const selected = manifestEvidenceGate(directory);
+    assert.ok(selected.paths.includes(witness.file), "declared test file must enter the bounded gate");
+    assert.equal(new RegExp(selected.pattern).test(witness.name), true);
+    assert.equal(new RegExp(selected.pattern).test("literal aaab"), false, "test names must be escaped, not interpreted as regex");
+    for (const file of ["../escape.test.mjs", "tests/../escape.test.mjs", "tests//fixture.test.mjs", "--import=outside.mjs"]) {
+      declaration.contracts[0].fault = { ...witness, file };
+      writeFileSync(join(directory, "change-evidence.json"), JSON.stringify(declaration));
+      assert.throws(() => manifestEvidenceGate(directory), /witness is malformed/);
+    }
   });
 
-  it("workflow acceptance CLI records actual-predecessor change evidence with bounded gates", { timeout: 110_000 }, (t) => {
+  it("fault control: dropping declaration witnesses fails the named bounded selection assertion", async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), "bifrost-manifest-selection-fault-"));
+    temporary.push(directory);
+    cpSync(join(process.cwd(), "scripts"), join(directory, "scripts"), { recursive: true });
+    symlinkSync(realpathSync(join(process.cwd(), "node_modules")), join(directory, "node_modules"), "dir");
+    const target = join(directory, "scripts", "acceptance.mjs");
+    const source = readFileSync(target, "utf8");
+    const anchor = '  return { paths: [...paths], pattern: patterns.join("|") };';
+    assert.equal(source.split(anchor).length, 2);
+    const mutant = source.replace(anchor, '  return NODE_TEST_GATES.get("test:manifest-evidence");');
+    const witness = { file: "tests/fixture.test.mjs", name: "unique declared selection witness" };
+    writeFileSync(join(directory, "change-evidence.json"), JSON.stringify({ contracts: [{ boundaryTest: witness, invariant: witness, fault: witness }] }));
+    const assertSelected = async (phase) => {
+      const { manifestEvidenceGate: select } = await import(pathToFileURL(target).href + "?phase=" + phase);
+      assert.ok(select(directory).paths.includes(witness.file), "declared test file must enter the bounded gate");
+    };
+    await assertSelected("green");
+    try {
+      writeFileSync(target, mutant);
+      await assert.rejects(assertSelected("red"), (error) => error.name === "AssertionError" && error.message.includes("declared test file must enter the bounded gate"));
+    } finally { writeFileSync(target, source); }
+    assert.equal(readFileSync(target, "utf8"), source);
+    await assertSelected("restored");
+    assert.equal(readFileSync(join(process.cwd(), "scripts", "acceptance.mjs"), "utf8"), source);
+    t.diagnostic(JSON.stringify({ sourceSha256: sha256Text(source), faultSha256: sha256Text(mutant), restoredSha256: sha256Text(readFileSync(target, "utf8")), phases: ["GREEN", "named selection AssertionError RED", "restored GREEN"] }));
+  });
+
+  it("workflow acceptance CLI records actual-predecessor change evidence with bounded gates", { timeout: CALLER_PHASE_BUDGET_MS }, (t) => {
     const root = process.cwd();
     const manifest = JSON.parse(readFileSync(join(root, "change-evidence.json"), "utf8"));
     const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
@@ -763,9 +860,12 @@ describe("acceptance runner boundary", () => {
     };
     runCaller(predecessor, "passed", head);
     const intermediate = git("rev-list", "--ancestry-path", `${predecessor}..HEAD`).split("\n").find((sha) => sha !== head);
-    assert.ok(intermediate, "the caller proof requires a real intermediate commit");
-    assert.notEqual(intermediate, predecessor, "negative base must differ from event.before");
-    runCaller(intermediate, "failed", predecessor);
-    runCaller(predecessor, "passed", intermediate);
+    // A candidate can be a single commit. The owned merged-push fixture above
+    // guarantees a real intermediate witness; the direct single-commit caller
+    // instead proves that HEAD itself cannot replace the event predecessor.
+    const wrongBase = intermediate ?? head;
+    assert.notEqual(wrongBase, predecessor, "negative base must differ from event.before");
+    runCaller(wrongBase, "failed", predecessor);
+    runCaller(predecessor, "passed", wrongBase);
   });
 });

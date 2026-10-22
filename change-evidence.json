@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "base": "df2a906e285128f8ef7d0fb111e603ea2c6be4d1",
+  "base": "de28fcc3966a58499834a22ebdbfdd707181d792",
   "contracts": [
     {
       "id": "toolbox-architecture-boundaries",
@@ -8,7 +8,6 @@
       "files": [
         ".dependency-cruiser.cjs",
         "scripts/toolbox.mjs",
-        "scripts/acceptance.mjs",
         "tests/toolbox.test.mjs",
         "package.json",
         "package-lock.json"
