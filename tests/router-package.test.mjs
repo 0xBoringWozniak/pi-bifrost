@@ -18,13 +18,37 @@ function linkInstalledDependencies(source, destination) {
     if (entry.name.startsWith("@")) {
       mkdirSync(destinationPath, { recursive: true });
       for (const scopedPackage of readdirSync(sourcePath)) {
-        if (scopedPackage.startsWith(".")) continue;
+        if (scopedPackage.startsWith(".") || existsSync(join(destinationPath, scopedPackage))) continue;
         symlinkSync(join(sourcePath, scopedPackage), join(destinationPath, scopedPackage), "dir");
       }
-    } else {
+    } else if (!existsSync(destinationPath)) {
+      // The packed install already placed runtime dependencies; only the
+      // host-provided dev dependencies need linking here.
       symlinkSync(sourcePath, destinationPath, "dir");
     }
   }
+}
+
+/** Pack the project's runtime dependency closure from the local install so a
+ * consumer's `--offline` install never needs the registry. */
+function packRuntimeDependencies(cache) {
+  const rootPackage = packageJsonOf(process.cwd());
+  const tarballs = [];
+  const seen = new Set();
+  const queue = Object.keys(rootPackage.dependencies ?? {});
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const directory = join(process.cwd(), "node_modules", ...name.split("/"));
+    const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+    for (const dependency of Object.keys(manifest.dependencies ?? {})) queue.push(dependency);
+    const packed = JSON.parse(execFileSync("npm", [
+      "pack", "--json", "--cache", cache, "--pack-destination", cache, directory,
+    ], { encoding: "utf8", timeout: 60_000 }))[0];
+    tarballs.push(join(cache, packed.filename));
+  }
+  return tarballs;
 }
 
 /** Install the packed API into a temporary consumer that installs nothing else. */
@@ -34,7 +58,7 @@ function installPackedPackage(cache, consumer) {
   ], { cwd: process.cwd(), encoding: "utf8", timeout: 60_000 }))[0];
   execFileSync("npm", [
     "install", "--prefix", consumer, "--cache", cache, "--offline", "--ignore-scripts",
-    "--no-audit", "--no-fund", join(cache, packed.filename),
+    "--no-audit", "--no-fund", ...packRuntimeDependencies(cache), join(cache, packed.filename),
   ], { cwd: consumer, encoding: "utf8", stdio: "pipe", timeout: 60_000 });
   return packed;
 }

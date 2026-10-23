@@ -260,7 +260,7 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
   });
 
   it("fault control: removing the late-abort guard allows forbidden late dispatch", async () => {
-    const BASELINE_SHA256 = "14752568bd935068ca5874156bd324f45336dc29bd305523fe6e0ca5973c3303";
+    const BASELINE_SHA256 = "80d49f0f555fd4b0a8565ea1f44c7770085b04fffdea37df9688beec933f6a76";
     const sha256 = (text) => createHash("sha256").update(text).digest("hex");
     const original = readFileSync(join(ROOT, "index.ts"), "utf8");
     assert.equal(sha256(original), BASELINE_SHA256,
@@ -280,7 +280,7 @@ describe("activation cancellation acceptance", { timeout: 120_000 }, () => {
     const copyDir = join(scratch, "src");
     mkdirSync(copyDir, { recursive: true });
     for (const file of readdirSync(ROOT)) {
-      if (file.endsWith(".ts")) copyFileSync(join(ROOT, file), join(copyDir, file));
+      if (file.endsWith(".ts") || file === "schema.json") copyFileSync(join(ROOT, file), join(copyDir, file));
     }
     writeFileSync(join(copyDir, "index.ts"), mutantSource);
     symlinkSync(join(ROOT, "node_modules"), join(copyDir, "node_modules"));

@@ -5,7 +5,7 @@ import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, open
 import { dirname, join } from "node:path";
 import { loadRuntimeState, runtimeStatePath } from "./runtime-state.ts";
 import type { BifrostConfig, ClassifierConfig } from "./config.ts";
-import { BUNDLED_PUBLIC_INIT_DEFAULTS, DEFAULT_CLASSIFIER_CRITERIA, DEFAULT_RULES, MAX_CONFIG_SOURCE_BYTES, PROMPT_ONLY_FIELDS, classifierTotalTimeoutIssue, validateConfig, validateEconomicConfig, validateTierPolicyConfig } from "./config.ts";
+import { BUNDLED_PUBLIC_INIT_DEFAULTS, DEFAULT_CLASSIFIER_CRITERIA, DEFAULT_RULES, MAX_CONFIG_SOURCE_BYTES, PROMPT_ONLY_FIELDS, classifierTotalTimeoutIssue, schemaVersionAtLeast, validateConfig, validateEconomicConfig, validateTierPolicyConfig } from "./config.ts";
 import { loadConfigForReload, loadConfigWithSourceOverride } from "./config-load.ts";
 import type { CacheEntry } from "./cache.ts";
 import { cachePath, loadCache, saveCache, DEFAULT_MAX_ENTRIES, DEFAULT_THRESHOLD } from "./cache.ts";
@@ -160,7 +160,11 @@ function installReloadedConfig(
     log(ctx, `Bifrost config reload rejected: ${loaded.diagnostics.map(({ message }) => message).join(" ")}`, "error");
     return false;
   }
-  return installConfigIfTierPoliciesValid(state, loaded.config, ctx, true);
+  const installed = installConfigIfTierPoliciesValid(state, loaded.config, ctx, true);
+  if (installed && loaded.warnings.length > 0) {
+    log(ctx, `Bifrost config loaded with warnings: ${loaded.warnings.map(({ message }) => message).join(" ")}`, "warning");
+  }
+  return installed;
 }
 
 export function log(
@@ -567,6 +571,10 @@ function setRegistryProviderEvidence(
 
 function prospectiveConfigInstallable(source: ReconciliationConfigSource, bytes: Uint8Array, state: BifrostState): boolean {
   const loaded = loadConfigWithSourceOverride(process.cwd(), state.extensionDir, source, bytes);
+  // Schema findings the domain validators own are warnings, so they do not veto
+  // a write: an unrecognized field the user already carries must not stop init
+  // or a classifier change from being saved. Values that make the policy unsafe
+  // are caught by the semantic checks below.
   if (loaded.diagnostics.length > 0) return false;
   const errors = validateTierPolicyConfig(loaded.config).filter((issue) => issue.severity === "error");
   const validation = validateConfig(loaded.config);
@@ -930,7 +938,7 @@ async function handleInit(
   const targetLayer = source.source === "project" ? "project" : source.source === "workspace" ? "workspace" : "global";
   const targetLayerIndex = layerOrder.indexOf(targetLayer);
   const inheritedFields = new Set(configLayers.sourceFields
-    .filter(({ layer }) => layer !== "extension" && layerOrder.indexOf(layer) < targetLayerIndex)
+    .filter(({ layer }) => layer !== "extension" && layer !== "effective" && layerOrder.indexOf(layer) < targetLayerIndex)
     .flatMap(({ fields }) => fields));
   const extensionFields = configLayers.sourceFields.find(({ layer }) => layer === "extension")?.fields ?? [];
   for (const key of extensionFields) {
@@ -1922,7 +1930,7 @@ async function handleReliabilityCommand(args: string, ctx: ExtensionContext, sta
   const stateVersion = state.config.reliability?.stateVersion;
   const reliabilityConfigErrors = validateConfig(state.config).filter((issue) => issue.severity === "error" && issue.code?.startsWith("config.reliability_"));
   if (reliabilityConfigErrors.length > 0 || !state.reliabilityV2ConfigValid
-    || (stateVersion === 2 && state.config.schemaVersion !== 2)) {
+    || (stateVersion === 2 && !schemaVersionAtLeast(state.config.schemaVersion, 2))) {
     log(ctx, "Repair the reliability settings and validate the config before preparing the v2 sidecar.", "error");
     return;
   }

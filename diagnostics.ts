@@ -93,7 +93,8 @@ const REFERENCE_REPAIR = "Check this pool entry against Pi's current model regis
 
 const configIssueMap: Readonly<Record<string, { code: string; repair: string }>> = {
   "config.schema_version_unsupported": { code: "config.schema_version_unsupported", repair: "Set schemaVersion to a supported version." },
-  "config.tier_policies_requires_v2": { code: "config.tier_policies_requires_v2", repair: "Set schemaVersion to 2 or remove tierPolicies." },
+  "config.tier_policies_requires_v2": { code: "config.tier_policies_requires_v2", repair: "Set schemaVersion to 2 or later, or remove tierPolicies." },
+  "config.v3_reserved_description": { code: "config.v3_reserved_description", repair: "Rename the user-defined key, or keep schemaVersion 2 so it stays a user-defined key." },
   "config.tier_policies_invalid": { code: "config.tier_policies_invalid", repair: "Set tierPolicies to an object keyed by configured tier." },
   "config.tier_policy_invalid": { code: "config.tier_policy_invalid", repair: "Set each tier policy to an object with a fallbackTiers array." },
   "config.tier_policy_unknown_field": { code: "config.tier_policy_unknown_field", repair: "Remove unsupported fields from this tier policy." },
