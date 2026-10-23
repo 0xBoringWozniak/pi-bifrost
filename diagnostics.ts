@@ -1,6 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { validateConfig, type BifrostConfig } from "./config.ts";
+import { validateEffectiveConfigStructure } from "./config-schema.ts";
 import { findCandidates, modelKey } from "./routing.ts";
 import { getCircuitState, type ReliabilityConfig, type ReliabilityState } from "./reliability.ts";
 import { isVirtualModel } from "./virtual-model.ts";
@@ -196,9 +197,24 @@ function registryPoolDiagnostics(config: BifrostConfig, registry: DiagnosticRegi
   return diagnostics;
 }
 
+/** Structural findings for the loaded effective config. They are warnings
+ * here for the same reason they are warnings at load: an unknown field or an
+ * invalid value does not by itself make routing unsafe, and the semantic
+ * issues below decide the fail-closed cases. Users and agents checking a
+ * configuration must still see them, so they travel with the report and its
+ * JSON form. */
+function structuralDiagnostics(config: BifrostConfig): BifrostDiagnostic[] {
+  return validateEffectiveConfigStructure(config).map((issue) => ({
+    code: issue.code ?? "config.schema_invalid",
+    severity: "warning" as const,
+    repair: "Correct this path to match the shipped schema.json, then reload the configuration.",
+    ...(typeof issue.path === "string" && issue.path.length > 0 && issue.path.length <= 280 ? { path: issue.path } : {}),
+  }));
+}
+
 /** Validate only the active merged snapshot and synchronous registry reads. */
 export function validateDiagnostics(input: ValidateDiagnosticsInput): ValidateDiagnosticsReport {
-  const diagnostics = issueDiagnostics(input.config);
+  const diagnostics = [...issueDiagnostics(input.config), ...structuralDiagnostics(input.config)];
   if (!input.registry) {
     diagnostics.push({ code: "registry.unavailable", severity: "info", repair: "Registry reference checks are unavailable until Pi exposes its local registry snapshot." });
   } else {

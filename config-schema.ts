@@ -42,6 +42,14 @@ export const DYNAMIC_CONFIG_MAP_PATHS: readonly string[] = Object.freeze([
   "economics.sourceOrder",
 ]);
 
+/** One dynamically keyed map nests further user-keyed data below it:
+ * `economics.tierOverrides.<tier>` maps admission rule IDs, and a rule ID
+ * named "description" is legal in every schema version. Those inner keys are
+ * routing data, never metadata, so stripping must not touch them. */
+const NESTED_RULE_ID_MAP_PARENTS: readonly string[] = Object.freeze([
+  "economics.tierOverrides",
+]);
+
 const MAX_SCHEMA_ISSUES = 12;
 
 interface CompiledConfigSchema {
@@ -177,19 +185,24 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * Under schemaVersion 3, `description` inside dynamically keyed maps is
  * reserved metadata and is stripped. Under versions 1 and 2 those keys keep
  * their original user-defined meaning (for example a tier named
- * "description") and are preserved as routing data.
+ * "description") and are preserved as routing data. Keys one level below
+ * `economics.tierOverrides` are admission rule IDs in every version and are
+ * always preserved.
  */
 export function stripConfigMetadata(source: Record<string, unknown>): Record<string, unknown> {
   const version = typeof source.schemaVersion === "number" ? source.schemaVersion : 1;
-  const walk = (value: unknown, path: string): unknown => {
-    if (Array.isArray(value)) return value.map((item, index) => walk(item, `${path}[${index}]`));
+  const walk = (value: unknown, path: string, inRuleIdMap: boolean): unknown => {
+    if (Array.isArray(value)) return value.map((item, index) => walk(item, `${path}[${index}]`, inRuleIdMap));
     if (!isPlainRecord(value)) return value;
     const result: Record<string, unknown> = {};
+    // Descending into a tier of `economics.tierOverrides` lands in its
+    // rule-ID map; the tier itself is still a key of the reserved map.
+    const childrenAreRuleIds = inRuleIdMap || NESTED_RULE_ID_MAP_PARENTS.includes(path);
     for (const [key, entry] of Object.entries(value)) {
-      if (key === "description" && !(version < 3 && DYNAMIC_CONFIG_MAP_PATHS.includes(path))) continue;
-      result[key] = walk(entry, path ? `${path}.${key}` : key);
+      if (key === "description" && !inRuleIdMap && !(version < 3 && DYNAMIC_CONFIG_MAP_PATHS.includes(path))) continue;
+      result[key] = walk(entry, path ? `${path}.${key}` : key, childrenAreRuleIds);
     }
     return result;
   };
-  return walk(source, "") as Record<string, unknown>;
+  return walk(source, "", false) as Record<string, unknown>;
 }

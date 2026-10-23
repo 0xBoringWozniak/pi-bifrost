@@ -160,18 +160,23 @@ function readBoundedConfigText(path: string): { readonly text?: string; readonly
   }
 }
 
-/** Paths of `description` keys inside dynamically keyed maps of one source document. */
-function reservedDescriptionPaths(document: Record<string, unknown>): string[] {
-  const paths: string[] = [];
+/** `description` keys inside dynamically keyed maps of one source document,
+ * with the shape each one actually holds. Schema version 3 reserves those
+ * keys as string metadata, so a non-string value is a user-defined key the
+ * layer never opted into reserving. */
+function reservedDescriptionEntries(document: Record<string, unknown>): { readonly path: string; readonly isString: boolean }[] {
+  const entries: { readonly path: string; readonly isString: boolean }[] = [];
   for (const mapPath of DYNAMIC_CONFIG_MAP_PATHS) {
     let value: unknown = document;
     for (const segment of mapPath.split(".")) {
       if (!criterionObject(value)) { value = undefined; break; }
       value = value[segment];
     }
-    if (criterionObject(value) && Object.hasOwn(value, "description")) paths.push(`${mapPath}.description`);
+    if (criterionObject(value) && Object.hasOwn(value, "description")) {
+      entries.push({ path: `${mapPath}.description`, isString: typeof value.description === "string" });
+    }
   }
-  return paths;
+  return entries;
 }
 
 /** Parse and validate each layer before merging; cross-layer references are checked after composition. */
@@ -259,8 +264,18 @@ function loadConfigLayers(
       addWarning(layer, `${layer} config: ${issue.message}`);
     }
     const source = parsed as Record<string, unknown>;
+    const reserved = reservedDescriptionEntries(source);
+    // A version 3 layer that puts a non-string value on a reserved key cannot
+    // be metadata. Stripping it would delete a tier, rule, or scope before the
+    // semantic check could name it, so the layer stays unusable instead of
+    // routing with the key silently removed.
+    const nonStringReserved = reserved.filter(({ isString }) => !isString);
+    if (source.schemaVersion === 3 && nonStringReserved.length > 0) {
+      addDiagnostic(layer, `${layer} config defines ${nonStringReserved.map(({ path }) => path).join(", ")} as non-string values, which schemaVersion 3 reserves for inline metadata; rename the user-defined key or keep the version that treats it as one.`);
+      continue;
+    }
     const semantic = stripConfigMetadata(source);
-    reservedKeys.push({ layer, declaredVersion: source.schemaVersion, paths: reservedDescriptionPaths(source) });
+    reservedKeys.push({ layer, declaredVersion: source.schemaVersion, paths: reserved.map(({ path }) => path) });
     const sourceDiagnostics = sourcePolicyDiagnostics(semantic);
     if (sourceDiagnostics.length) {
       for (const message of sourceDiagnostics) addDiagnostic(layer, `${layer} config ${message}`);

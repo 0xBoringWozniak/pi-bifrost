@@ -201,6 +201,76 @@ describe("config schema contract", () => {
       .some((issue) => issue.code === "config.tier_policy_invalid" || issue.code === "config.v3_reserved_description"));
   });
 
+  it("rejects a non-string reserved description inside a version 3 layer instead of stripping it", () => {
+    // The schema reports the wrong type, but a warning alone would let the
+    // loader strip the key and keep routing with the tier silently removed.
+    assert.ok(validateConfigSourceStructure({ schemaVersion: 3, models: { description: ["fixture/x"] } }).length > 0);
+    withTree(({ cwd, extensionDir }) => {
+      writeJson(join(cwd, ".pi", "bifrost.json"), {
+        schemaVersion: 3,
+        default: "general",
+        models: { description: ["fixture/description-tier"], general: ["fixture/general"] },
+      });
+      const loaded = loadConfigForReload(cwd, extensionDir);
+      assert.ok(loaded.diagnostics.some(({ layer, message }) => layer === "project"
+        && message.includes("models.description")
+        && message.includes("schemaVersion 3 reserves")), JSON.stringify(loaded.diagnostics));
+      assert.equal(loaded.config.models?.description, undefined,
+        "the uninterpretable key must not be silently deleted from a routing config");
+    });
+  });
+
+  it("keeps an admission rule ID named description in every schema version", () => {
+    // economics.tierOverrides.<tier> is keyed by admission rule IDs; a rule
+    // named "description" is routing data, not metadata, in versions 1, 2, 3.
+    const rule = { reserveRatio: 0.9, unknown: "block" as const };
+    assert.deepEqual(
+      stripConfigMetadata({ schemaVersion: 2, economics: { tierOverrides: { restricted: { description: rule } } } }).economics,
+      { tierOverrides: { restricted: { description: rule } } },
+      "a v2 rule ID named description must survive stripping");
+    assert.deepEqual(
+      stripConfigMetadata({
+        schemaVersion: 3,
+        economics: { description: "Economic notes.", tierOverrides: { restricted: { description: rule } } },
+      }).economics,
+      { tierOverrides: { restricted: { description: rule } } },
+      "a v3 rule ID named description must survive stripping while the section note goes");
+
+    withTree(({ cwd, extensionDir }) => {
+      writeJson(join(cwd, ".pi", "bifrost.json"), {
+        schemaVersion: 2,
+        default: "general",
+        models: { general: ["fixture/general"] },
+        economics: {
+          mode: "policy",
+          scopes: { restricted: { kind: "model", model: "fixture/allowed" } },
+          sources: [],
+          admission: [{ id: "description", scopeRef: "restricted", windowId: "daily", reserveRatio: 0.9, unknown: "block" }],
+          tierOverrides: { general: { description: { reserveRatio: 1, unknown: "block" } } },
+        },
+      });
+      const loaded = loadConfigForReload(cwd, extensionDir);
+      assert.deepEqual(loaded.diagnostics, []);
+      const overrides = (loaded.config.economics as unknown as {
+        tierOverrides: Record<string, Record<string, { reserveRatio: number; unknown: string }>>;
+      }).tierOverrides;
+      assert.deepEqual(overrides,
+        { general: { description: { reserveRatio: 1, unknown: "block" } } },
+        "the rule ID named description must reach routing unchanged");
+    });
+  });
+
+  it("keeps the strategy enum enforced for every categoryStrategies key", () => {
+    // Free text is allowed only at the version 3 metadata key; every other
+    // key stays enum-checked so a strategy typo keeps producing a finding.
+    assert.ok(validateEffectiveConfigStructure({ schemaVersion: 3, categoryStrategies: { quick: "randomn" } })
+      .some((issue) => issue.code === "config.schema_enum" && issue.path === "categoryStrategies.quick"));
+    assert.ok(validateEffectiveConfigStructure({ schemaVersion: 2, categoryStrategies: { description: "randomn" } })
+      .some((issue) => issue.code === "config.schema_enum" && issue.path === "categoryStrategies.description"));
+    assert.deepEqual(validateConfigSourceStructure({ categoryStrategies: { description: "Per-tier strategies.", general: "first" } }), []);
+    assert.deepEqual(validateEffectiveConfigStructure({ schemaVersion: 3, categoryStrategies: { description: "Per-tier strategies.", general: "first" } }), []);
+  });
+
   it("rejects an ambiguous v3 upgrade with a precise per-layer diagnostic", () => {
     withTree(({ cwd, extensionDir }) => {
       // A v2-authored workspace layer defines a tier named description; a higher

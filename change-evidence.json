@@ -13,10 +13,11 @@
         "diagnostics.ts",
         "docs/guide/configuration.md",
         "schema.json",
-        "tests/config-schema.test.ts"
+        "tests/config-schema.test.ts",
+        "tests/diagnostics.test.ts"
       ],
       "boundary": "Every configuration source layer and the merged effective policy are structurally validated against the shipped schema.json on load, reload, boot, and prospective apply. Findings name the offending path, and only a finding that makes a source unusable rejects the layer.",
-      "assertions": "Unknown fields, invalid enum values, and wrong types produce config.schema_unsupported_field, config.schema_enum, and config.schema_type diagnostics at the exact path. A partial layer may defer schemaVersion conditionals that the effective configuration enforces. A schema copy that adds a field accepts what the installed schema still rejects, so acceptance follows schema.json instead of duplicated code.",
+      "assertions": "Unknown fields, invalid enum values, and wrong types produce config.schema_unsupported_field, config.schema_enum, and config.schema_type diagnostics at the exact path. A partial layer may defer schemaVersion conditionals that the effective configuration enforces. A schema copy that adds a field accepts what the installed schema still rejects, so acceptance follows schema.json instead of duplicated code. categoryStrategies keeps its strategy enum for every key, so a per-tier typo still produces a finding while the version 3 metadata key accepts free text. The offline validation report and its JSON form carry the same structural findings as warnings with the offending path.",
       "boundaryTest": {
         "file": "tests/config-schema.test.ts",
         "name": "rejects unsupported fields, invalid values, and wrong types in source layers"
@@ -40,7 +41,7 @@
         "tests/schema.test.ts"
       ],
       "boundary": "Inline description metadata is valid in fixed-shape sections under every supported schema version and inside dynamically keyed maps under schemaVersion 3. It is preserved in the authored file and stripped before routing.",
-      "assertions": "A loaded configuration contains no description key or text. Described and undescribed configurations load to identical routing policy. A version 2 tier named description keeps its pools. An ambiguous version 3 upgrade fails closed with a diagnostic naming models.description.",
+      "assertions": "A loaded configuration contains no description key or text. Described and undescribed configurations load to identical routing policy. A version 2 tier named description keeps its pools. An ambiguous version 3 upgrade fails closed with a diagnostic naming models.description. A version 3 layer that puts a non-string value on a reserved key is rejected instead of being stripped, so routing never continues with the key silently deleted. Admission rule IDs one level below economics.tierOverrides keep their meaning in every version and reach routing unchanged.",
       "boundaryTest": {
         "file": "tests/config-schema.test.ts",
         "name": "accepts inline descriptions in every supported section and strips them at the load boundary"

@@ -76,11 +76,12 @@
       "type": "object",
       "description": "Per-tier strategy overrides. Keys must match tier names in 'models'. If a tier is not listed here, 'strategy' is used. In schemaVersion 3 a \"description\" key here is inline metadata, not a tier.",
       "default": { "quick": "random", "general": "first", "frontier": "first" },
+      "properties": {
+        "description": { "$ref": "#/definitions/V3MetadataDescription" }
+      },
       "additionalProperties": {
-        "anyOf": [
-          { "type": "string", "enum": ["first", "cheapest", "cheapest_input", "cheapest_output", "largest_context", "random", "fastest"] },
-          { "$ref": "#/definitions/V3MetadataDescription" }
-        ]
+        "type": "string",
+        "enum": ["first", "cheapest", "cheapest_input", "cheapest_output", "largest_context", "random", "fastest"]
       }
     },
     "models": {
@@ -572,6 +573,7 @@
       "if": { "not": { "properties": { "schemaVersion": { "const": 3 } }, "required": ["schemaVersion"] } },
       "then": {
         "properties": {
+          "categoryStrategies": { "properties": { "description": { "enum": ["first", "cheapest", "cheapest_input", "cheapest_output", "largest_context", "random", "fastest"] } } },
           "tierPolicies": { "additionalProperties": { "not": { "type": "string" } } },
           "economics": { "properties": {
             "scopes": { "additionalProperties": { "not": { "type": "string" } } },
