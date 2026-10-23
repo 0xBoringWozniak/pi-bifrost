@@ -594,10 +594,8 @@ export default function bifrostExtension(pi: ExtensionAPI) {
     if (process.env.PI_SUBAGENT_CHILD === "1") {
       debug("input", "subagent", {
         source: "PI-subagent",
-        agent: process.env.PI_SUBAGENT_CHILD_AGENT,
         model: modelKey(ctx.model),
         thinkingLevel: ctx.thinkingLevel,
-        depth: process.env.PI_SUBAGENT_PARENT_DEPTH,
       });
       // Subagent children pin their own model per launch (parent routing +
       // subagents.modelScope). Rerouting one here silently overrides that
